@@ -1,0 +1,102 @@
+version: "3.9"
+
+services:
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB:       construction
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL:          postgresql+asyncpg://postgres:secret@postgres:5432/construction
+      REDIS_URL:             redis://redis:6379/0
+      CELERY_BROKER_URL:     redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL:          postgresql+asyncpg://postgres:secret@postgres:5432/construction
+      REDIS_URL:             redis://redis:6379/0
+      CELERY_BROKER_URL:     redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      - backend
+    volumes:
+      - ./backend:/app
+    command: celery -A app.tasks.celery_tasks.celery_app worker --loglevel=info --concurrency=4
+
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL:          postgresql+asyncpg://postgres:secret@postgres:5432/construction
+      REDIS_URL:             redis://redis:6379/0
+      CELERY_BROKER_URL:     redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - ./backend:/app
+    command: celery -A app.tasks.celery_tasks.celery_app beat --loglevel=info
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: npm run dev
+
+volumes:
+  pgdata:
+  redis_data:
