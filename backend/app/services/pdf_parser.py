@@ -80,9 +80,6 @@ _SKIP_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Коэффициент в шапке: одиночная строка вида "0,87" или "1,00"
-_COEFF_RE = re.compile(r'^(\d+[,.]\d+)$')
-
 _TOTAL_RE = re.compile(r'^ИТОГО', re.IGNORECASE)
 
 
@@ -110,7 +107,7 @@ class PdfEstimateParser:
                 text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
                 raw_lines.extend(text.split('\n'))
 
-        rows, coefficient = self._parse_lines(raw_lines)
+        rows = self._parse_lines(raw_lines)
         success = len(rows) > 0
 
         return rows, {
@@ -118,14 +115,12 @@ class PdfEstimateParser:
             "confidence":  0.9 if success else 0.0,
             "pages":       pages,
             "rows_found":  len(rows),
-            "coefficient": coefficient,
         }
 
-    def _parse_lines(self, raw_lines: list[str]) -> tuple[list[ParsedRow], Optional[float]]:
+    def _parse_lines(self, raw_lines: list[str]) -> list[ParsedRow]:
         rows: list[ParsedRow]  = []
         section: Optional[str] = None
         prev_fragment: Optional[str] = None  # начало перенесённого названия
-        coefficient: Optional[float] = None
         order = 0
         # Флаг: таблица уже началась (строка заголовка «№ Наименование...»)
         table_started = False
@@ -150,11 +145,7 @@ class PdfEstimateParser:
                 prev_fragment = None
                 continue
 
-            # Коэффициент — одиночная дробная строка до таблицы (напр. "0,87")
             if not table_started:
-                cm = _COEFF_RE.match(line)
-                if cm:
-                    coefficient = _f(cm.group(1))
                 continue
 
             # ── ПРИОРИТЕТ: если есть fragment, сначала пробуем хвост ─────────
@@ -212,4 +203,4 @@ class PdfEstimateParser:
             else:
                 prev_fragment = None
 
-        return rows, coefficient
+        return rows

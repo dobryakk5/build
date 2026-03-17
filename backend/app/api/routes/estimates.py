@@ -5,7 +5,8 @@ Fix 4: Асинхронный upload → 202 + job_id
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, UploadFile, File, Query
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,7 +14,7 @@ from app.api.deps         import require_action, get_db, get_current_user
 from app.core.permissions import Action
 from app.models           import Estimate, ProjectMember
 from app.schemas          import EstimateRow, EstimateSummary, UploadStartResponse, JobResponse
-from app.services.upload_service import start_upload_job
+from app.services.upload_service import start_upload_job, start_upload_job_with_mapping
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
 
@@ -24,7 +25,6 @@ async def upload_estimate(
     file:             UploadFile = File(...),
     start_date:       date       = Query(default_factory=date.today),
     workers:          int        = Query(default=3, ge=1, le=20),
-    background_tasks: BackgroundTasks,
     current_user      = Depends(get_current_user),
     member: ProjectMember = Depends(require_action(Action.EDIT)),
     db: AsyncSession  = Depends(get_db),
@@ -40,8 +40,45 @@ async def upload_estimate(
         user_id          = current_user.id,
         start_date       = start_date,
         workers          = workers,
-        background_tasks = background_tasks,
         db               = db,
+    )
+    return UploadStartResponse(job_id=job.id)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Подтверждение ручного маппинга колонок
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ConfirmMappingRequest(BaseModel):
+    tmp_path:    str
+    sheet:       str
+    col_mapping: dict[int, str]   # {col_0based: "work_name"|"unit"|...|"skip"}
+    start_date:  date
+    workers:     int = 3
+
+
+@router.post("/estimates/upload/confirm-mapping", response_model=UploadStartResponse, status_code=202)
+async def confirm_mapping(
+    project_id:   UUID,
+    body:         ConfirmMappingRequest,
+    current_user  = Depends(get_current_user),
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Принимает ручной маппинг колонок после того как авто-парсинг вернул 422.
+    Запускает фоновую обработку с явным маппингом и возвращает job_id.
+    """
+    job = await start_upload_job_with_mapping(
+        tmp_path    = body.tmp_path,
+        sheet       = body.sheet,
+        col_mapping = body.col_mapping,
+        project_id  = str(project_id),
+        user_id     = current_user.id,
+        start_date  = body.start_date,
+        workers     = body.workers,
+        db          = db,
     )
     return UploadStartResponse(job_id=job.id)
 

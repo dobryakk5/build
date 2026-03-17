@@ -10,6 +10,21 @@ export default function LoginPage() {
   const [error,    setError]    = useState("");
   const [loading,  setLoading]  = useState(false);
 
+  async function handleTestLogin() {
+    setError(""); setLoading(true);
+    try {
+      const data = await auth.login("test@example.com", "test123");
+      localStorage.setItem("access_token",  data.access_token);
+      localStorage.setItem("refresh_token", data.refresh_token);
+      localStorage.setItem("user",          JSON.stringify(data.user));
+      router.push("/projects");
+    } catch (err: any) {
+      setError("Тест: " + (err.message ?? "неизвестная ошибка"));
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(""); setLoading(true);
@@ -56,6 +71,13 @@ export default function LoginPage() {
             style={{padding:"10px",background:"var(--blue-dark)",color:"#fff",border:"none",borderRadius:5,fontSize:14,fontWeight:600,cursor:"pointer",opacity:loading?.6:1}}
           >
             {loading ? "Входим..." : "Войти"}
+          </button>
+
+          <button
+            type="button" onClick={handleTestLogin}
+            style={{padding:"10px",background:"transparent",color:"var(--muted)",border:"1px dashed var(--border2)",borderRadius:5,fontSize:13,fontWeight:500,cursor:"pointer",marginTop:2}}
+          >
+            🔩 Тест (без авторизации)
           </button>
         </form>
       </div>

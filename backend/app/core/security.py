@@ -16,10 +16,10 @@ def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
-def create_access_token(user_id: str) -> str:
+def create_access_token(user_id) -> str:
     return jwt.encode(
         {
-            "sub":  user_id,
+            "sub":  str(user_id),
             "exp":  datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
             "iat":  datetime.utcnow(),
             "type": "access",
@@ -29,10 +29,10 @@ def create_access_token(user_id: str) -> str:
     )
 
 
-def create_refresh_token(user_id: str) -> str:
+def create_refresh_token(user_id) -> str:
     return jwt.encode(
         {
-            "sub":  user_id,
+            "sub":  str(user_id),
             "exp":  datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
             "iat":  datetime.utcnow(),
             "type": "refresh",

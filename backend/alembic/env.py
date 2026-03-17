@@ -1,9 +1,15 @@
 import asyncio
+import os
 from logging.config import fileConfig
+from pathlib import Path
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
+from dotenv import load_dotenv
+
+# Грузим .env из корня backend/ (на уровень выше папки alembic/)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from app.models.base import Base
 # Импортируем все модели чтобы alembic их видел при autogenerate
@@ -12,6 +18,12 @@ from app.models import *  # noqa
 config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+# Перебиваем URL из alembic.ini значением из .env
+db_url = os.environ.get("DATABASE_URL")
+if not db_url:
+    raise RuntimeError("DATABASE_URL не задан — проверьте файл backend/.env")
+config.set_main_option("sqlalchemy.url", db_url)
 
 target_metadata = Base.metadata
 

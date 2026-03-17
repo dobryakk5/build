@@ -9,6 +9,9 @@
 Алгоритм выбора стратегии:
   DetectorEngine сначала сканирует файл и выбирает стратегию,
   затем соответствующий Parser разбирает данные.
+
+Если уверенность < 0.8 — поднимается NeedsMappingError с превью строк,
+чтобы фронт показал UI ручного маппинга колонок.
 """
 
 from __future__ import annotations
@@ -39,6 +42,23 @@ class ParsedRow:
     row_order: int = 0
     raw_data: dict = field(default_factory=dict)
     source_strategy: str = "unknown"   # для отладки: "row" | "column"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ОШИБКА: нужен ручной маппинг колонок
+# ─────────────────────────────────────────────────────────────────────────────
+
+class NeedsMappingError(Exception):
+    """
+    Поднимается когда парсер не смог уверенно определить колонки.
+    Содержит превью данных, достаточное для показа UI маппинга клиенту.
+    """
+    def __init__(self, filename: str, sheet: str, preview_rows: list[list], col_count: int):
+        self.filename     = filename
+        self.sheet        = sheet
+        self.preview_rows = preview_rows   # первые N строк сырых данных (без пустых)
+        self.col_count    = col_count      # количество колонок
+        super().__init__(f"Не удалось автоматически определить колонки в файле «{filename}»")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -473,8 +493,6 @@ class BlockOrientedParser:
         return results
 
 
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # СТРАТЕГИЯ: ШАБЛОННЫЙ ЛИСТ (Смета / Estimate sheet)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -600,20 +618,99 @@ class TemplateSheetStrategy:
 
         return result
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПАРСИНГ С РУЧНЫМ МАППИНГОМ КОЛОНОК
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Ключи маппинга, которые ожидаем от фронта
+MAPPING_FIELDS = ("work_name", "unit", "quantity", "unit_price", "total_price")
+
+
+def parse_with_mapping(
+    file_path: str | Path,
+    col_mapping: dict[int, str],   # {col_index_0based: field_key | "skip"}
+    sheet: Optional[str] = None,
+    preview_rows: int = 3,
+) -> list[ParsedRow]:
+    """
+    Парсит Excel по заданному маппингу колонок.
+    col_mapping пример: {0: "work_name", 1: "unit", 2: "quantity", 3: "unit_price", 4: "total_price"}
+    Колонки с "skip" игнорируются.
+    """
+    file_path = Path(file_path)
+    wb = openpyxl.load_workbook(file_path, data_only=True)
+    ws = wb[sheet] if sheet else wb.active
+
+    results: list[ParsedRow] = []
+    order = 0
+
+    # Определяем, с какой строки начинаются данные:
+    # пропускаем строки где в «work_name» колонке стоит что-то похожее на заголовок
+    work_col = next((c for c, f in col_mapping.items() if f == "work_name"), None)
+
+    start_row = 1
+    if work_col is not None:
+        for row_idx in range(1, min(10, ws.max_row + 1)):
+            val = ws.cell(row_idx, work_col + 1).value  # openpyxl 1-based
+            if val and match_any_field(str(val)):
+                start_row = row_idx + 1
+                break
+
+    for row_idx in range(start_row, ws.max_row + 1):
+        row_data: dict[str, any] = {}
+        for col_0, field_key in col_mapping.items():
+            if field_key == "skip":
+                continue
+            row_data[field_key] = ws.cell(row_idx, col_0 + 1).value  # openpyxl 1-based
+
+        # Пропускаем пустые строки
+        if not any(v for v in row_data.values() if v is not None):
+            continue
+
+        work_name = row_data.get("work_name")
+        if not work_name:
+            continue
+
+        results.append(ParsedRow(
+            work_name   = str(work_name).strip(),
+            unit        = _to_str(row_data.get("unit")),
+            quantity    = _to_float(row_data.get("quantity")),
+            unit_price  = _to_float(row_data.get("unit_price")),
+            total_price = _to_float(row_data.get("total_price")),
+            row_order   = order,
+            raw_data    = {k: str(v) for k, v in row_data.items() if v is not None},
+            source_strategy = "manual_mapping",
+        ))
+        order += 1
+
+    return results
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ГЛАВНЫЙ ПАРСЕР — выбирает стратегию автоматически
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Порог уверенности: ниже него → просим пользователя сделать маппинг вручную
+CONFIDENCE_THRESHOLD = 0.8
+# Количество строк превью для UI маппинга
+PREVIEW_ROWS_COUNT = 3
+
+
 class ExcelEstimateParser:
     """
-    Использование:
+    Использование (авто):
         parser = ExcelEstimateParser()
         rows, meta = parser.parse("smeta.xlsx")
+        # Может поднять NeedsMappingError — тогда показываем UI маппинга
+
+    Использование (после ручного маппинга):
+        rows = parser.parse_mapped("smeta.xlsx", col_mapping={0: "work_name", ...})
 
     meta содержит:
         {
-            "strategy": "row" | "column" | "block",
-            "sheet": "Sheet1",
+            "strategy":   "row" | "column" | "block" | "smeta_template",
+            "sheet":      "Sheet1",
             "confidence": 0.95,
             "rows_found": 47,
         }
@@ -629,7 +726,6 @@ class ExcelEstimateParser:
         file_path = Path(file_path)
 
         # ── Быстрая проверка: есть ли лист типа «Смета»? ──────────────────
-        # Используем read_only чтобы не грузить merged cells (max_col=16376)
         wb_ro = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
         smeta_sheet = next(
             (s for s in wb_ro.sheetnames if _SMETA_SHEET_RE.search(s)), None
@@ -637,7 +733,6 @@ class ExcelEstimateParser:
         wb_ro.close()
 
         if smeta_sheet:
-            # Открываем только нужный лист, ограничиваем колонки
             wb_ro = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
             ws = wb_ro[smeta_sheet]
             strategy = TemplateSheetStrategy()
@@ -654,7 +749,7 @@ class ExcelEstimateParser:
         # ── Стандартный путь для остальных форматов ───────────────────────
         wb = openpyxl.load_workbook(file_path, data_only=True)
         best_rows: list[ParsedRow] = []
-        best_meta = {"strategy": "none", "confidence": 0.0}
+        best_meta = {"strategy": "none", "sheet": "", "confidence": 0.0}
 
         for sheet_name in wb.sheetnames:
             ws = wb[sheet_name]
@@ -669,13 +764,25 @@ class ExcelEstimateParser:
                         if rows:
                             best_rows = rows
                             best_meta = {
-                                "strategy": strategy.name,
-                                "sheet": sheet_name,
+                                "strategy":   strategy.name,
+                                "sheet":      sheet_name,
                                 "confidence": confidence,
                                 "rows_found": len(rows),
                             }
                     except Exception:
                         continue
+
+        # ── Уверенность низкая — просим ручной маппинг ────────────────────
+        if best_meta["confidence"] < CONFIDENCE_THRESHOLD:
+            sheet_name = best_meta.get("sheet") or wb.sheetnames[0]
+            ws = wb[sheet_name]
+            preview = self._get_preview_rows(ws, n=PREVIEW_ROWS_COUNT)
+            raise NeedsMappingError(
+                filename     = file_path.name,
+                sheet        = sheet_name,
+                preview_rows = preview,
+                col_count    = len(preview[0]) if preview else 0,
+            )
 
         if not best_rows:
             raise ValueError(
@@ -685,6 +792,43 @@ class ExcelEstimateParser:
             )
 
         return best_rows, best_meta
+
+    def parse_mapped(
+        self,
+        file_path: str | Path,
+        col_mapping: dict[int, str],
+        sheet: Optional[str] = None,
+    ) -> tuple[list[ParsedRow], dict]:
+        """Парсит файл с явным маппингом колонок (после ручного назначения)."""
+        rows = parse_with_mapping(file_path, col_mapping, sheet=sheet)
+        if not rows:
+            raise ValueError("После применения маппинга не найдено ни одной строки.")
+        return rows, {
+            "strategy":   "manual_mapping",
+            "sheet":      sheet or "auto",
+            "confidence": 1.0,
+            "rows_found": len(rows),
+        }
+
+    def _get_preview_rows(self, ws: Worksheet, n: int = 3) -> list[list]:
+        """
+        Возвращает первые n непустых строк данных из листа.
+        Нормализует значения к строкам для удобной сериализации.
+        """
+        results = []
+        for row in ws.iter_rows(values_only=True):
+            cells = [str(v).strip() if v is not None else "" for v in row]
+            # Пропускаем полностью пустые строки
+            if not any(c for c in cells):
+                continue
+            # Пропускаем строки-заголовки (где много совпадений с алиасами)
+            hits = sum(1 for c in cells if c and match_any_field(c))
+            if hits >= 2:
+                continue
+            results.append(cells)
+            if len(results) >= n:
+                break
+        return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────

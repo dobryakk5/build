@@ -6,7 +6,9 @@
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB, TIMESTAMPTZ
+from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import TIMESTAMP
+TIMESTAMPTZ = TIMESTAMP(timezone=True)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ПОРЯДОК СОЗДАНИЯ (важен из-за FK):

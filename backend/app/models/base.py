@@ -1,7 +1,8 @@
 from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy.dialects.postgresql import TIMESTAMPTZ
+from sqlalchemy import TIMESTAMP
+TIMESTAMPTZ = TIMESTAMP(timezone=True)
 
 
 class Base(DeclarativeBase):

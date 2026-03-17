@@ -117,12 +117,22 @@ function getDepth(tasks,id,d=0){const t=tasks.find(x=>x.id===id);if(!t?.pid)retu
 
 function getVisibleRows(tasks,collapsed){
   const rows=[];
-  for(const t of tasks){
-    let pid=t.pid,hide=false;
-    while(pid){if(collapsed.has(pid)){hide=true;break;}pid=tasks.find(x=>x.id===pid)?.pid??null;}
-    if(hide)continue;
-    rows.push({...t,depth:getDepth(tasks,t.id),hasKids:tasks.some(x=>x.pid===t.id),isOpen:!collapsed.has(t.id)});
-  }
+  // Build children map for fast lookup
+  const childMap={};
+  tasks.forEach(t=>{
+    const p=t.pid??'__root__';
+    if(!childMap[p]) childMap[p]=[];
+    childMap[p].push(t);
+  });
+  // Depth-first traversal — children always appear right after parent
+  const visit=(id,depth)=>{
+    const t=tasks.find(x=>x.id===id);
+    if(!t) return;
+    const kids=childMap[id]||[];
+    rows.push({...t,depth,hasKids:kids.length>0,isOpen:!collapsed.has(id)});
+    if(!collapsed.has(id)) kids.forEach(k=>visit(k.id,depth+1));
+  };
+  (childMap['__root__']||[]).forEach(t=>visit(t.id,0));
   return rows;
 }
 
@@ -133,14 +143,15 @@ function getAllDescendants(tasks,id){
 }
 
 // ─── ROLES ───────────────────────────────────────────────────────────────────
-const ROLES = {
+type RoleKey = 'owner'|'pm'|'foreman'|'supplier'|'viewer';
+const ROLES: Record<RoleKey,{label:string;color:string;can:string[]}> = {
   owner:    { label:'Владелец',           color:'#7c3aed', can: ['view','edit','delete','comment','manage_users','manage_projects'] },
   pm:       { label:'Рук. проекта',       color:'#0284c7', can: ['view','edit','comment','manage_projects'] },
   foreman:  { label:'Прораб',             color:'#d97706', can: ['view','edit_progress','comment'] },
   supplier: { label:'Снабженец',          color:'#059669', can: ['view','comment'] },
   viewer:   { label:'Наблюдатель',        color:'#64748b', can: ['view'] },
 };
-const can = (role, action) => ROLES[role]?.can.includes(action) ?? false;
+const can = (role: RoleKey, action: string) => ROLES[role]?.can.includes(action) ?? false;
 
 // ─── MOCK COMMENTS ────────────────────────────────────────────────────────────
 // { taskId → [{id, author, role, text, ts}] }
@@ -198,7 +209,7 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 
 /* left */
 .left{display:flex;flex-direction:column;background:var(--surface);border-right:2px solid var(--hdr);flex-shrink:0;}
-.thead{background:var(--hdr2);display:flex;align-items:stretch;border-bottom:1px solid var(--hdr3);flex-shrink:0;height:52px;}
+.thead{background:var(--hdr2);display:flex;align-items:stretch;border-bottom:1px solid var(--hdr3);flex-shrink:0;height:52px;padding-right:8px;}
 .th{display:flex;align-items:center;padding:0 7px;font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono);border-right:1px solid var(--hdr3);white-space:nowrap;flex-shrink:0;}
 .th.g{flex:1;}
 .tbody{flex:1;overflow-y:scroll;overflow-x:hidden;}
@@ -254,10 +265,10 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .tl{position:absolute;top:0;bottom:0;width:1px;background:var(--today);z-index:20;pointer-events:none;}
 .tlb{position:absolute;top:2px;transform:translateX(-50%);background:var(--today);color:#fff;font-size:9px;font-family:var(--mono);padding:2px 4px;border-radius:2px;white-space:nowrap;z-index:21;}
 .bw{position:absolute;top:50%;transform:translateY(-50%);}
-.bar{border-radius:3px;overflow:hidden;position:relative;display:flex;align-items:center;box-shadow:0 1px 2px rgba(0,0,0,.15);cursor:pointer;}
-.bar:hover{box-shadow:0 2px 6px rgba(0,0,0,.25);}
+.bar{border-radius:3px;overflow:hidden;position:relative;display:flex;align-items:center;cursor:pointer;background:#fff;}
+.bar:hover{box-shadow:0 2px 6px rgba(0,0,0,.18);}
 .bar.par{border-radius:2px;}
-.bp{position:absolute;left:0;top:0;bottom:0;background:rgba(255,255,255,.28);border-radius:3px 0 0 3px;}
+.bp{position:absolute;left:0;top:0;bottom:0;border-radius:3px 0 0 3px;}
 .bl{position:relative;padding:0 6px;font-size:10px;color:rgba(255,255,255,.9);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--sans);font-weight:500;z-index:1;}
 .darr{position:absolute;top:0;left:0;pointer-events:none;z-index:15;overflow:visible;}
 
@@ -370,7 +381,7 @@ export default function App() {
     depends_on: t.depends_on ?? "",   // already comma-string from API
   });
 
-  const [tasks,    setTasks]    = useState(INIT_TASKS);
+  const [tasks,    setTasks]    = useState([]);
   const [apiLoaded, setApiLoaded] = useState(false);
   const [coll,     setColl]     = useState(new Set());
   const [sel,      setSel]      = useState('1');
@@ -380,7 +391,7 @@ export default function App() {
   const [pname,    setPname]    = useState('Коттедж Петровых — ул. Солнечная, 5');
   const [editP,    setEditP]    = useState(false);
   // roles
-  const [role,     setRole]     = useState('pm');
+  const [role,     setRole]     = useState<RoleKey>('pm');
   // task detail panel
   const [panelId,  setPanelId]  = useState(null);
   // comments: { taskId: [{id,author,role,text,ts}] }
@@ -398,13 +409,25 @@ export default function App() {
   // Load tasks from API
   useEffect(() => {
     if (!pid) return;
+    // Reset state when project changes
+    setTasks([]);
+    setColl(new Set());
+    setSel(null);
+    setApiLoaded(false);
     ganttApi.list(pid).then(data => {
       if (data?.tasks?.length) {
-        setTasks(resolveDates(data.tasks.map(apiToLocal)));
+        const loaded = resolveDates(data.tasks.map(apiToLocal));
+        setTasks(loaded);
         setApiLoaded(true);
         setSel(data.tasks[0]?.id ?? null);
+      } else {
+        setTasks([]);
+        setApiLoaded(true);
       }
-    }).catch(() => {}); // fallback to INIT_TASKS on error
+    }).catch(() => {
+      setTasks([]);
+      setApiLoaded(true);
+    });
   }, [pid]);
 
   const TODAY = '2026-03-13';
@@ -666,7 +689,15 @@ export default function App() {
         {/* SPLIT */}
         <div className="split">
 
-          {/* LEFT */}
+          {/* LOADING STATE */}
+        {!apiLoaded && (
+          <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',
+            justifyContent:'center',zIndex:10,background:'var(--surface)',opacity:.9}}>
+            <span style={{color:'var(--muted)',fontSize:13,fontFamily:'var(--mono)'}}>Загрузка задач...</span>
+          </div>
+        )}
+
+      {/* LEFT */}
           <div className="left" style={{width:leftW}}>
             <div className="thead" style={{width:leftW}}>
               <div className="th rn">#</div>
@@ -828,10 +859,19 @@ export default function App() {
                       style={{height:ROW_H}} onClick={()=>setSel(row.id)}>
                       <div className="bw" style={{left:bx}}>
                         <div className={`bar${isP?' par':''}`}
-                          style={{width:bw,height:bh,background:row.clr,opacity:isP?.72:.88}}
+                          style={{
+                            width:bw, height:bh,
+                            background:'#fff',
+                            border:`1.5px solid ${row.clr}`,
+                            opacity: isP ? .85 : 1,
+                          }}
                           title={`${row.name} · ${dispD(row.start)}–${dispD(addD(row.start,row.dur))} · ${row.dur}д · ${row.prog}%`}>
-                          {row.prog>0&&<div className="bp" style={{width:row.prog+'%'}}/>}
-                          {bw>44&&<div className="bl" style={{fontSize:isP?9:10}}>
+                          {/* color fill = progress % */}
+                          {row.prog>0&&<div className="bp" style={{width:row.prog+'%',background:row.clr,opacity:.82}}/>}
+                          {bw>44&&<div className="bl" style={{
+                            fontSize:isP?9:10,
+                            color: row.prog>55 ? 'rgba(255,255,255,.95)' : row.clr,
+                          }}>
                             {!isP&&row.prog>0?row.prog+'% · ':''}{bw>90?row.name:''}
                           </div>}
                         </div>
@@ -953,7 +993,7 @@ export default function App() {
                     ? <div className="no-comments">Комментариев пока нет</div>
                     : <div className="comments">
                         {tc.map(c=>{
-                          const rc = ROLES[c.role];
+                          const rc = ROLES[c.role as RoleKey];
                           const initials = c.author.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();
                           return(
                             <div key={c.id} className="comment">
