@@ -14,6 +14,29 @@ from .other        import (
     Escalation,
     Notification,
 )
+from .enir         import (
+    EnirCollection,
+    EnirSection,
+    EnirChapter,
+    EnirParagraph,
+    EnirWorkComposition,
+    EnirWorkOperation,
+    EnirCrewMember,
+    EnirNorm,
+    EnirNote,
+    EnirParagraphTechnicalCharacteristic,
+    EnirParagraphApplicationNote,
+    EnirParagraphRef,
+    EnirSourceWorkItem,
+    EnirSourceCrewItem,
+    EnirSourceNote,
+    EnirNormTable,
+    EnirNormColumn,
+    EnirNormRow,
+    EnirNormValue,
+    EnirTechnicalCoefficient,
+    EnirTechnicalCoefficientParagraph,
+)
 
 __all__ = [
     "Base",
@@ -24,4 +47,15 @@ __all__ = [
     "Comment", "TaskHistory", "Job",
     "DailyReport", "DailyReportItem",
     "Material", "Escalation", "Notification",
+    # ЕНИР
+    "EnirCollection", "EnirSection", "EnirChapter", "EnirParagraph",
+    "EnirWorkComposition", "EnirWorkOperation",
+    "EnirCrewMember", "EnirNorm", "EnirNote",
+    "EnirParagraphTechnicalCharacteristic",
+    "EnirParagraphApplicationNote",
+    "EnirParagraphRef",
+    "EnirSourceWorkItem", "EnirSourceCrewItem", "EnirSourceNote",
+    "EnirNormTable", "EnirNormColumn", "EnirNormRow", "EnirNormValue",
+    "EnirTechnicalCoefficient",
+    "EnirTechnicalCoefficientParagraph",
 ]

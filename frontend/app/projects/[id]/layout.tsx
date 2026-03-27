@@ -1,9 +1,10 @@
 "use client";
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import { useRouter, useParams, usePathname } from "next/navigation";
 import { notifications as notifApi } from "@/lib/api";
 
-export default function ProjectLayout({ children }: { children: React.ReactNode }) {
+export default function ProjectLayout({ children }: { children: ReactNode }) {
   const router   = useRouter();
   const { id }   = useParams<{ id: string }>();
   const pathname = usePathname();
@@ -27,6 +28,8 @@ export default function ProjectLayout({ children }: { children: React.ReactNode 
   const TABS = [
     { id: "gantt",    label: "📊 Ганта",   path: `/projects/${id}/gantt`    },
     { id: "estimate", label: "📋 Смета",   path: `/projects/${id}/estimate` },
+    { id: "enir",     label: "📖 ЕНИР",    path: `/projects/${id}/enir`     },
+    { id: "fer",      label: "🧾 ФЕР",     path: `/projects/${id}/fer`      },
     { id: "upload",   label: "⬆ Загрузка", path: `/projects/${id}/upload`   },
     { id: "reports",  label: "📝 Отчёты",  path: `/projects/${id}/reports`  },
   ];

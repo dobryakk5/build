@@ -1,0 +1,6 @@
+# ЕНиР E3 Scraper — зависимости
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=4.9.0          # faster BS4 parser (optional but recommended)
+pymupdf>=1.23.0      # PDF page rendering (optional, for table image crops)
+Pillow>=10.0.0       # image helpers

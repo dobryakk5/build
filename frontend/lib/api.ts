@@ -1,5 +1,22 @@
 // frontend/lib/api.ts
+import type {
+  EnirCollectionSummary,
+  EnirParagraphFull,
+  EnirParagraphShort,
+  FerBrowseResponse,
+  FerCollectionSummary,
+  FerTableDetail,
+  Project,
+  User,
+} from "./types";
+
 const BASE = "/api";
+
+type AuthPayload = {
+  access_token: string;
+  refresh_token: string;
+  user: User;
+};
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token =
@@ -46,10 +63,10 @@ async function tryRefresh(): Promise<boolean> {
 
 export const auth = {
   login:    (email: string, password: string) =>
-    request<any>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+    request<AuthPayload>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
   register: (body: any) =>
-    request<any>("/auth/register", { method: "POST", body: JSON.stringify(body) }),
-  me:       () => request<any>("/auth/me"),
+    request<AuthPayload>("/auth/register", { method: "POST", body: JSON.stringify(body) }),
+  me:       () => request<User>("/auth/me"),
   logout:   () => {
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
@@ -58,10 +75,10 @@ export const auth = {
 };
 
 export const projects = {
-  list:         ()                          => request<any[]>("/projects"),
-  get:          (id: string)               => request<any>(`/projects/${id}`),
-  create:       (body: any)                => request<any>("/projects", { method: "POST", body: JSON.stringify(body) }),
-  update:       (id: string, body: any)    => request<any>(`/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  list:         ()                          => request<Project[]>("/projects"),
+  get:          (id: string)               => request<Project>(`/projects/${id}`),
+  create:       (body: any)                => request<Project>("/projects", { method: "POST", body: JSON.stringify(body) }),
+  update:       (id: string, body: any)    => request<Project>(`/projects/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
   delete:       (id: string)               => request<void>(`/projects/${id}`, { method: "DELETE" }),
   listMembers:  (id: string)               => request<any[]>(`/projects/${id}/members`),
   addMember:    (id: string, body: any)    => request<any>(`/projects/${id}/members`, { method: "POST", body: JSON.stringify(body) }),
@@ -137,4 +154,49 @@ export const materials = {
     request<any>(`/projects/${pid}/materials/${mid}`, { method: "PATCH", body: JSON.stringify(body) }),
   delete: (pid: string, mid: string) =>
     request<void>(`/projects/${pid}/materials/${mid}`, { method: "DELETE" }),
+};
+
+// ── ЕНИР ──────────────────────────────────────────────────────────────────────
+export const enir = {
+  /** Список всех сборников (Е1, Е2, Е3 …) с числом параграфов */
+  collections: () =>
+    request<EnirCollectionSummary[]>("/enir"),
+
+  /** Параграфы одного сборника, с опциональным текстовым фильтром */
+  paragraphs: (collectionId: number, q?: string) =>
+    request<EnirParagraphShort[]>(
+      `/enir/${collectionId}/paragraphs${q ? `?q=${encodeURIComponent(q)}` : ""}`
+    ),
+
+  /** Полный параграф (нормы, состав работ, звено, примечания) */
+  paragraph: (paragraphId: number) =>
+    request<EnirParagraphFull>(`/enir/paragraph/${paragraphId}`),
+
+  /** Поиск по всем сборникам */
+  search: (q: string, collectionId?: number) =>
+    request<EnirParagraphShort[]>(
+      `/enir/search?q=${encodeURIComponent(q)}` +
+      (collectionId != null ? `&collection_id=${collectionId}` : "")
+    ),
+};
+
+export const fer = {
+  collections: () =>
+    request<FerCollectionSummary[]>("/fer/collections"),
+
+  browse: (params: { collectionId: number; sectionId?: number; subsectionId?: number }) => {
+    const search = new URLSearchParams({
+      collection_id: String(params.collectionId),
+    });
+    if (params.sectionId != null) {
+      search.set("section_id", String(params.sectionId));
+    }
+    if (params.subsectionId != null) {
+      search.set("subsection_id", String(params.subsectionId));
+    }
+    return request<FerBrowseResponse>(`/fer/browse?${search.toString()}`);
+  },
+
+  table: (tableId: number) =>
+    request<FerTableDetail>(`/fer/table/${tableId}`),
 };
