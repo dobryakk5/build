@@ -2,6 +2,7 @@ from .base         import Base, TimestampMixin, SoftDeleteMixin
 from .organization import Organization
 from .user         import User
 from .project      import Project, ProjectMember
+from .estimate_batch import EstimateBatch
 from .estimate     import Estimate
 from .gantt        import GanttTask, TaskDependency
 from .other        import (
@@ -42,6 +43,7 @@ __all__ = [
     "Base",
     "Organization", "User",
     "Project", "ProjectMember",
+    "EstimateBatch",
     "Estimate",
     "GanttTask", "TaskDependency",
     "Comment", "TaskHistory", "Job",

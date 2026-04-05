@@ -1,93 +1,289 @@
 "use client";
-import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+
+import { useCallback, useEffect, useState } from "react";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
+
 import { estimates } from "@/lib/api";
 import { fmtMoney } from "@/lib/dateUtils";
+import type { EstimateBatch, EstimateRow, EstimateSummary } from "@/lib/types";
+import { useJobPoller } from "@/lib/useJobPoller";
 
 export default function EstimatePage() {
-  const { id }     = useParams<{ id: string }>();
-  const [rows,     setRows]    = useState<any[]>([]);
-  const [summary,  setSummary] = useState<any>(null);
-  const [loading,  setLoading] = useState(true);
+  const { id } = useParams<{ id: string }>();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const batchFromUrl = searchParams.get("batch");
 
-  useEffect(() => {
-    Promise.all([estimates.list(id), estimates.summary(id)])
-      .then(([r, s]) => { setRows(r); setSummary(s); })
-      .finally(() => setLoading(false));
+  const [rows, setRows] = useState<EstimateRow[]>([]);
+  const [summary, setSummary] = useState<EstimateSummary | null>(null);
+  const [batches, setBatches] = useState<EstimateBatch[]>([]);
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(batchFromUrl);
+  const [loading, setLoading] = useState(true);
+  const [matchJobId, setMatchJobId] = useState<string | null>(null);
+  const [runningBatchId, setRunningBatchId] = useState<string | null>(null);
+
+  const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
+
+  const loadBatches = useCallback(async () => {
+    const data = await estimates.batches(id);
+    setBatches(data);
+    const latestBatch = data.length ? data[data.length - 1]?.id : null;
+    const nextBatch = batchFromUrl ?? latestBatch ?? null;
+    setActiveBatchId(nextBatch);
+  }, [batchFromUrl, id]);
+
+  const loadEstimateData = useCallback(async (batchId: string) => {
+    const [nextRows, nextSummary] = await Promise.all([
+      estimates.list(id, batchId),
+      estimates.summary(id, batchId),
+    ]);
+    setRows(nextRows);
+    setSummary(nextSummary);
   }, [id]);
 
-  if (loading) return <div style={{padding:24,color:"var(--muted)"}}>Загрузка сметы...</div>;
+  useEffect(() => {
+    loadBatches().catch(() => {
+      setBatches([]);
+      setActiveBatchId(batchFromUrl ?? null);
+      setLoading(false);
+    });
+  }, [batchFromUrl, loadBatches]);
 
-  if (!rows.length) return (
-    <div style={{padding:48,textAlign:"center",color:"var(--muted)"}}>
-      <div style={{fontSize:32,marginBottom:12}}>📋</div>
-      <div style={{fontSize:15,fontWeight:500}}>Смета ещё не загружена</div>
-      <div style={{fontSize:13,marginTop:6}}>Перейдите на вкладку «Загрузить смету»</div>
-    </div>
-  );
+  useEffect(() => {
+    if (!activeBatchId) {
+      setRows([]);
+      setSummary(null);
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    loadEstimateData(activeBatchId)
+      .finally(() => setLoading(false));
+  }, [activeBatchId, loadEstimateData]);
 
-  // Группируем по разделам
+  useEffect(() => {
+    if (matchJob?.status === "done" && activeBatchId) {
+      loadBatches().catch(() => {});
+      loadEstimateData(activeBatchId).catch(() => {});
+      setRunningBatchId(null);
+    }
+    if (matchJob?.status === "failed") {
+      setRunningBatchId(null);
+    }
+  }, [activeBatchId, loadBatches, loadEstimateData, matchJob?.status]);
+
+  const selectBatch = (batchId: string) => {
+    setActiveBatchId(batchId);
+    router.replace(`/projects/${id}/estimate?batch=${batchId}`);
+  };
+
+  const activeBatch = batches.find((batch) => batch.id === activeBatchId) ?? null;
+
+  const handleMatchFer = async (batchId: string) => {
+    try {
+      setRunningBatchId(batchId);
+      const res = await estimates.matchFer(id, batchId);
+      setMatchJobId(res.job_id);
+    } catch (e: any) {
+      setRunningBatchId(null);
+      alert(e.message);
+    }
+  };
+
+  if (loading) return <div style={{ padding: 24, color: "var(--muted)" }}>Загрузка сметы...</div>;
+
+  if (!batches.length) {
+    return (
+      <div style={{ padding: 48, textAlign: "center", color: "var(--muted)" }}>
+        <div style={{ fontSize: 32, marginBottom: 12 }}>📋</div>
+        <div style={{ fontSize: 15, fontWeight: 500 }}>Смета ещё не загружена</div>
+        <div style={{ fontSize: 13, marginTop: 6 }}>Перейдите на вкладку «Загрузка»</div>
+      </div>
+    );
+  }
+
+  if (!rows.length) {
+    return (
+      <div style={{ padding: 16 }}>
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          {batches.map((batch) => (
+            <button
+              key={batch.id}
+              onClick={() => selectBatch(batch.id)}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 999,
+                border: activeBatchId === batch.id ? "1px solid var(--blue)" : "1px solid var(--border)",
+                background: activeBatchId === batch.id ? "rgba(59,130,246,.08)" : "var(--surface)",
+                cursor: "pointer",
+                fontSize: 12,
+              }}
+            >
+              {batch.name}
+            </button>
+          ))}
+        </div>
+        <div style={{ padding: 48, textAlign: "center", color: "var(--muted)" }}>
+          В выбранном блоке нет строк сметы.
+        </div>
+      </div>
+    );
+  }
+
   const sections: Record<string, any[]> = {};
   for (const row of rows) {
     const sec = row.section ?? "Без раздела";
     (sections[sec] ??= []).push(row);
   }
 
+  const matchStatus = matchJob?.status;
+
   return (
-    <div style={{padding:16,height:"100%",overflow:"auto"}}>
-      {/* Summary */}
+    <div style={{ padding: 16, height: "100%", overflow: "auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {batches.map((batch) => (
+            <button
+              key={batch.id}
+              onClick={() => selectBatch(batch.id)}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 999,
+                border: activeBatchId === batch.id ? "1px solid var(--blue)" : "1px solid var(--border)",
+                background: activeBatchId === batch.id ? "rgba(59,130,246,.08)" : "var(--surface)",
+                cursor: "pointer",
+                fontSize: 12,
+                fontWeight: activeBatchId === batch.id ? 600 : 500,
+              }}
+            >
+              {batch.name}
+            </button>
+          ))}
+        </div>
+        {activeBatch && (
+          <button
+            onClick={() => handleMatchFer(activeBatch.id)}
+            disabled={matching}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "1px solid var(--border2)",
+              background: matching && runningBatchId === activeBatch.id ? "rgba(59,130,246,.08)" : "var(--surface)",
+              cursor: matching ? "default" : "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              opacity: matching ? 0.7 : 1,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {matching && runningBatchId === activeBatch.id ? "Сопоставляем с ФЕР..." : "Определить типы работ ФЕР"}
+          </button>
+        )}
+      </div>
+
+      {activeBatch && (
+        <div style={{ marginBottom: 12, fontSize: 12, color: "var(--muted)" }}>
+          ФЕР размечено: <b style={{ color: "var(--text)" }}>{activeBatch.fer_matched_count}</b> из{" "}
+          <b style={{ color: "var(--text)" }}>{activeBatch.estimates_count}</b>
+        </div>
+      )}
+
+      {matchStatus === "processing" && (
+        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.16)", fontSize: 12, color: "var(--blue-dark)" }}>
+          Сопоставление сметы с ФЕР выполняется.
+        </div>
+      )}
+
+      {matchStatus === "done" && matchJob?.result && (
+        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.18)", fontSize: 12, color: "#166534" }}>
+          Сопоставление завершено: найден тип ФЕР для {matchJob.result.matched_rows_count ?? 0} строк
+          {typeof matchJob.result.low_confidence_count === "number"
+            ? `, из них ${matchJob.result.low_confidence_count} с низкой уверенностью.`
+            : "."}
+        </div>
+      )}
+
+      {matchStatus === "failed" && (
+        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.18)", fontSize: 12, color: "var(--red)" }}>
+          Не удалось сопоставить смету с ФЕР: {matchJob?.result?.error ?? "неизвестная ошибка"}.
+        </div>
+      )}
+
       {summary && (
-        <div style={{display:"flex",gap:12,marginBottom:16,flexWrap:"wrap"}}>
-          <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:6,padding:"12px 16px"}}>
-            <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".06em",marginBottom:4}}>Итого по смете</div>
-            <div style={{fontSize:20,fontWeight:700,fontFamily:"var(--mono)",color:"var(--blue-dark)"}}>{fmtMoney(summary.total)} ₽</div>
+        <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "12px 16px" }}>
+            <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>Итого по блоку</div>
+            <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "var(--mono)", color: "var(--blue-dark)" }}>{fmtMoney(summary.total)} ₽</div>
           </div>
-          {summary.sections?.map((s: any) => (
-            <div key={s.name} style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:6,padding:"12px 16px"}}>
-              <div style={{fontSize:10,color:"var(--muted)",marginBottom:4}}>{s.name}</div>
-              <div style={{fontSize:14,fontWeight:600,fontFamily:"var(--mono)"}}>{fmtMoney(s.subtotal)} ₽</div>
-              <div style={{fontSize:10,color:"var(--muted)"}}>{s.items} позиций</div>
+          {summary.sections?.map((s) => (
+            <div key={s.name} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "12px 16px" }}>
+              <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 4 }}>{s.name}</div>
+              <div style={{ fontSize: 14, fontWeight: 600, fontFamily: "var(--mono)" }}>{fmtMoney(s.subtotal)} ₽</div>
+              <div style={{ fontSize: 10, color: "var(--muted)" }}>{s.items} позиций</div>
             </div>
           ))}
         </div>
       )}
 
-      {/* Table */}
-      <div style={{background:"var(--surface)",border:"1px solid var(--border)",borderRadius:6,overflow:"hidden"}}>
-        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
-            <tr style={{background:"#1e293b"}}>
-              {["Наименование работ","Ед.","Кол-во","Цена за ед., ₽","Сумма, ₽"].map(h => (
-                <th key={h} style={{
-                  padding:"9px 12px",textAlign:h==="Наименование работ"?"left":"right",
-                  fontSize:10,color:"#94a3b8",textTransform:"uppercase",letterSpacing:".06em",
-                  fontFamily:"var(--mono)",fontWeight:400,borderRight:"1px solid #334155",whiteSpace:"nowrap",
-                }}>{h}</th>
+            <tr style={{ background: "#1e293b" }}>
+              {["Наименование работ", "Тип работ ФЕР", "Ед.", "Кол-во", "Цена за ед., ₽", "Сумма, ₽"].map((h) => (
+                <th
+                  key={h}
+                  style={{
+                    padding: "9px 12px",
+                    textAlign: h === "Наименование работ" || h === "Тип работ ФЕР" ? "left" : "right",
+                    fontSize: 10,
+                    color: "#94a3b8",
+                    textTransform: "uppercase",
+                    letterSpacing: ".06em",
+                    fontFamily: "var(--mono)",
+                    fontWeight: 400,
+                    borderRight: "1px solid #334155",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {h}
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {Object.entries(sections).map(([section, sRows]) => [
               <tr key={`s-${section}`}>
-                <td colSpan={4} style={{padding:"8px 12px",fontWeight:600,fontSize:11,background:"rgba(59,130,246,.06)",color:"var(--blue-dark)",letterSpacing:".03em"}}>{section}</td>
-                <td style={{padding:"8px 12px",textAlign:"right",fontFamily:"var(--mono)",fontSize:11,background:"rgba(59,130,246,.06)",fontWeight:600}}>
-                  {fmtMoney(sRows.reduce((s,r)=>s+(r.total_price??0),0))}
+                <td colSpan={5} style={{ padding: "8px 12px", fontWeight: 600, fontSize: 11, background: "rgba(59,130,246,.06)", color: "var(--blue-dark)", letterSpacing: ".03em" }}>{section}</td>
+                <td style={{ padding: "8px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 11, background: "rgba(59,130,246,.06)", fontWeight: 600 }}>
+                  {fmtMoney(sRows.reduce((s, r) => s + (r.total_price ?? 0), 0))}
                 </td>
               </tr>,
-              ...sRows.map((row: any, i) => (
-                <tr key={row.id} style={{background:i%2?"var(--stripe)":""}}>
-                  <td style={{padding:"8px 12px",borderBottom:"1px solid var(--border)"}}>{row.work_name}</td>
-                  <td style={{padding:"8px 12px",borderBottom:"1px solid var(--border)",textAlign:"right",color:"var(--muted)",fontFamily:"var(--mono)"}}>{row.unit}</td>
-                  <td style={{padding:"8px 12px",borderBottom:"1px solid var(--border)",textAlign:"right",fontFamily:"var(--mono)"}}>{row.quantity?.toLocaleString("ru")}</td>
-                  <td style={{padding:"8px 12px",borderBottom:"1px solid var(--border)",textAlign:"right",fontFamily:"var(--mono)"}}>{fmtMoney(row.unit_price)}</td>
-                  <td style={{padding:"8px 12px",borderBottom:"1px solid var(--border)",textAlign:"right",fontFamily:"var(--mono)",fontWeight:500}}>{fmtMoney(row.total_price)}</td>
+              ...sRows.map((row: EstimateRow, i) => (
+                <tr key={row.id} style={{ background: i % 2 ? "var(--stripe)" : "" }}>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>{row.work_name}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: (row.fer_match_score ?? 0) < 0.45 ? "rgba(245,158,11,.05)" : undefined }}>
+                    {row.fer_work_type ? (
+                      <>
+                        <div>{row.fer_work_type}</div>
+                        <div style={{ marginTop: 2, fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                          score {(row.fer_match_score ?? 0).toFixed(2)}
+                        </div>
+                      </>
+                    ) : (
+                      <span style={{ color: "var(--muted)" }}>Не определён</span>
+                    )}
+                  </td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{row.quantity?.toLocaleString("ru")}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtMoney(row.unit_price ?? 0)}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 500 }}>{fmtMoney(row.total_price ?? 0)}</td>
                 </tr>
-              ))
+              )),
             ])}
-            <tr style={{background:"#f1f5f9",fontWeight:700}}>
-              <td colSpan={4} style={{padding:"10px 12px",textAlign:"right",fontSize:11,color:"var(--muted)",letterSpacing:".06em"}}>ИТОГО</td>
-              <td style={{padding:"10px 12px",textAlign:"right",fontFamily:"var(--mono)",fontSize:15,color:"var(--blue-dark)"}}>
-                {fmtMoney(summary?.total ?? rows.reduce((s,r)=>s+(r.total_price??0),0))} ₽
+            <tr style={{ background: "#f1f5f9", fontWeight: 700 }}>
+              <td colSpan={5} style={{ padding: "10px 12px", textAlign: "right", fontSize: 11, color: "var(--muted)", letterSpacing: ".06em" }}>ИТОГО</td>
+              <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 15, color: "var(--blue-dark)" }}>
+                {fmtMoney(summary?.total ?? rows.reduce((s, r) => s + (r.total_price ?? 0), 0))} ₽
               </td>
             </tr>
           </tbody>

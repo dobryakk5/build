@@ -7,6 +7,12 @@ export type JobStatus = "pending" | "processing" | "done" | "failed";
 export interface JobResult {
   estimates_count?:   number;
   gantt_tasks_count?: number;
+  estimate_batch_id?: string;
+  estimate_batch_name?: string;
+  estimate_kind?: string;
+  matched_rows_count?: number;
+  low_confidence_count?: number;
+  complex_mode?: boolean;
   strategy?:          string;
   confidence?:        number;
   total_price?:       number;

@@ -13,6 +13,7 @@ class GanttTask(Base, TimestampMixin, SoftDeleteMixin):
 
     id:           Mapped[str]       = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4()))
     project_id:   Mapped[str]       = mapped_column(ForeignKey("projects.id",     ondelete="CASCADE"), nullable=False)
+    estimate_batch_id: Mapped[str | None] = mapped_column(ForeignKey("estimate_batches.id", ondelete="SET NULL"))
     estimate_id:  Mapped[str|None]  = mapped_column(ForeignKey("estimates.id",    ondelete="SET NULL"))
     parent_id:    Mapped[str|None]  = mapped_column(ForeignKey("gantt_tasks.id",  ondelete="SET NULL"))
     assignee_id:  Mapped[str|None]  = mapped_column(ForeignKey("users.id",        ondelete="SET NULL"))
@@ -21,6 +22,7 @@ class GanttTask(Base, TimestampMixin, SoftDeleteMixin):
     start_date:   Mapped[date]      = mapped_column(Date, nullable=False)
     # Fix 10: working_days — РАБОЧИЕ дни (пн–пт, без праздников)
     working_days: Mapped[int]       = mapped_column(Integer, nullable=False)
+    workers_count: Mapped[int|None] = mapped_column(SmallInteger)
     # Хранится только у листовых задач (is_group=False).
     # У групп — вычисляется через get_effective_progress() как взвешенное среднее
     progress:     Mapped[int]       = mapped_column(SmallInteger, default=0)
@@ -34,10 +36,11 @@ class GanttTask(Base, TimestampMixin, SoftDeleteMixin):
     # Fix 7: NUMERIC позволяет midpoint-вставку без UPDATE соседей
     row_order:    Mapped[float]     = mapped_column(Numeric(20, 10), default=1000)
 
-    project:   Mapped["Project"]           = relationship(back_populates="gantt_tasks")
-    estimate:  Mapped["Estimate|None"]     = relationship(back_populates="gantt_task")
-    assignee:  Mapped["User|None"]         = relationship(foreign_keys=[assignee_id])
-    comments:  Mapped[list["Comment"]]     = relationship(back_populates="task", cascade="all, delete")
+    project:        Mapped["Project"]             = relationship(back_populates="gantt_tasks")
+    estimate_batch: Mapped["EstimateBatch|None"]  = relationship(back_populates="gantt_tasks")
+    estimate:       Mapped["Estimate|None"]       = relationship(back_populates="gantt_task")
+    assignee:       Mapped["User|None"]           = relationship(foreign_keys=[assignee_id])
+    comments:       Mapped[list["Comment"]]       = relationship(back_populates="task", cascade="all, delete")
 
     children: Mapped[list["GanttTask"]] = relationship(
         "GanttTask",

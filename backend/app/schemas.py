@@ -30,6 +30,7 @@ class TaskCreate(BaseModel):
     name:         str       = Field(min_length=1, max_length=500)
     start_date:   date
     working_days: int       = Field(ge=1, le=3650)
+    workers_count: int | None = Field(default=1, ge=1, le=500)
     parent_id:    str | None = None
     assignee_id:  str | None = None
     type:         str       = Field(default="task", pattern="^(task|project|milestone)$")
@@ -48,6 +49,7 @@ class TaskUpdate(BaseModel):
     name:             str | None  = None
     start_date:       date | None = None
     working_days:     int | None  = Field(default=None, ge=1)
+    workers_count:    int | None  = Field(default=None, ge=1, le=500)
     parent_id:        str | None  = None
     assignee_id:      str | None  = None
     color:            str | None  = None
@@ -62,11 +64,13 @@ class TaskResponse(BaseModel):
 
     id:           str
     project_id:   str
+    estimate_batch_id: str | None
     parent_id:    str | None
     estimate_id:  str | None
     name:         str
     start_date:   date
     working_days: int
+    workers_count: int | None
     end_date:     date         # вычисляется в сервисе
     progress:     int          # для группы — вычисленный, для листа — stored
     is_group:     bool
@@ -96,6 +100,17 @@ class GanttResponse(BaseModel):
 class TaskPatchResponse(BaseModel):
     task:           TaskResponse
     affected_tasks: list[dict]  # [{id, start_date}] — что сдвинулось
+
+
+class TaskSplitRequest(BaseModel):
+    split_date: date
+    new_workers_count: int = Field(ge=1, le=500)
+
+
+class TaskSplitResponse(BaseModel):
+    updated_task: TaskResponse
+    created_task: TaskResponse
+    affected_tasks: list[dict]
 
 
 # ── Зависимости ───────────────────────────────────────────────────────────────
@@ -135,6 +150,7 @@ class EstimateRow(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id:          str
+    estimate_batch_id: str | None
     section:     str | None
     work_name:   str
     unit:        str | None
@@ -142,10 +158,28 @@ class EstimateRow(BaseModel):
     unit_price:  float | None
     total_price: float | None
     enir_code:   str | None
+    fer_table_id: int | None
+    fer_work_type: str | None
+    fer_match_score: float | None
 
 class EstimateSummary(BaseModel):
     total:    float
     sections: list[dict]   # [{name, subtotal, items}]
+
+
+class EstimateBatchResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    project_id: str
+    name: str
+    estimate_kind: str
+    source_filename: str | None = None
+    estimates_count: int = 0
+    gantt_tasks_count: int = 0
+    fer_matched_count: int = 0
+    total_price: float = 0
+    created_at: datetime
 
 
 # ── Jobs ─────────────────────────────────────────────────────────────────────
@@ -165,6 +199,11 @@ class JobResponse(BaseModel):
 class UploadStartResponse(BaseModel):
     job_id:  str
     message: str = "Файл принят в обработку. Используйте job_id для проверки статуса."
+
+
+class JobStartResponse(BaseModel):
+    job_id:  str
+    message: str = "Задача поставлена в очередь. Используйте job_id для проверки статуса."
 
 
 # ── Отчёты ───────────────────────────────────────────────────────────────────

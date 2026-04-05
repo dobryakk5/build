@@ -33,12 +33,13 @@ from datetime import date, datetime
 from uuid import uuid4
 
 from fastapi import UploadFile, HTTPException
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models                      import Job, GanttTask, Estimate, TaskDependency
+from app.core.date_utils             import working_days_between, task_end_date
+from app.models                      import Job, GanttTask, Estimate, EstimateBatch, TaskDependency
 from app.services.excel_parser       import ExcelEstimateParser, NeedsMappingError
-from app.services.gantt_builder      import GanttBuilder
+from app.services.gantt_builder      import GanttBuilder, GanttTaskDTO
 
 
 _parser = ExcelEstimateParser()
@@ -58,6 +59,8 @@ async def start_upload_job(
     user_id:          str,
     start_date:       date,
     workers:          int,
+    estimate_kind:    str,
+    complex_mode:     bool,
     db:               AsyncSession,
 ) -> Job:
     """
@@ -97,6 +100,8 @@ async def start_upload_job(
         user_id    = user_id,
         start_date = start_date,
         workers    = workers,
+        estimate_kind = estimate_kind,
+        complex_mode  = complex_mode,
         db         = db,
     )
 
@@ -113,6 +118,8 @@ async def start_upload_job_with_mapping(
     user_id:    str,
     start_date: date,
     workers:    int,
+    estimate_kind: str,
+    complex_mode: bool,
     db:         AsyncSession,
 ) -> Job:
     """
@@ -129,6 +136,8 @@ async def start_upload_job_with_mapping(
         user_id     = user_id,
         start_date  = start_date,
         workers     = workers,
+        estimate_kind = estimate_kind,
+        complex_mode  = complex_mode,
         db          = db,
         col_mapping = col_mapping,
         sheet       = sheet,
@@ -146,6 +155,8 @@ async def _create_and_run_job(
     user_id:     str,
     start_date:  date,
     workers:     int,
+    estimate_kind: str,
+    complex_mode: bool,
     db:          AsyncSession,
     col_mapping: dict[int, str] | None = None,
     sheet:       str | None = None,
@@ -161,6 +172,8 @@ async def _create_and_run_job(
             "tmp_path":    tmp_path,
             "start_date":  str(start_date),
             "workers":     workers,
+            "estimate_kind": estimate_kind,
+            "complex_mode": complex_mode,
             "col_mapping": col_mapping,   # None = авто
             "sheet":       sheet,
         },
@@ -193,44 +206,14 @@ async def _process_upload(job_id: str) -> None:
         try:
             start_date  = date.fromisoformat(job.input["start_date"])
             workers     = int(job.input["workers"])
+            estimate_kind = str(job.input["estimate_kind"])
+            complex_mode = bool(job.input.get("complex_mode"))
             col_mapping = job.input.get("col_mapping")   # None → авто
             sheet       = job.input.get("sheet")
 
-            # ── 1. Удаляем дубли ─────────────────────────────────────────────
-            existing_estimates = await db.scalars(
-                select(Estimate)
-                .where(Estimate.project_id == job.project_id)
-                .where(Estimate.deleted_at == None)
-            )
-            existing_ids = [e.id for e in existing_estimates]
-
-            if existing_ids:
-                gantt_ids_result = await db.scalars(
-                    select(GanttTask.id)
-                    .where(GanttTask.project_id == job.project_id)
-                    .where(GanttTask.deleted_at == None)
-                )
-                gantt_ids = list(gantt_ids_result)
-                if gantt_ids:
-                    await db.execute(
-                        delete(TaskDependency)
-                        .where(TaskDependency.task_id.in_(gantt_ids))
-                    )
-
-                now = datetime.utcnow()
-                await db.execute(
-                    GanttTask.__table__.update()
-                    .where(GanttTask.project_id == job.project_id)
-                    .where(GanttTask.deleted_at == None)
-                    .values(deleted_at=now)
-                )
-                await db.execute(
-                    Estimate.__table__.update()
-                    .where(Estimate.project_id == job.project_id)
-                    .where(Estimate.deleted_at == None)
-                    .values(deleted_at=now)
-                )
-                await db.flush()
+            # ── 1. В обычном режиме заменяем текущую смету объекта ───────────
+            if not complex_mode:
+                await _soft_replace_project_estimates(job.project_id, db)
 
             # ── 2. Парсим файл ────────────────────────────────────────────────
             if col_mapping is not None:
@@ -255,12 +238,23 @@ async def _process_upload(job_id: str) -> None:
                     "наименование, количество, единица, сумма."
                 )
 
+            batch = EstimateBatch(
+                id=str(uuid4()),
+                project_id=job.project_id,
+                name=_make_batch_name(job.input.get("filename")),
+                estimate_kind=estimate_kind,
+                source_filename=job.input.get("filename"),
+            )
+            db.add(batch)
+            await db.flush()
+
             # ── 3. Сохраняем estimates ────────────────────────────────────────
             estimates = []
             for i, row in enumerate(rows):
                 est = Estimate(
                     id          = str(uuid4()),
                     project_id  = job.project_id,
+                    estimate_batch_id = batch.id,
                     section     = row.section,
                     work_name   = row.work_name,
                     unit        = row.unit,
@@ -283,16 +277,26 @@ async def _process_upload(job_id: str) -> None:
                 start_date = start_date,
                 workers    = workers,
             )
+            task_dtos = _wrap_batch_tasks(
+                batch_id=batch.id,
+                batch_name=batch.name,
+                start_date=start_date,
+                task_dtos=task_dtos,
+            )
+            row_order_offset = await _get_row_order_offset(job.project_id, db)
+            task_dtos = _shift_row_order(task_dtos, row_order_offset)
 
             for dto in task_dtos:
                 db.add(GanttTask(
                     id           = dto.id,
                     project_id   = dto.project_id,
+                    estimate_batch_id = batch.id,
                     estimate_id  = dto.estimate_id,
                     parent_id    = dto.parent_id,
                     name         = dto.name,
                     start_date   = dto.start_date,
                     working_days = dto.working_days,
+                    workers_count = dto.workers_count,
                     progress     = 0,
                     is_group     = dto.is_group,
                     type         = dto.type,
@@ -317,6 +321,10 @@ async def _process_upload(job_id: str) -> None:
             job.result = {
                 "estimates_count":   len(estimates),
                 "gantt_tasks_count": len(task_dtos),
+                "estimate_batch_id": batch.id,
+                "estimate_batch_name": batch.name,
+                "estimate_kind": estimate_kind,
+                "complex_mode": complex_mode,
                 "strategy":          meta.get("strategy"),
                 "confidence":        meta.get("confidence"),
                 "total_price":       sum(
@@ -368,3 +376,130 @@ def _save_tmp(contents: bytes, suffix: str) -> str:
     finally:
         tmp.close()
     return tmp.name
+
+
+async def _soft_replace_project_estimates(project_id: str, db: AsyncSession) -> None:
+    gantt_ids = list(
+        await db.scalars(
+            select(GanttTask.id)
+            .where(GanttTask.project_id == project_id)
+            .where(GanttTask.deleted_at == None)
+        )
+    )
+    if gantt_ids:
+        await db.execute(
+            delete(TaskDependency)
+            .where(TaskDependency.task_id.in_(gantt_ids))
+        )
+
+    now = datetime.utcnow()
+    await db.execute(
+        GanttTask.__table__.update()
+        .where(GanttTask.project_id == project_id)
+        .where(GanttTask.deleted_at == None)
+        .values(deleted_at=now)
+    )
+    await db.execute(
+        Estimate.__table__.update()
+        .where(Estimate.project_id == project_id)
+        .where(Estimate.deleted_at == None)
+        .values(deleted_at=now)
+    )
+    await db.execute(
+        EstimateBatch.__table__.update()
+        .where(EstimateBatch.project_id == project_id)
+        .where(EstimateBatch.deleted_at == None)
+        .values(deleted_at=now)
+    )
+    await db.flush()
+
+
+def _make_batch_name(filename: str | None) -> str:
+    if not filename:
+        return "Смета"
+    stem, _ = os.path.splitext(os.path.basename(filename))
+    return stem.strip() or "Смета"
+
+
+async def _get_row_order_offset(project_id: str, db: AsyncSession) -> float:
+    current_max = await db.scalar(
+        select(func.max(GanttTask.row_order))
+        .where(GanttTask.project_id == project_id)
+        .where(GanttTask.deleted_at == None)
+    )
+    return float(current_max or 0) + 1000.0
+
+
+def _shift_row_order(task_dtos: list[GanttTaskDTO], offset: float) -> list[GanttTaskDTO]:
+    if offset <= 1000:
+        return task_dtos
+    return [
+        GanttTaskDTO(
+            id=dto.id,
+            project_id=dto.project_id,
+            estimate_id=dto.estimate_id,
+            parent_id=dto.parent_id,
+            name=dto.name,
+            start_date=dto.start_date,
+            working_days=dto.working_days,
+            workers_count=dto.workers_count,
+            is_group=dto.is_group,
+            type=dto.type,
+            color=dto.color,
+            row_order=float(dto.row_order) + offset,
+        )
+        for dto in task_dtos
+    ]
+
+
+def _wrap_batch_tasks(
+    batch_id: str,
+    batch_name: str,
+    start_date: date,
+    task_dtos: list[GanttTaskDTO],
+) -> list[GanttTaskDTO]:
+    if not task_dtos:
+        return task_dtos
+
+    root_id = str(uuid4())
+    min_order = min(float(dto.row_order) for dto in task_dtos)
+    max_end = max(task_end_date(dto.start_date, dto.working_days) for dto in task_dtos)
+    batch_days = max(1, working_days_between(start_date, max_end))
+
+    wrapped: list[GanttTaskDTO] = [
+        GanttTaskDTO(
+            id=root_id,
+            project_id=task_dtos[0].project_id,
+            estimate_id=None,
+            parent_id=None,
+            name=batch_name,
+            start_date=start_date,
+            working_days=batch_days,
+            workers_count=None,
+            is_group=True,
+            type="project",
+            color="#0f172a",
+            row_order=min_order - 10.0,
+        )
+    ]
+
+    for dto in task_dtos:
+        parent_id = root_id if dto.parent_id is None else dto.parent_id
+        wrapped.append(
+            GanttTaskDTO(
+                id=dto.id,
+                project_id=dto.project_id,
+                estimate_id=dto.estimate_id,
+                parent_id=parent_id,
+                name=dto.name,
+                start_date=dto.start_date,
+                working_days=dto.working_days,
+                workers_count=dto.workers_count,
+                is_group=dto.is_group,
+                type=dto.type,
+                color=dto.color,
+                row_order=float(dto.row_order),
+            )
+        )
+
+    return wrapped

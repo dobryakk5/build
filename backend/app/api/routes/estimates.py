@@ -7,13 +7,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps         import require_action, get_db, get_current_user
 from app.core.permissions import Action
-from app.models           import Estimate, ProjectMember
-from app.schemas          import EstimateRow, EstimateSummary, UploadStartResponse, JobResponse
+from app.models           import Estimate, EstimateBatch, GanttTask, ProjectMember
+from app.schemas          import EstimateBatchResponse, EstimateRow, EstimateSummary, JobStartResponse, UploadStartResponse, JobResponse
+from app.services.estimate_fer_matcher import start_fer_match_job
 from app.services.upload_service import start_upload_job, start_upload_job_with_mapping
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
@@ -25,6 +26,8 @@ async def upload_estimate(
     file:             UploadFile = File(...),
     start_date:       date       = Query(default_factory=date.today),
     workers:          int        = Query(default=3, ge=1, le=20),
+    estimate_kind:    str        = Query(pattern="^(country_house|apartment|non_residential)$"),
+    complex_mode:     bool       = Query(default=False),
     current_user      = Depends(get_current_user),
     member: ProjectMember = Depends(require_action(Action.EDIT)),
     db: AsyncSession  = Depends(get_db),
@@ -40,6 +43,8 @@ async def upload_estimate(
         user_id          = current_user.id,
         start_date       = start_date,
         workers          = workers,
+        estimate_kind    = estimate_kind,
+        complex_mode     = complex_mode,
         db               = db,
     )
     return UploadStartResponse(job_id=job.id)
@@ -56,6 +61,8 @@ class ConfirmMappingRequest(BaseModel):
     col_mapping: dict[int, str]   # {col_0based: "work_name"|"unit"|...|"skip"}
     start_date:  date
     workers:     int = 3
+    estimate_kind: str
+    complex_mode: bool = False
 
 
 @router.post("/estimates/upload/confirm-mapping", response_model=UploadStartResponse, status_code=202)
@@ -78,6 +85,8 @@ async def confirm_mapping(
         user_id     = current_user.id,
         start_date  = body.start_date,
         workers     = body.workers,
+        estimate_kind = body.estimate_kind,
+        complex_mode  = body.complex_mode,
         db          = db,
     )
     return UploadStartResponse(job_id=job.id)
@@ -87,6 +96,7 @@ async def confirm_mapping(
 async def list_estimates(
     project_id: UUID,
     section:    str | None = Query(default=None),
+    estimate_batch_id: UUID | None = Query(default=None),
     member: ProjectMember = Depends(require_action(Action.VIEW)),
     db: AsyncSession = Depends(get_db),
 ):
@@ -96,6 +106,8 @@ async def list_estimates(
         .where(Estimate.deleted_at == None)
         .order_by(Estimate.row_order)
     )
+    if estimate_batch_id:
+        q = q.where(Estimate.estimate_batch_id == str(estimate_batch_id))
     if section:
         q = q.where(Estimate.section == section)
 
@@ -106,11 +118,11 @@ async def list_estimates(
 @router.get("/estimates/summary", response_model=EstimateSummary)
 async def estimate_summary(
     project_id: UUID,
+    estimate_batch_id: UUID | None = Query(default=None),
     member: ProjectMember = Depends(require_action(Action.VIEW)),
     db: AsyncSession = Depends(get_db),
 ):
-    from sqlalchemy import func, case
-    rows = await db.execute(
+    q = (
         select(
             Estimate.section,
             func.sum(Estimate.total_price).label("subtotal"),
@@ -118,15 +130,96 @@ async def estimate_summary(
         )
         .where(Estimate.project_id == str(project_id))
         .where(Estimate.deleted_at == None)
-        .group_by(Estimate.section)
-        .order_by(func.sum(Estimate.total_price).desc())
     )
+    if estimate_batch_id:
+        q = q.where(Estimate.estimate_batch_id == str(estimate_batch_id))
+    q = q.group_by(Estimate.section).order_by(func.sum(Estimate.total_price).desc())
+
+    rows = await db.execute(q)
     sections = [
         {"name": r.section or "Без раздела", "subtotal": float(r.subtotal or 0), "items": r.items}
         for r in rows
     ]
     total = sum(s["subtotal"] for s in sections)
     return EstimateSummary(total=total, sections=sections)
+
+
+@router.get("/estimate-batches", response_model=list[EstimateBatchResponse])
+async def list_estimate_batches(
+    project_id: UUID,
+    member: ProjectMember = Depends(require_action(Action.VIEW)),
+    db: AsyncSession = Depends(get_db),
+):
+    batches = list(
+        await db.scalars(
+            select(EstimateBatch)
+            .where(EstimateBatch.project_id == str(project_id))
+            .where(EstimateBatch.deleted_at == None)
+            .order_by(EstimateBatch.created_at)
+        )
+    )
+
+    result: list[EstimateBatchResponse] = []
+    for batch in batches:
+        estimates_count = await db.scalar(
+            select(func.count())
+            .select_from(Estimate)
+            .where(Estimate.estimate_batch_id == batch.id)
+            .where(Estimate.deleted_at == None)
+        )
+        gantt_tasks_count = await db.scalar(
+            select(func.count())
+            .select_from(GanttTask)
+            .where(GanttTask.estimate_batch_id == batch.id)
+            .where(GanttTask.deleted_at == None)
+        )
+        total_price = await db.scalar(
+            select(func.sum(Estimate.total_price))
+            .where(Estimate.estimate_batch_id == batch.id)
+            .where(Estimate.deleted_at == None)
+        )
+        fer_matched_count = await db.scalar(
+            select(func.count())
+            .select_from(Estimate)
+            .where(Estimate.estimate_batch_id == batch.id)
+            .where(Estimate.deleted_at == None)
+            .where(Estimate.fer_table_id.is_not(None))
+        )
+        result.append(
+            EstimateBatchResponse(
+                id=batch.id,
+                project_id=batch.project_id,
+                name=batch.name,
+                estimate_kind=batch.estimate_kind,
+                source_filename=batch.source_filename,
+                estimates_count=estimates_count or 0,
+                gantt_tasks_count=gantt_tasks_count or 0,
+                fer_matched_count=fer_matched_count or 0,
+                total_price=float(total_price or 0),
+                created_at=batch.created_at,
+            )
+        )
+    return result
+
+
+@router.post("/estimate-batches/{estimate_batch_id}/match-fer", response_model=JobStartResponse, status_code=202)
+async def match_estimate_batch_with_fer(
+    project_id: UUID,
+    estimate_batch_id: UUID,
+    current_user = Depends(get_current_user),
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    job = await start_fer_match_job(
+        project_id=str(project_id),
+        estimate_batch_id=str(estimate_batch_id),
+        user_id=current_user.id,
+        db=db,
+    )
+    return JobStartResponse(
+        job_id=job.id,
+        message="Сопоставление сметы с ФЕР запущено.",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -27,7 +27,8 @@ class Project(Base, TimestampMixin, SoftDeleteMixin):
     organization: Mapped["Organization"]        = relationship(back_populates="projects")
     members:      Mapped[list["ProjectMember"]] = relationship(back_populates="project", cascade="all, delete")
     gantt_tasks:  Mapped[list["GanttTask"]]     = relationship(back_populates="project")
-    estimates:    Mapped[list["Estimate"]]       = relationship(back_populates="project")
+    estimates:    Mapped[list["Estimate"]]      = relationship(back_populates="project")
+    estimate_batches: Mapped[list["EstimateBatch"]] = relationship(back_populates="project")
 
 
 class ProjectMember(Base):

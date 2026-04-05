@@ -6,6 +6,9 @@ import type {
   FerBrowseResponse,
   FerCollectionSummary,
   FerTableDetail,
+  EstimateBatch,
+  EstimateRow,
+  EstimateSummary,
   Project,
   User,
 } from "./types";
@@ -88,9 +91,11 @@ export const projects = {
 };
 
 export const gantt = {
-  list:      (pid: string)                          => request<any>(`/projects/${pid}/gantt`),
+  list:      (pid: string, estimateBatchId?: string | null) =>
+    request<any>(`/projects/${pid}/gantt${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
   create:    (pid: string, body: any)               => request<any>(`/projects/${pid}/gantt`, { method: "POST", body: JSON.stringify(body) }),
   update:    (pid: string, tid: string, body: any)  => request<any>(`/projects/${pid}/gantt/${tid}`, { method: "PATCH", body: JSON.stringify(body) }),
+  split:     (pid: string, tid: string, body: any)  => request<any>(`/projects/${pid}/gantt/${tid}/split`, { method: "POST", body: JSON.stringify(body) }),
   delete:    (pid: string, tid: string)             => request<any>(`/projects/${pid}/gantt/${tid}`, { method: "DELETE" }),
   reorder:   (pid: string, body: any)               => request<any>(`/projects/${pid}/gantt/reorder`, { method: "POST", body: JSON.stringify(body) }),
   resolve:   (pid: string)                          => request<any>(`/projects/${pid}/gantt/resolve`, { method: "POST" }),
@@ -101,16 +106,34 @@ export const gantt = {
 };
 
 export const estimates = {
-  list:    (pid: string)    => request<any[]>(`/projects/${pid}/estimates`),
-  summary: (pid: string)    => request<any>(`/projects/${pid}/estimates/summary`),
-  upload:  (pid: string, file: File, startDate: string, workers: number) => {
+  list:    (pid: string, estimateBatchId?: string | null) =>
+    request<EstimateRow[]>(`/projects/${pid}/estimates${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
+  summary: (pid: string, estimateBatchId?: string | null) =>
+    request<EstimateSummary>(`/projects/${pid}/estimates/summary${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
+  batches: (pid: string) => request<EstimateBatch[]>(`/projects/${pid}/estimate-batches`),
+  matchFer: (pid: string, batchId: string) =>
+    request<{ job_id: string; message: string }>(`/projects/${pid}/estimate-batches/${batchId}/match-fer`, { method: "POST" }),
+  upload:  (
+    pid: string,
+    file: File,
+    startDate: string,
+    workers: number,
+    estimateKind: string,
+    complexMode: boolean,
+  ) => {
     const token = localStorage.getItem("access_token");
     const form  = new FormData();
     form.append("file", file);
     return fetch(
-      `${BASE}/projects/${pid}/estimates/upload?start_date=${startDate}&workers=${workers}`,
+      `${BASE}/projects/${pid}/estimates/upload?start_date=${startDate}&workers=${workers}&estimate_kind=${encodeURIComponent(estimateKind)}&complex_mode=${complexMode}`,
       { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form }
-    ).then(r => r.json());
+    ).then(async (r) => {
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(data?.detail?.error ?? data?.detail ?? `HTTP ${r.status}`);
+      }
+      return data;
+    });
   },
 };
 

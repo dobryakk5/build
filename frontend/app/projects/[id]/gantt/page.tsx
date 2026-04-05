@@ -1,9 +1,9 @@
 "use client";
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import type { KeyboardEvent, MouseEvent } from "react";
-import { useParams } from "next/navigation";
-import { gantt as ganttApi } from "@/lib/api";
-import type { Task } from "@/lib/types";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { estimates, gantt as ganttApi, projects } from "@/lib/api";
+import type { EstimateBatch, Task } from "@/lib/types";
 
 const DAY_W = 24;
 const ROW_H = 32;
@@ -14,7 +14,7 @@ type TaskRow = Task & {
   isOpen: boolean;
 };
 
-type EditingField = "name" | "dur" | "start" | "prog" | "depends_on";
+type EditingField = "name" | "dur" | "workers" | "start" | "prog" | "depends_on";
 
 type EditingState = {
   id: string;
@@ -23,10 +23,12 @@ type EditingState = {
 
 type ApiTask = {
   id: string;
+  estimate_batch_id?: string | null;
   parent_id: string | null;
   name: string;
   start_date: string;
   working_days: number;
+  workers_count?: number | null;
   progress: number;
   color?: string | null;
   assignee?: {
@@ -255,6 +257,8 @@ function updateTaskField(task: Task, field: EditingField, value: string | number
       return { ...task, name: String(value ?? "") };
     case "dur":
       return { ...task, dur: Number(value) };
+    case "workers":
+      return { ...task, workers_count: Number(value) };
     case "start":
       return { ...task, start: String(value ?? "") };
     case "prog":
@@ -452,6 +456,16 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .role-access-hint{
   margin-left:auto;font-size:10px;color:#475569;font-family:var(--mono);
 }
+.batch-bar{
+  display:flex;align-items:center;gap:8px;padding:8px 12px;background:#f8fafc;border-bottom:1px solid var(--border);
+  flex-wrap:wrap;
+}
+.batch-chip{
+  padding:6px 10px;border-radius:999px;border:1px solid var(--border);background:#fff;cursor:pointer;
+  font-size:11px;font-weight:600;color:var(--text);
+}
+.batch-chip.active{border-color:var(--blue);background:rgba(59,130,246,.08);color:#1d4ed8;}
+.batch-chip-meta{font-size:10px;color:var(--muted);font-family:var(--mono);}
 /* locked overlay */
 .locked{opacity:.45;pointer-events:none;cursor:not-allowed!important;}
 `;
@@ -459,34 +473,44 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 // ─── Component ────────────────────────────────────────────────────────────────
 export default function App() {
   const params = useParams<{ id: string }>();
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const pid = params?.id ?? "";
+  const batchFromUrl = searchParams.get("batch");
   const TODAY = "2026-03-13";
 
   // Map API fields -> local field names used in Gantt
-  const apiToLocal = (t: ApiTask): Task => ({
+  const apiToLocal = useCallback((t: ApiTask): Task => ({
     ...t,
+    estimate_batch_id: t.estimate_batch_id ?? null,
     pid: t.parent_id,
     dur: t.working_days,
+    workers_count: t.workers_count ?? null,
     start: t.start_date,
     prog: t.progress,
     clr: t.color ?? "#3b82f6",
     who: t.assignee?.name ?? "—",
     depends_on: t.depends_on ?? "",
-  });
+  }), []);
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [apiLoaded, setApiLoaded] = useState(false);
+  const [batches, setBatches] = useState<EstimateBatch[]>([]);
+  const [batchesLoaded, setBatchesLoaded] = useState(false);
+  const [activeBatchId, setActiveBatchId] = useState<string | null>(batchFromUrl);
   const [coll, setColl] = useState<Set<string>>(new Set());
   const [sel, setSel] = useState<string | null>("1");
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [editVal, setEditVal] = useState("");
-  const [leftW, setLeftW] = useState(560);
-  const [pname, setPname] = useState("Коттедж Петровых — ул. Солнечная, 5");
+  const [leftW, setLeftW] = useState(620);
+  const [pname, setPname] = useState("Объект");
   const [editP, setEditP] = useState(false);
   const [role, setRole] = useState<RoleKey>("pm");
   const [panelId, setPanelId] = useState<string | null>(null);
   const [comments, setComments] = useState<CommentsByTask>(INIT_COMMENTS);
   const [newComment, setNewComment] = useState("");
+  const [splitDate, setSplitDate] = useState("");
+  const [splitWorkers, setSplitWorkers] = useState("2");
 
   const lbRef = useRef<HTMLDivElement | null>(null);
   const rbRef = useRef<HTMLDivElement | null>(null);
@@ -496,29 +520,54 @@ export default function App() {
   const ssync = useRef(false);
   const inpRef = useRef<HTMLInputElement | null>(null);
 
-  useEffect(() => {
+  const loadTasks = useCallback(async (preferredTaskId?: string | null, batchIdOverride?: string | null) => {
     if (!pid) return;
+    const targetBatchId = batchIdOverride !== undefined ? batchIdOverride : activeBatchId;
     setTasks([]);
     setColl(new Set());
     setSel(null);
     setApiLoaded(false);
-    ganttApi
-      .list(pid)
-      .then((data) => {
-        const apiTasks = (data?.tasks ?? []) as ApiTask[];
-        if (apiTasks.length > 0) {
-          setTasks(resolveDates(apiTasks.map(apiToLocal)));
-          setSel(apiTasks[0]?.id ?? null);
-        } else {
-          setTasks([]);
-        }
-        setApiLoaded(true);
-      })
-      .catch(() => {
+    try {
+      const data = await ganttApi.list(pid, targetBatchId);
+      const apiTasks = (data?.tasks ?? []) as ApiTask[];
+      if (apiTasks.length > 0) {
+        setTasks(resolveDates(apiTasks.map(apiToLocal)));
+        setSel(preferredTaskId ?? apiTasks[0]?.id ?? null);
+      } else {
         setTasks([]);
-        setApiLoaded(true);
-      });
-  }, [pid]);
+      }
+    } catch {
+      setTasks([]);
+    } finally {
+      setApiLoaded(true);
+    }
+  }, [activeBatchId, apiToLocal, pid]);
+
+  useEffect(() => {
+    if (!pid) return;
+    projects.get(pid).then((project) => {
+      if (project?.name) setPname(project.name);
+    }).catch(() => {});
+    estimates.batches(pid).then((data) => {
+      setBatches(data);
+      const latestBatchId = data.length ? data[data.length - 1]?.id : null;
+      const nextBatchId = batchFromUrl ?? latestBatchId ?? null;
+      setActiveBatchId(nextBatchId);
+    }).catch(() => {
+      setBatches([]);
+      setActiveBatchId(batchFromUrl ?? null);
+    }).finally(() => setBatchesLoaded(true));
+  }, [batchFromUrl, pid]);
+
+  useEffect(() => {
+    if (!batchesLoaded) return;
+    loadTasks(undefined, activeBatchId);
+  }, [activeBatchId, batchesLoaded, loadTasks]);
+
+  const selectBatch = useCallback((batchId: string | null) => {
+    setActiveBatchId(batchId);
+    router.replace(`/projects/${pid}/gantt${batchId ? `?batch=${batchId}` : ""}`);
+  }, [pid, router]);
 
   const submitComment = useCallback(() => {
     if (!newComment.trim() || !panelId) return;
@@ -541,6 +590,13 @@ export default function App() {
   }, [newComment, panelId, role]);
 
   const panelTask = tasks.find((t) => t.id === panelId) ?? null;
+  useEffect(() => {
+    if (!panelTask) return;
+    const splitOffset = Math.max(1, Math.floor(panelTask.dur / 2));
+    setSplitDate(addD(panelTask.start, splitOffset));
+    setSplitWorkers(String(Math.max(1, (panelTask.workers_count ?? 1) + 1)));
+  }, [panelTask]);
+
   const rows = useMemo(() => getVisibleRows(tasks, coll), [tasks, coll]);
 
   const numMap = useMemo<Record<string, number>>(() => {
@@ -667,6 +723,7 @@ export default function App() {
   const applyAndClose = useCallback((id: string, field: EditingField, raw: string) => {
     let value: string | number | null = raw;
     if (field === "dur") value = Math.max(1, parseInt(raw, 10) || 1);
+    if (field === "workers") value = Math.max(1, parseInt(raw, 10) || 1);
     if (field === "prog") value = Math.max(0, Math.min(100, parseInt(raw, 10) || 0));
     if (field === "depends_on") {
       value = raw.trim();
@@ -688,14 +745,30 @@ export default function App() {
     setTasks((current) => resolveDates(current.map((task) => (task.id === id ? updateTaskField(task, field, value) : task))));
     setEditing(null);
     if (pid) {
-      const apiField: Record<EditingField, string> = {
+      if (field === "depends_on") {
+        const currentTask = tasks.find((task) => task.id === id);
+        const before = new Set(parseDeps(currentTask?.depends_on));
+        const after = new Set(parseDeps(typeof value === "string" ? value : null));
+        before.forEach((depId) => {
+          if (!after.has(depId)) {
+            ganttApi.removeDep(pid, id, depId).catch(() => {});
+          }
+        });
+        after.forEach((depId) => {
+          if (!before.has(depId)) {
+            ganttApi.addDep(pid, id, depId).catch(() => {});
+          }
+        });
+        return;
+      }
+      const apiField: Record<Exclude<EditingField, "depends_on">, string> = {
         name: "name",
         dur: "working_days",
+        workers: "workers_count",
         start: "start_date",
-        prog: "progress",
-        depends_on: "depends_on",
+        prog: "progress_override",
       };
-      ganttApi.update(pid, id, { [apiField[field]]: value }).catch(() => {});
+      ganttApi.update(pid, id, { [apiField[field as Exclude<EditingField, "depends_on">]]: value }).catch(() => {});
     }
   }, [pid, rows, tasks]);
 
@@ -713,6 +786,7 @@ export default function App() {
       name: "Новая задача",
       start: src ? addD(src.start, src.dur) : TODAY,
       dur: 5,
+      workers_count: src?.workers_count ?? 1,
       prog: 0,
       clr: src?.clr ?? "#3b82f6",
     };
@@ -762,6 +836,7 @@ export default function App() {
       name: "Подзадача",
       start: src?.start ?? TODAY,
       dur: 3,
+      workers_count: src?.workers_count ?? 1,
       prog: 0,
       clr: src?.clr ?? "#3b82f6",
     };
@@ -832,6 +907,22 @@ export default function App() {
   };
 
   const selTask = tasks.find((t) => t.id === sel) ?? null;
+  const canSplitPanelTask = Boolean(panelTask && !tasks.some((t) => t.pid === panelTask.id) && panelTask.dur > 1);
+
+  const splitPanelTask = useCallback(async () => {
+    if (!pid || !panelTask || !canSplitPanelTask) return;
+    const nextWorkers = Math.max(1, parseInt(splitWorkers, 10) || 1);
+    try {
+      const result = await ganttApi.split(pid, panelTask.id, {
+        split_date: splitDate,
+        new_workers_count: nextWorkers,
+      });
+      await loadTasks(result?.created_task?.id ?? panelTask.id, activeBatchId);
+      setPanelId(result?.created_task?.id ?? panelTask.id);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось разделить задачу");
+    }
+  }, [activeBatchId, canSplitPanelTask, loadTasks, panelTask, pid, splitDate, splitWorkers]);
 
   return(
     <>
@@ -873,6 +964,25 @@ export default function App() {
           </span>
         </div>
 
+        {batches.length > 0 && (
+          <div className="batch-bar">
+            {batches.map((batch) => (
+              <button
+                key={batch.id}
+                className={`batch-chip${activeBatchId === batch.id ? " active" : ""}`}
+                onClick={() => selectBatch(batch.id)}
+              >
+                {batch.name}
+              </button>
+            ))}
+            {activeBatchId && (
+              <span className="batch-chip-meta">
+                Отдельный гант по выбранной смете
+              </span>
+            )}
+          </div>
+        )}
+
         {/* SPLIT */}
         <div className="split">
 
@@ -890,6 +1000,7 @@ export default function App() {
               <div className="th rn">#</div>
               <div className="th g">Наименование работ</div>
               <div className="th" style={{width:48,justifyContent:'center'}}>Дней</div>
+              <div className="th" style={{width:60,justifyContent:'center'}}>Люди</div>
               <div className="th" style={{width:64,justifyContent:'center'}}>Начало</div>
               <div className="th" style={{width:64,justifyContent:'center'}}>Конец</div>
               <div className="th" style={{width:50,justifyContent:'center'}}>%</div>
@@ -952,6 +1063,20 @@ export default function App() {
                             value={editVal} onChange={e=>setEditVal(e.target.value)}
                             onBlur={commit} onKeyDown={onKD}/>
                         : row.dur+'д'
+                      }
+                    </div>
+
+                    {/* Workers */}
+                    <div className={`td mn c${isEd&&editing.field==='workers'?' ed':''}`}
+                      style={{width:60}}
+                      onDoubleClick={() => !row.hasKids && startEdit(row.id,'workers',row.workers_count ?? 1)}>
+                      {row.hasKids
+                        ? <span style={{color:'var(--muted)'}}>—</span>
+                        : isEd&&editing.field==='workers'
+                          ? <input ref={inpRef} style={{width:36,textAlign:'center'}}
+                              value={editVal} onChange={e=>setEditVal(e.target.value)}
+                              onBlur={commit} onKeyDown={onKD}/>
+                          : `${row.workers_count ?? 1} чел`
                       }
                     </div>
 
@@ -1156,6 +1281,10 @@ export default function App() {
                       <div className="pfield-val mono">{panelTask.dur} дн.</div>
                     </div>
                     <div className="pfield">
+                      <div className="pfield-label">Исполнители</div>
+                      <div className="pfield-val mono">{panelTask.workers_count ?? "—"}</div>
+                    </div>
+                    <div className="pfield">
                       <div className="pfield-label">Зависит от</div>
                       <div className="pfield-val mono">{depNums2.length?depNums2.map(n=>`#${n}`).join(', '):'—'}</div>
                     </div>
@@ -1171,6 +1300,44 @@ export default function App() {
                       </div>
                     </div>
                   </div>
+                </div>
+
+                <div className="panel-section">
+                  <div className="panel-section-title">Разделить задачу</div>
+                  {canSplitPanelTask
+                    ? <div style={{display:'grid',gridTemplateColumns:'1fr 1fr auto',gap:10,alignItems:'end'}}>
+                        <label className="pfield" style={{margin:0}}>
+                          <div className="pfield-label">Дата начала 2-й части</div>
+                          <input
+                            type="date"
+                            value={splitDate}
+                            onChange={e=>setSplitDate(e.target.value)}
+                            style={{marginTop:6,padding:'10px 12px',border:'1px solid var(--border)',borderRadius:10,font:'inherit'}}
+                          />
+                        </label>
+                        <label className="pfield" style={{margin:0}}>
+                          <div className="pfield-label">Исполнителей во 2-й части</div>
+                          <input
+                            type="number"
+                            min={1}
+                            value={splitWorkers}
+                            onChange={e=>setSplitWorkers(e.target.value)}
+                            style={{marginTop:6,padding:'10px 12px',border:'1px solid var(--border)',borderRadius:10,font:'inherit'}}
+                          />
+                        </label>
+                        <button
+                          className="comment-submit"
+                          style={{height:42,marginTop:20}}
+                          onClick={splitPanelTask}
+                          disabled={!splitDate || !splitWorkers}
+                        >
+                          Разделить
+                        </button>
+                      </div>
+                    : <div className="no-comments">
+                        Разделение доступно только для листовой задачи длительностью больше 1 дня.
+                      </div>
+                  }
                 </div>
 
                 {/* comments list */}

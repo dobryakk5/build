@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.date_utils import task_end_date
+from app.core.date_utils import task_end_date, working_days_between
 from app.models import GanttTask, TaskDependency, TaskHistory
 
 
@@ -201,6 +201,101 @@ async def reorder_task(
     return task
 
 
+async def split_task_by_date(
+    task: GanttTask,
+    split_date: date,
+    new_workers_count: int,
+    actor_id: str,
+    db: AsyncSession,
+) -> tuple[GanttTask, GanttTask, list[dict]]:
+    """
+    Делит листовую задачу на две последовательные части.
+    Исходная задача становится первой частью, новая задача — второй.
+    """
+    if task.deleted_at is not None:
+        raise ValueError("Нельзя разделить удалённую задачу")
+    if task.is_group:
+        raise ValueError("Можно разделять только листовые задачи")
+
+    first_days = working_days_between(task.start_date, split_date)
+    if first_days <= 0 or first_days >= task.working_days:
+        raise ValueError("Дата разделения должна попадать внутрь интервала задачи")
+
+    second_days = task.working_days - first_days
+    original_name = task.name
+    original_workers = task.workers_count or 1
+
+    next_order = await _get_next_row_order(task, db)
+    if next_order - float(task.row_order) < 0.001:
+        await _reindex_project_tasks(task.project_id, db)
+        await db.refresh(task)
+        next_order = await _get_next_row_order(task, db)
+
+    second_task = GanttTask(
+        id=str(uuid4()),
+        project_id=task.project_id,
+        estimate_batch_id=task.estimate_batch_id,
+        estimate_id=task.estimate_id,
+        parent_id=task.parent_id,
+        assignee_id=task.assignee_id,
+        name=f"{original_name} (этап 2)",
+        start_date=split_date,
+        working_days=second_days,
+        workers_count=new_workers_count,
+        progress=task.progress,
+        is_group=False,
+        type=task.type,
+        color=task.color,
+        requires_act=task.requires_act,
+        act_signed=task.act_signed,
+        row_order=(float(task.row_order) + next_order) / 2,
+    )
+    db.add(second_task)
+    await db.flush()
+
+    outgoing_deps = list(await db.scalars(
+        select(TaskDependency)
+        .where(TaskDependency.depends_on == task.id)
+    ))
+    for dep in outgoing_deps:
+        await db.delete(dep)
+        db.add(TaskDependency(task_id=dep.task_id, depends_on=second_task.id))
+
+    db.add(TaskDependency(task_id=second_task.id, depends_on=task.id))
+
+    task.name = f"{original_name} (этап 1)"
+    task.working_days = first_days
+    task.workers_count = original_workers
+    db.add(task)
+
+    db.add(TaskHistory(
+        id=str(uuid4()),
+        task_id=task.id,
+        project_id=task.project_id,
+        user_id=actor_id,
+        action="split",
+        old_data={
+            "name": original_name,
+            "working_days": first_days + second_days,
+            "workers_count": original_workers,
+        },
+        new_data={
+            "first_task_id": task.id,
+            "first_name": task.name,
+            "first_working_days": first_days,
+            "first_workers_count": task.workers_count,
+            "second_task_id": second_task.id,
+            "second_name": second_task.name,
+            "second_start_date": str(second_task.start_date),
+            "second_working_days": second_task.working_days,
+            "second_workers_count": second_task.workers_count,
+        },
+    ))
+
+    affected = await resolve_project_dates(task.project_id, db)
+    return task, second_task, affected
+
+
 async def _reindex_project_tasks(project_id: str, db: AsyncSession) -> None:
     await db.execute(text("""
         WITH ranked AS (
@@ -214,6 +309,20 @@ async def _reindex_project_tasks(project_id: str, db: AsyncSession) -> None:
         UPDATE gantt_tasks t SET row_order = r.new_order
           FROM ranked r WHERE t.id = r.id
     """), {"pid": project_id})
+
+
+async def _get_next_row_order(task: GanttTask, db: AsyncSession) -> float:
+    next_task = await db.scalar(
+        select(GanttTask)
+        .where(GanttTask.project_id == task.project_id)
+        .where(GanttTask.deleted_at == None)
+        .where(GanttTask.row_order > task.row_order)
+        .order_by(GanttTask.row_order)
+        .limit(1)
+    )
+    if next_task:
+        return float(next_task.row_order)
+    return float(task.row_order) + 1000.0
 
 
 async def _refresh_is_group(parent_id: str, db: AsyncSession) -> None:

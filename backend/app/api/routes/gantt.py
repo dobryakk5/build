@@ -15,10 +15,14 @@ from app.api.deps        import require_action, require_task_in_project, get_pro
 from app.core.permissions import Action
 from app.core.date_utils  import task_end_date
 from app.models           import GanttTask, TaskDependency, Comment, User, ProjectMember
-from app.schemas          import TaskCreate, TaskUpdate, TaskResponse, TaskPatchResponse, TaskReorderRequest, GanttResponse, DependencyAdd
+from app.schemas          import (
+    TaskCreate, TaskUpdate, TaskResponse, TaskPatchResponse,
+    TaskReorderRequest, GanttResponse, DependencyAdd,
+    TaskSplitRequest, TaskSplitResponse,
+)
 from app.services.gantt_service import (
     get_effective_progress, update_leaf_progress,
-    resolve_project_dates, reorder_task, soft_delete_task,
+    resolve_project_dates, reorder_task, soft_delete_task, split_task_by_date,
     _refresh_is_group,
 )
 
@@ -63,11 +67,13 @@ async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
     return TaskResponse(
         id             = task.id,
         project_id     = task.project_id,
+        estimate_batch_id = task.estimate_batch_id,
         parent_id      = task.parent_id,
         estimate_id    = task.estimate_id,
         name           = task.name,
         start_date     = task.start_date,
         working_days   = task.working_days,
+        workers_count  = task.workers_count,
         end_date       = end_date,
         progress       = progress,
         is_group       = task.is_group,
@@ -87,23 +93,32 @@ async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
 @router.get("", response_model=GanttResponse)
 async def list_tasks(
     project_id: UUID,
+    estimate_batch_id: UUID | None = Query(default=None),
     limit:  int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     member: ProjectMember = Depends(require_action(Action.VIEW)),
     db: AsyncSession = Depends(get_db),
 ):
-    total = await db.scalar(
+    total_q = (
         select(func.count()).select_from(GanttTask)
         .where(GanttTask.project_id == str(project_id))
         .where(GanttTask.deleted_at == None)
     )
-
-    tasks = await db.scalars(
+    tasks_q = (
         select(GanttTask)
         .where(GanttTask.project_id == str(project_id))
         .where(GanttTask.deleted_at == None)
         .order_by(GanttTask.row_order)
-        .limit(limit).offset(offset)
+    )
+    if estimate_batch_id:
+        total_q = total_q.where(GanttTask.estimate_batch_id == str(estimate_batch_id))
+        tasks_q = tasks_q.where(GanttTask.estimate_batch_id == str(estimate_batch_id))
+    tasks_q = tasks_q.limit(limit).offset(offset)
+
+    total = await db.scalar(total_q)
+
+    tasks = await db.scalars(
+        tasks_q
     )
 
     enriched = [await _enrich_task(t, db) for t in tasks]
@@ -126,12 +141,19 @@ async def create_task(
 ):
     from uuid import uuid4
 
+    estimate_batch_id = None
+    if body.parent_id:
+        parent = await db.get(GanttTask, body.parent_id)
+        estimate_batch_id = parent.estimate_batch_id if parent else None
+
     task = GanttTask(
         id           = str(uuid4()),
         project_id   = str(project_id),
+        estimate_batch_id = estimate_batch_id,
         name         = body.name,
         start_date   = body.start_date,
         working_days = body.working_days,
+        workers_count = body.workers_count if body.type != "project" else None,
         parent_id    = body.parent_id,
         assignee_id  = body.assignee_id,
         type         = body.type,
@@ -214,6 +236,38 @@ async def update_task(
     return TaskPatchResponse(
         task           = await _enrich_task(task, db),
         affected_tasks = affected,
+    )
+
+
+@router.post("/{task_id}/split", response_model=TaskSplitResponse)
+async def split_task(
+    project_id: UUID,
+    task_id: UUID,
+    body: TaskSplitRequest,
+    current_user = Depends(get_current_user),
+    member_and_task = Depends(require_task_in_project(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    _, task = member_and_task
+
+    try:
+        updated_task, created_task, affected = await split_task_by_date(
+            task=task,
+            split_date=body.split_date,
+            new_workers_count=body.new_workers_count,
+            actor_id=current_user.id,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    await db.commit()
+    await db.refresh(updated_task)
+    await db.refresh(created_task)
+
+    return TaskSplitResponse(
+        updated_task=await _enrich_task(updated_task, db),
+        created_task=await _enrich_task(created_task, db),
+        affected_tasks=affected,
     )
 
 

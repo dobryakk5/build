@@ -91,6 +91,7 @@ class GanttTaskDTO:
     name:        str
     start_date:  date
     working_days: int
+    workers_count: int | None
     is_group:    bool
     type:        str       # task | project
     color:       str
@@ -155,6 +156,7 @@ class GanttBuilder:
                     name         = est.work_name,
                     start_date   = task_start,
                     working_days = dur,
+                    workers_count = workers,
                     is_group     = False,
                     type         = "task",
                     color        = color,
@@ -179,6 +181,7 @@ class GanttBuilder:
                 name         = section_name,
                 start_date   = current_start,
                 working_days = total_days,
+                workers_count = None,
                 is_group     = True,
                 type         = "project",
                 color        = color,

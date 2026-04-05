@@ -2,10 +2,12 @@ export type DashboardStatus = "green" | "yellow" | "red";
 
 export interface Task {
   id: string;
+  estimate_batch_id?: string | null;
   pid: string | null;
   name: string;
   start: string;
   dur: number;
+  workers_count?: number | null;
   prog: number;
   clr: string;
   depends_on: string | null;
@@ -20,6 +22,43 @@ export interface Project {
   budget?: number | null;
   tasks_count?: number;
   members_count?: number;
+}
+
+export interface EstimateBatch {
+  id: string;
+  project_id: string;
+  name: string;
+  estimate_kind: "country_house" | "apartment" | "non_residential" | string;
+  source_filename?: string | null;
+  estimates_count: number;
+  gantt_tasks_count: number;
+  fer_matched_count: number;
+  total_price: number;
+  created_at: string;
+}
+
+export interface EstimateRow {
+  id: string;
+  estimate_batch_id?: string | null;
+  section?: string | null;
+  work_name: string;
+  unit?: string | null;
+  quantity?: number | null;
+  unit_price?: number | null;
+  total_price?: number | null;
+  enir_code?: string | null;
+  fer_table_id?: number | null;
+  fer_work_type?: string | null;
+  fer_match_score?: number | null;
+}
+
+export interface EstimateSummary {
+  total: number;
+  sections: Array<{
+    name: string;
+    subtotal: number;
+    items: number;
+  }>;
 }
 
 export interface User {
