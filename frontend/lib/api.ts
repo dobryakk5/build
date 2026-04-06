@@ -5,6 +5,7 @@ import type {
   EnirParagraphShort,
   FerBrowseResponse,
   FerCollectionSummary,
+  FerSearchResult,
   FerTableDetail,
   EstimateBatch,
   EstimateRow,
@@ -206,6 +207,9 @@ export const enir = {
 export const fer = {
   collections: () =>
     request<FerCollectionSummary[]>("/fer/collections"),
+
+  search: (q: string, limit = 50) =>
+    request<FerSearchResult[]>(`/fer/search?q=${encodeURIComponent(q)}&limit=${limit}`),
 
   browse: (params: { collectionId: number; sectionId?: number; subsectionId?: number }) => {
     const search = new URLSearchParams({

@@ -272,6 +272,20 @@ export interface FerBrowseResponse {
   items: FerBrowseItem[];
 }
 
+export interface FerSearchResult {
+  table_id: number;
+  table_title: string;
+  row_count: number;
+  table_url: string;
+  common_work_name: string | null;
+  collection: FerCollectionRef;
+  section: FerSectionRef | null;
+  subsection: FerSectionRef | null;
+  match_scope: "table_title" | "common_work_name" | "row_slug" | "clarification";
+  matched_text: string | null;
+  matching_rows_count: number;
+}
+
 export interface FerTableRow {
   id: number;
   row_slug: string | null;

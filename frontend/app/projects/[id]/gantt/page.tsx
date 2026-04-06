@@ -498,6 +498,8 @@ export default function App() {
   const [batches, setBatches] = useState<EstimateBatch[]>([]);
   const [batchesLoaded, setBatchesLoaded] = useState(false);
   const [activeBatchId, setActiveBatchId] = useState<string | null>(batchFromUrl);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [taskError, setTaskError] = useState<string | null>(null);
   const [coll, setColl] = useState<Set<string>>(new Set());
   const [sel, setSel] = useState<string | null>("1");
   const [editing, setEditing] = useState<EditingState | null>(null);
@@ -527,6 +529,7 @@ export default function App() {
     setColl(new Set());
     setSel(null);
     setApiLoaded(false);
+    setTaskError(null);
     try {
       const data = await ganttApi.list(pid, targetBatchId);
       const apiTasks = (data?.tasks ?? []) as ApiTask[];
@@ -536,8 +539,9 @@ export default function App() {
       } else {
         setTasks([]);
       }
-    } catch {
+    } catch (error: unknown) {
       setTasks([]);
+      setTaskError(error instanceof Error ? error.message : "Не удалось загрузить задачи Ганта.");
     } finally {
       setApiLoaded(true);
     }
@@ -548,6 +552,7 @@ export default function App() {
     projects.get(pid).then((project) => {
       if (project?.name) setPname(project.name);
     }).catch(() => {});
+    setBatchError(null);
     estimates.batches(pid).then((data) => {
       setBatches(data);
       const latestBatchId = data.length ? data[data.length - 1]?.id : null;
@@ -556,6 +561,7 @@ export default function App() {
     }).catch(() => {
       setBatches([]);
       setActiveBatchId(batchFromUrl ?? null);
+      setBatchError("Не удалось загрузить блоки сметы для Ганта. Проверьте backend и миграции БД.");
     }).finally(() => setBatchesLoaded(true));
   }, [batchFromUrl, pid]);
 
@@ -980,6 +986,18 @@ export default function App() {
                 Отдельный гант по выбранной смете
               </span>
             )}
+          </div>
+        )}
+
+        {batchError && (
+          <div style={{ padding: "10px 12px", background: "rgba(239,68,68,.06)", borderBottom: "1px solid rgba(239,68,68,.18)", color: "var(--red)", fontSize: 12 }}>
+            {batchError}
+          </div>
+        )}
+
+        {taskError && (
+          <div style={{ padding: "10px 12px", background: "rgba(239,68,68,.06)", borderBottom: "1px solid rgba(239,68,68,.18)", color: "var(--red)", fontSize: 12 }}>
+            {taskError}
           </div>
         )}
 

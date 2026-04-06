@@ -267,6 +267,140 @@ async def fer_browse(
     }
 
 
+@router.get("/search")
+async def fer_search(
+    q: str = Query(..., min_length=1),
+    limit: int = Query(50, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    query = q.strip()
+    if not query:
+        return []
+
+    rows = await _fetch_all(
+        db,
+        """
+        WITH matched AS (
+            SELECT
+                t.id AS table_id,
+                t.table_title,
+                t.row_count::int AS row_count,
+                t.table_url,
+                t.common_work_name,
+                c.id AS collection_id,
+                c.num AS collection_num,
+                c.name AS collection_name,
+                s.id AS section_id,
+                s.title AS section_title,
+                ss.id AS subsection_id,
+                ss.title AS subsection_title,
+                CASE
+                    WHEN t.table_title ILIKE :pattern THEN 4
+                    WHEN COALESCE(t.common_work_name, '') ILIKE :pattern THEN 3
+                    WHEN COALESCE(fr.row_slug, '') ILIKE :pattern THEN 2
+                    ELSE 1
+                END AS match_rank,
+                CASE
+                    WHEN t.table_title ILIKE :pattern THEN 'table_title'
+                    WHEN COALESCE(t.common_work_name, '') ILIKE :pattern THEN 'common_work_name'
+                    WHEN COALESCE(fr.row_slug, '') ILIKE :pattern THEN 'row_slug'
+                    ELSE 'clarification'
+                END AS match_scope,
+                CASE
+                    WHEN t.table_title ILIKE :pattern THEN t.table_title
+                    WHEN COALESCE(t.common_work_name, '') ILIKE :pattern THEN t.common_work_name
+                    WHEN COALESCE(fr.row_slug, '') ILIKE :pattern THEN fr.row_slug
+                    ELSE fr.clarification
+                END AS matched_text
+            FROM fer.fer_tables t
+            JOIN fer.collections c ON c.id = t.collection_id
+            LEFT JOIN fer.sections s ON s.id = t.section_id
+            LEFT JOIN fer.subsections ss ON ss.id = t.subsection_id
+            LEFT JOIN fer.fer_rows fr ON fr.table_id = t.id
+            WHERE t.table_title ILIKE :pattern
+               OR COALESCE(t.common_work_name, '') ILIKE :pattern
+               OR COALESCE(fr.row_slug, '') ILIKE :pattern
+               OR COALESCE(fr.clarification, '') ILIKE :pattern
+        )
+        SELECT
+            table_id,
+            table_title,
+            row_count,
+            table_url,
+            common_work_name,
+            collection_id,
+            collection_num,
+            collection_name,
+            section_id,
+            section_title,
+            subsection_id,
+            subsection_title,
+            MAX(match_rank)::int AS match_rank,
+            COUNT(*) FILTER (WHERE match_scope IN ('row_slug', 'clarification'))::int AS matching_rows_count,
+            (ARRAY_AGG(match_scope ORDER BY match_rank DESC, matched_text NULLS LAST))[1] AS match_scope,
+            (ARRAY_REMOVE(ARRAY_AGG(matched_text ORDER BY match_rank DESC, matched_text NULLS LAST), NULL))[1] AS matched_text
+        FROM matched
+        GROUP BY
+            table_id,
+            table_title,
+            row_count,
+            table_url,
+            common_work_name,
+            collection_id,
+            collection_num,
+            collection_name,
+            section_id,
+            section_title,
+            subsection_id,
+            subsection_title
+        ORDER BY
+            MAX(match_rank) DESC,
+            collection_num,
+            table_id
+        LIMIT :limit
+        """,
+        {
+            "pattern": f"%{query}%",
+            "limit": limit,
+        },
+    )
+
+    return [
+        {
+            "table_id": row["table_id"],
+            "table_title": row["table_title"],
+            "row_count": row["row_count"],
+            "table_url": row["table_url"],
+            "common_work_name": row["common_work_name"],
+            "collection": {
+                "id": row["collection_id"],
+                "num": row["collection_num"],
+                "name": row["collection_name"],
+            },
+            "section": (
+                {
+                    "id": row["section_id"],
+                    "title": row["section_title"],
+                }
+                if row["section_id"] is not None
+                else None
+            ),
+            "subsection": (
+                {
+                    "id": row["subsection_id"],
+                    "title": row["subsection_title"],
+                }
+                if row["subsection_id"] is not None
+                else None
+            ),
+            "match_scope": row["match_scope"],
+            "matched_text": row["matched_text"],
+            "matching_rows_count": row["matching_rows_count"],
+        }
+        for row in rows
+    ]
+
+
 @router.get("/table/{table_id}")
 async def fer_table(table_id: int, db: AsyncSession = Depends(get_db)):
     table = await _fetch_one(

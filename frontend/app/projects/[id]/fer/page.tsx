@@ -9,6 +9,7 @@ import type {
   FerBrowseItem,
   FerBrowseResponse,
   FerCollectionSummary,
+  FerSearchResult,
   FerTableDetail,
   FerTableRow,
 } from "@/lib/types";
@@ -69,6 +70,13 @@ function itemMarker(item: FerBrowseItem) {
   return "Таблица";
 }
 
+function searchScopeLabel(scope: FerSearchResult["match_scope"]) {
+  if (scope === "table_title") return "Совпадение в названии таблицы";
+  if (scope === "common_work_name") return "Совпадение в общем наименовании";
+  if (scope === "row_slug") return "Совпадение в коде строки";
+  return "Совпадение в тексте строки";
+}
+
 export default function FerPage() {
   const [collections, setCollections] = useState<FerCollectionSummary[]>([]);
   const [collectionsLoad, setCollectionsLoad] = useState(true);
@@ -76,6 +84,11 @@ export default function FerPage() {
   const [browseLoad, setBrowseLoad] = useState(false);
   const [detail, setDetail] = useState<FerTableDetail | null>(null);
   const [detailLoad, setDetailLoad] = useState(false);
+  const [searchValue, setSearchValue] = useState("");
+  const [searchResults, setSearchResults] = useState<FerSearchResult[]>([]);
+  const [searchLoad, setSearchLoad] = useState(false);
+  const [searchActive, setSearchActive] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   useEffect(() => {
     ferApi.collections()
@@ -88,6 +101,14 @@ export default function FerPage() {
     setDetail(null);
   }
 
+  function resetSearch() {
+    setSearchValue("");
+    setSearchResults([]);
+    setSearchActive(false);
+    setSearchLoad(false);
+    setSearchError(null);
+  }
+
   function openLevel(params: { collectionId: number; sectionId?: number; subsectionId?: number }) {
     setBrowseLoad(true);
     setDetail(null);
@@ -98,6 +119,28 @@ export default function FerPage() {
 
   function openCollection(collection: FerCollectionSummary) {
     openLevel({ collectionId: collection.id });
+  }
+
+  function submitSearch(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const query = searchValue.trim();
+    if (!query) {
+      resetSearch();
+      return;
+    }
+
+    setSearchActive(true);
+    setSearchLoad(true);
+    setSearchError(null);
+    setDetail(null);
+    ferApi.search(query)
+      .then(setSearchResults)
+      .catch((error: unknown) => {
+        setSearchResults([]);
+        setSearchError(error instanceof Error ? error.message : "Не удалось выполнить поиск");
+      })
+      .finally(() => setSearchLoad(false));
   }
 
   function openItem(item: FerBrowseItem) {
@@ -128,22 +171,28 @@ export default function FerPage() {
   }
 
   function openBreadcrumb(crumb: FerBreadcrumbItem) {
-    if (!browse) {
+    const collectionId = browse?.collection.id ?? detail?.collection.id;
+    const sectionId = browse?.section?.id ?? detail?.section?.id;
+
+    if (collectionId == null) {
       return;
     }
 
     if (crumb.kind === "collection") {
-      openLevel({ collectionId: browse.collection.id });
+      setSearchActive(false);
+      openLevel({ collectionId });
       return;
     }
     if (crumb.kind === "section") {
-      openLevel({ collectionId: browse.collection.id, sectionId: crumb.id });
+      setSearchActive(false);
+      openLevel({ collectionId, sectionId: crumb.id });
       return;
     }
-    if (crumb.kind === "subsection" && browse.section) {
+    if (crumb.kind === "subsection" && sectionId != null) {
+      setSearchActive(false);
       openLevel({
-        collectionId: browse.collection.id,
-        sectionId: browse.section.id,
+        collectionId,
+        sectionId,
         subsectionId: crumb.id,
       });
     }
@@ -168,22 +217,105 @@ export default function FerPage() {
               </div>
               <div style={{ fontSize: 14, fontWeight: 700 }}>ФЕР</div>
             </div>
-            {browse && (
-              <button
-                onClick={openCollections}
-                style={{
-                  border: "1px solid var(--border)",
-                  background: "transparent",
-                  borderRadius: 4,
-                  cursor: "pointer",
-                  fontSize: 11,
-                  color: "var(--muted)",
-                  padding: "5px 8px",
-                }}
-              >
-                Все сборники
-              </button>
-            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <form onSubmit={submitSearch} style={{ display: "flex", alignItems: "center", gap: 0 }}>
+                <input
+                  value={searchValue}
+                  onChange={(event) => setSearchValue(event.target.value)}
+                  placeholder="Поиск по ФЕР…"
+                  style={{
+                    width: 320,
+                    maxWidth: "min(320px, 62vw)",
+                    boxSizing: "border-box",
+                    background: "var(--bg)",
+                    border: "1px solid var(--border)",
+                    borderRight: "none",
+                    borderRadius: "4px 0 0 4px",
+                    padding: "7px 10px",
+                    fontSize: 12,
+                    color: "var(--text)",
+                    outline: "none",
+                  }}
+                />
+                <button
+                  type="submit"
+                  title="Искать"
+                  aria-label="Искать"
+                  style={{
+                    width: 34,
+                    height: 32,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    border: "1px solid var(--border)",
+                    background: "var(--bg)",
+                    borderRadius: "0 4px 4px 0",
+                    cursor: "pointer",
+                    color: "var(--muted)",
+                    padding: 0,
+                  }}
+                >
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M11.5 11.5L15 15M13 7A6 6 0 1 1 1 7a6 6 0 0 1 12 0Z"
+                      stroke="currentColor"
+                      strokeWidth="1.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </button>
+              </form>
+
+              {detail && searchActive && (
+                <button
+                  onClick={() => setDetail(null)}
+                  style={{
+                    border: "1px solid var(--border)",
+                    background: "transparent",
+                    borderRadius: 4,
+                    cursor: "pointer",
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    padding: "5px 8px",
+                  }}
+                >
+                  К результатам
+                </button>
+              )}
+
+              {searchActive ? (
+                <button
+                  onClick={resetSearch}
+                  style={{
+                    border: "1px solid var(--border)",
+                    background: "transparent",
+                    borderRadius: 4,
+                    cursor: "pointer",
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    padding: "5px 8px",
+                  }}
+                >
+                  Сбросить поиск
+                </button>
+              ) : browse && (
+                <button
+                  onClick={openCollections}
+                  style={{
+                    border: "1px solid var(--border)",
+                    background: "transparent",
+                    borderRadius: 4,
+                    cursor: "pointer",
+                    fontSize: 11,
+                    color: "var(--muted)",
+                    padding: "5px 8px",
+                  }}
+                >
+                  Все сборники
+                </button>
+              )}
+            </div>
           </div>
 
           {detail ? (
@@ -197,6 +329,102 @@ export default function FerPage() {
           <EmptyPanel label="Загрузка таблицы ФЕР…" />
         ) : detail ? (
           <FerDetail detail={detail} />
+        ) : searchActive ? (
+          <div style={PANEL}>
+            <div
+              style={{
+                padding: "10px 14px",
+                borderBottom: "1px solid var(--border)",
+                fontSize: 11,
+                color: "var(--muted)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}
+            >
+              <span>Поиск по базе ФЕР</span>
+              {!searchLoad && !searchError && <span>{searchResults.length} результатов</span>}
+            </div>
+
+            {searchLoad ? (
+              <EmptyState label="Ищу совпадения в базе ФЕР…" />
+            ) : searchError ? (
+              <EmptyState label={searchError} />
+            ) : searchResults.length === 0 ? (
+              <EmptyState label="По вашему запросу ничего не найдено" />
+            ) : (
+              searchResults.map((item) => (
+                <button
+                  key={`search-${item.table_id}`}
+                  onClick={() => {
+                    setDetailLoad(true);
+                    ferApi.table(item.table_id)
+                      .then(setDetail)
+                      .finally(() => setDetailLoad(false));
+                  }}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "12px 14px",
+                    border: "none",
+                    borderBottom: "1px solid var(--border)",
+                    background: "transparent",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, lineHeight: 1.45, color: "var(--text)" }}>{item.table_title}</div>
+                      <div style={{ marginTop: 5, fontSize: 11, color: "var(--muted)", lineHeight: 1.45 }}>
+                        ФЕР {item.collection.num}
+                        {item.section ? ` • ${item.section.title}` : ""}
+                        {item.subsection ? ` • ${item.subsection.title}` : ""}
+                      </div>
+                      <div style={{ marginTop: 6, fontSize: 11, color: "var(--muted)" }}>
+                        {searchScopeLabel(item.match_scope)}
+                      </div>
+                      {item.matched_text && item.matched_text !== item.table_title && (
+                        <div
+                          style={{
+                            marginTop: 6,
+                            fontSize: 11,
+                            color: "var(--text)",
+                            background: "rgba(15,23,42,.03)",
+                            border: "1px solid var(--border)",
+                            borderRadius: 4,
+                            padding: "6px 8px",
+                            lineHeight: 1.45,
+                          }}
+                        >
+                          {item.matched_text}
+                        </div>
+                      )}
+                    </div>
+
+                    <div
+                      style={{
+                        flexShrink: 0,
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "flex-end",
+                        gap: 4,
+                        fontSize: 11,
+                        color: "var(--muted)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      <span style={{ fontFamily: "var(--mono)" }}>{item.row_count} строк</span>
+                      {item.matching_rows_count > 0 && (
+                        <span style={{ fontFamily: "var(--mono)" }}>{item.matching_rows_count} совп.</span>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              ))
+            )}
+          </div>
         ) : (
           <div style={PANEL}>
             {collectionsLoad ? (

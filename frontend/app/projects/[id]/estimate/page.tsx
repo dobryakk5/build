@@ -21,10 +21,13 @@ export default function EstimatePage() {
   const [loading, setLoading] = useState(true);
   const [matchJobId, setMatchJobId] = useState<string | null>(null);
   const [runningBatchId, setRunningBatchId] = useState<string | null>(null);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
 
   const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
 
   const loadBatches = useCallback(async () => {
+    setBatchError(null);
     const data = await estimates.batches(id);
     setBatches(data);
     const latestBatch = data.length ? data[data.length - 1]?.id : null;
@@ -33,6 +36,7 @@ export default function EstimatePage() {
   }, [batchFromUrl, id]);
 
   const loadEstimateData = useCallback(async (batchId: string) => {
+    setEstimateError(null);
     const [nextRows, nextSummary] = await Promise.all([
       estimates.list(id, batchId),
       estimates.summary(id, batchId),
@@ -45,6 +49,7 @@ export default function EstimatePage() {
     loadBatches().catch(() => {
       setBatches([]);
       setActiveBatchId(batchFromUrl ?? null);
+      setBatchError("Не удалось загрузить блоки сметы. Проверьте backend и миграции БД.");
       setLoading(false);
     });
   }, [batchFromUrl, loadBatches]);
@@ -58,6 +63,11 @@ export default function EstimatePage() {
     }
     setLoading(true);
     loadEstimateData(activeBatchId)
+      .catch((error: unknown) => {
+        setRows([]);
+        setSummary(null);
+        setEstimateError(error instanceof Error ? error.message : "Не удалось загрузить строки сметы.");
+      })
       .finally(() => setLoading(false));
   }, [activeBatchId, loadEstimateData]);
 
@@ -92,6 +102,15 @@ export default function EstimatePage() {
 
   if (loading) return <div style={{ padding: 24, color: "var(--muted)" }}>Загрузка сметы...</div>;
 
+  if (batchError) {
+    return (
+      <div style={{ padding: 48, textAlign: "center", color: "var(--red)" }}>
+        <div style={{ fontSize: 15, fontWeight: 600 }}>Ошибка загрузки сметы</div>
+        <div style={{ fontSize: 13, marginTop: 8 }}>{batchError}</div>
+      </div>
+    );
+  }
+
   if (!batches.length) {
     return (
       <div style={{ padding: 48, textAlign: "center", color: "var(--muted)" }}>
@@ -123,8 +142,8 @@ export default function EstimatePage() {
             </button>
           ))}
         </div>
-        <div style={{ padding: 48, textAlign: "center", color: "var(--muted)" }}>
-          В выбранном блоке нет строк сметы.
+        <div style={{ padding: 48, textAlign: "center", color: estimateError ? "var(--red)" : "var(--muted)" }}>
+          {estimateError ?? "В выбранном блоке нет строк сметы."}
         </div>
       </div>
     );
