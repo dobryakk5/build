@@ -295,20 +295,29 @@ async def fer_search(
                 ss.id AS subsection_id,
                 ss.title AS subsection_title,
                 CASE
-                    WHEN t.table_title ILIKE :pattern THEN 4
-                    WHEN COALESCE(t.common_work_name, '') ILIKE :pattern THEN 3
+                    WHEN t.table_title ILIKE :pattern THEN 7
+                    WHEN COALESCE(t.common_work_name, '') ILIKE :pattern THEN 6
+                    WHEN COALESCE(ss.title, '') ILIKE :pattern THEN 5
+                    WHEN COALESCE(s.title, '') ILIKE :pattern THEN 4
+                    WHEN c.num ILIKE :pattern OR c.name ILIKE :pattern THEN 3
                     WHEN COALESCE(fr.row_slug, '') ILIKE :pattern THEN 2
                     ELSE 1
                 END AS match_rank,
                 CASE
                     WHEN t.table_title ILIKE :pattern THEN 'table_title'
                     WHEN COALESCE(t.common_work_name, '') ILIKE :pattern THEN 'common_work_name'
+                    WHEN COALESCE(ss.title, '') ILIKE :pattern THEN 'subsection'
+                    WHEN COALESCE(s.title, '') ILIKE :pattern THEN 'section'
+                    WHEN c.num ILIKE :pattern OR c.name ILIKE :pattern THEN 'collection'
                     WHEN COALESCE(fr.row_slug, '') ILIKE :pattern THEN 'row_slug'
                     ELSE 'clarification'
                 END AS match_scope,
                 CASE
                     WHEN t.table_title ILIKE :pattern THEN t.table_title
                     WHEN COALESCE(t.common_work_name, '') ILIKE :pattern THEN t.common_work_name
+                    WHEN COALESCE(ss.title, '') ILIKE :pattern THEN ss.title
+                    WHEN COALESCE(s.title, '') ILIKE :pattern THEN s.title
+                    WHEN c.num ILIKE :pattern OR c.name ILIKE :pattern THEN CONCAT('Сборник ', c.num, '. ', c.name)
                     WHEN COALESCE(fr.row_slug, '') ILIKE :pattern THEN fr.row_slug
                     ELSE fr.clarification
                 END AS matched_text
@@ -319,6 +328,10 @@ async def fer_search(
             LEFT JOIN fer.fer_rows fr ON fr.table_id = t.id
             WHERE t.table_title ILIKE :pattern
                OR COALESCE(t.common_work_name, '') ILIKE :pattern
+               OR c.num ILIKE :pattern
+               OR c.name ILIKE :pattern
+               OR COALESCE(s.title, '') ILIKE :pattern
+               OR COALESCE(ss.title, '') ILIKE :pattern
                OR COALESCE(fr.row_slug, '') ILIKE :pattern
                OR COALESCE(fr.clarification, '') ILIKE :pattern
         )

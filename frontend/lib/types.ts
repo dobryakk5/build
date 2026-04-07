@@ -281,7 +281,7 @@ export interface FerSearchResult {
   collection: FerCollectionRef;
   section: FerSectionRef | null;
   subsection: FerSectionRef | null;
-  match_scope: "table_title" | "common_work_name" | "row_slug" | "clarification";
+  match_scope: "collection" | "section" | "subsection" | "table_title" | "common_work_name" | "row_slug" | "clarification";
   matched_text: string | null;
   matching_rows_count: number;
 }

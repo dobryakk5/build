@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps         import get_current_user, require_action, get_project_member, get_db
 from app.core.permissions import Action
-from app.models           import DailyReport, DailyReportItem, GanttTask, ProjectMember, User
+from app.models           import DailyReport, DailyReportItem, Estimate, GanttTask, ProjectMember, User
 from app.services.gantt_service import update_leaf_progress
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["reports"])
@@ -65,6 +65,59 @@ async def list_reports(
             "issues":       r.issues,
         })
     return result
+
+
+# ── Журнал выполненных работ ──────────────────────────────────────────────────
+
+@router.get("/reports/journal")
+async def report_journal(
+    project_id: str,
+    member:     ProjectMember = Depends(require_action(Action.VIEW)),
+    db:         AsyncSession  = Depends(get_db),
+):
+    rows = (
+        await db.execute(
+            select(
+                DailyReportItem.id.label("id"),
+                DailyReportItem.report_id.label("report_id"),
+                DailyReportItem.task_id.label("task_id"),
+                DailyReportItem.work_done.label("work_done"),
+                DailyReportItem.workers_count.label("workers_count"),
+                DailyReportItem.volume_done.label("volume_done"),
+                DailyReportItem.volume_unit.label("volume_unit"),
+                DailyReportItem.created_at.label("created_at"),
+                DailyReport.report_date.label("report_date"),
+                GanttTask.name.label("task_name"),
+                Estimate.labor_hours.label("estimate_labor_hours"),
+            )
+            .join(DailyReport, DailyReport.id == DailyReportItem.report_id)
+            .join(GanttTask, GanttTask.id == DailyReportItem.task_id)
+            .join(Estimate, Estimate.id == GanttTask.estimate_id, isouter=True)
+            .where(DailyReport.project_id == project_id)
+            .where(DailyReport.status.in_(("submitted", "reviewed")))
+            .order_by(DailyReport.report_date.desc(), DailyReportItem.created_at.desc())
+        )
+    ).mappings()
+
+    return [
+        {
+            "man_hours": (
+                round(float(row["estimate_labor_hours"]) * float(row["volume_done"]), 2)
+                if row["estimate_labor_hours"] is not None and row["volume_done"] is not None
+                else None
+            ),
+            "id":            row["id"],
+            "report_id":     row["report_id"],
+            "task_id":       row["task_id"],
+            "task_name":     row["task_name"],
+            "work_done":     row["work_done"],
+            "workers_count": row["workers_count"],
+            "volume_done":   float(row["volume_done"]) if row["volume_done"] is not None else None,
+            "volume_unit":   row["volume_unit"],
+            "report_date":   str(row["report_date"]),
+        }
+        for row in rows
+    ]
 
 
 # ── Статус отчётов за сегодня ─────────────────────────────────────────────────

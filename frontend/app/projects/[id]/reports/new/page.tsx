@@ -36,7 +36,7 @@ export default function NewReportPage() {
       const task = tasks.find(t => t.id === tid);
       setItems(prev => ({
         ...prev,
-        [tid]: { work_done: "", progress_after: task?.progress ?? 0, workers_count: "" },
+        [tid]: { work_done: "", progress_after: task?.progress ?? 0, workers_count: "", volume_done: "", volume_unit: "" },
       }));
     }
   }
@@ -53,6 +53,8 @@ export default function NewReportPage() {
       const report_items = selectedTasks.map(t => ({
         task_id:        t.id,
         work_done:      items[t.id]?.work_done || "Выполнены работы",
+        volume_done:    items[t.id]?.volume_done ? Number(items[t.id].volume_done) : null,
+        volume_unit:    items[t.id]?.volume_unit?.trim() ? items[t.id].volume_unit.trim() : null,
         progress_after: Number(items[t.id]?.progress_after ?? t.progress),
         workers_count:  items[t.id]?.workers_count ? Number(items[t.id].workers_count) : null,
       }));
@@ -162,6 +164,25 @@ export default function NewReportPage() {
                     onChange={e=>setItem(t.id,"workers_count",e.target.value)}
                     placeholder="—"
                     style={{width:100,padding:"7px 10px",border:"1px solid var(--border2)",borderRadius:5,fontSize:13,outline:"none"}}/>
+                </div>
+
+                <div style={{display:"flex",gap:8,marginTop:10}}>
+                  <div>
+                    <label style={{fontSize:11,color:"var(--muted)",display:"block",marginBottom:4}}>Выполненный объём</label>
+                    <input type="number" min={0} step="0.001"
+                      value={items[t.id]?.volume_done ?? ""}
+                      onChange={e=>setItem(t.id,"volume_done",e.target.value)}
+                      placeholder="—"
+                      style={{width:120,padding:"7px 10px",border:"1px solid var(--border2)",borderRadius:5,fontSize:13,outline:"none"}}/>
+                  </div>
+                  <div>
+                    <label style={{fontSize:11,color:"var(--muted)",display:"block",marginBottom:4}}>Ед. изм.</label>
+                    <input
+                      value={items[t.id]?.volume_unit ?? ""}
+                      onChange={e=>setItem(t.id,"volume_unit",e.target.value)}
+                      placeholder="м2, м3, шт"
+                      style={{width:110,padding:"7px 10px",border:"1px solid var(--border2)",borderRadius:5,fontSize:13,outline:"none"}}/>
+                  </div>
                 </div>
               </div>
             ))}

@@ -152,6 +152,7 @@ export const comments = {
 
 export const reports = {
   list:   (pid: string)               => request<any[]>(`/projects/${pid}/reports`),
+  journal:(pid: string)               => request<any[]>(`/projects/${pid}/reports/journal`),
   today:  (pid: string)               => request<any>(`/projects/${pid}/reports/today`),
   get:    (pid: string, rid: string)  => request<any>(`/projects/${pid}/reports/${rid}`),
   create: (pid: string, body: any)    => request<any>(`/projects/${pid}/reports`, { method: "POST", body: JSON.stringify(body) }),

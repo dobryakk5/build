@@ -71,6 +71,9 @@ function itemMarker(item: FerBrowseItem) {
 }
 
 function searchScopeLabel(scope: FerSearchResult["match_scope"]) {
+  if (scope === "collection") return "Совпадение в сборнике";
+  if (scope === "section") return "Совпадение в разделе";
+  if (scope === "subsection") return "Совпадение в подразделе";
   if (scope === "table_title") return "Совпадение в названии таблицы";
   if (scope === "common_work_name") return "Совпадение в общем наименовании";
   if (scope === "row_slug") return "Совпадение в коде строки";

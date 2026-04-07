@@ -44,6 +44,16 @@ type DepArrow = {
   y2: number;
 };
 
+type PanelFormState = {
+  name: string;
+  start: string;
+  dur: string;
+  workers: string;
+  prog: string;
+  depends_on: string;
+  color: string;
+};
+
 const z = (n: number | string) => String(n).padStart(2, "0");
 const pd = (s: string) => {
   const [y, m, d] = s.split("-");
@@ -70,6 +80,21 @@ const uid = () => String(++_uid);
 function parseDeps(depends_on: string | null | undefined): string[] {
   if (!depends_on) return [];
   return depends_on.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+function resolveDependencyInput(raw: string, taskId: string, rows: TaskRow[], tasks: Task[]): string | null {
+  const value = raw.trim();
+  if (value === "" || value === "-" || value === "—") return null;
+  const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
+  const resolved = parts
+    .map((part) => {
+      const num = parseInt(part, 10);
+      if (!Number.isNaN(num) && num >= 1 && num <= rows.length) return rows[num - 1].id;
+      if (tasks.some((t) => t.id === part)) return part;
+      return null;
+    })
+    .filter((item): item is string => Boolean(item) && item !== taskId);
+  return resolved.length > 0 ? resolved.join(",") : null;
 }
 
 function resolveDates(tasks: Task[]): Task[] {
@@ -397,6 +422,19 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .pfield-label{font-size:10px;color:var(--muted);margin-bottom:2px;font-family:var(--mono);}
 .pfield-val{font-size:13px;font-weight:500;}
 .pfield-val.mono{font-family:var(--mono);}
+.pfield-input{
+  width:100%;margin-top:6px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;
+  font:inherit;color:var(--text);background:#fff;outline:none;
+}
+.pfield-input:focus{border-color:var(--blue);}
+.panel-actions{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:12px;}
+.panel-save-error{margin-right:auto;font-size:12px;color:#dc2626;line-height:1.4;}
+.panel-save-btn{
+  padding:8px 14px;background:var(--blue);color:#fff;border:none;border-radius:6px;cursor:pointer;
+  font-size:12px;font-weight:600;font-family:var(--sans);
+}
+.panel-save-btn:disabled{opacity:.5;cursor:not-allowed;}
+.panel-readonly-note{font-size:12px;color:var(--muted);line-height:1.5;}
 .prog-big{margin-top:4px;height:6px;background:#e2e8f0;border-radius:3px;overflow:hidden;}
 .prog-big-fill{height:100%;border-radius:3px;transition:width .3s;}
 
@@ -513,6 +551,9 @@ export default function App() {
   const [newComment, setNewComment] = useState("");
   const [splitDate, setSplitDate] = useState("");
   const [splitWorkers, setSplitWorkers] = useState("2");
+  const [panelForm, setPanelForm] = useState<PanelFormState | null>(null);
+  const [panelSaving, setPanelSaving] = useState(false);
+  const [panelSaveError, setPanelSaveError] = useState<string | null>(null);
 
   const lbRef = useRef<HTMLDivElement | null>(null);
   const rbRef = useRef<HTMLDivElement | null>(null);
@@ -612,6 +653,27 @@ export default function App() {
     });
     return map;
   }, [rows]);
+
+  useEffect(() => {
+    if (!panelTask) {
+      setPanelForm(null);
+      setPanelSaveError(null);
+      return;
+    }
+    const depNums = parseDeps(panelTask.depends_on)
+      .map((depId) => rows.findIndex((row) => row.id === depId) + 1)
+      .filter((num) => num > 0);
+    setPanelForm({
+      name: panelTask.name,
+      start: panelTask.start,
+      dur: String(panelTask.dur),
+      workers: panelTask.workers_count != null ? String(panelTask.workers_count) : "",
+      prog: String(panelTask.prog),
+      depends_on: depNums.join(","),
+      color: panelTask.clr ?? "#3b82f6",
+    });
+    setPanelSaveError(null);
+  }, [panelTask, rows]);
 
   const { origin, totalDays } = useMemo(() => {
     if (!tasks.length) return { origin: "2026-01-01", totalDays: 180 };
@@ -732,21 +794,7 @@ export default function App() {
     if (field === "workers") value = Math.max(1, parseInt(raw, 10) || 1);
     if (field === "prog") value = Math.max(0, Math.min(100, parseInt(raw, 10) || 0));
     if (field === "depends_on") {
-      value = raw.trim();
-      if (value === "" || value === "-" || value === "—") {
-        value = null;
-      } else {
-        const parts = value.split(",").map((s) => s.trim()).filter(Boolean);
-        const resolved = parts
-          .map((part) => {
-            const num = parseInt(part, 10);
-            if (!Number.isNaN(num) && num >= 1 && num <= rows.length) return rows[num - 1].id;
-            if (tasks.some((t) => t.id === part)) return part;
-            return null;
-          })
-          .filter((item): item is string => Boolean(item) && item !== id);
-        value = resolved.length > 0 ? resolved.join(",") : null;
-      }
+      value = resolveDependencyInput(raw, id, rows, tasks);
     }
     setTasks((current) => resolveDates(current.map((task) => (task.id === id ? updateTaskField(task, field, value) : task))));
     setEditing(null);
@@ -914,6 +962,57 @@ export default function App() {
 
   const selTask = tasks.find((t) => t.id === sel) ?? null;
   const canSplitPanelTask = Boolean(panelTask && !tasks.some((t) => t.pid === panelTask.id) && panelTask.dur > 1);
+  const canEditPanelTask = Boolean(panelTask && can(role,'edit'));
+  const panelTaskHasKids = Boolean(panelTask && tasks.some((t) => t.pid === panelTask.id));
+
+  const savePanelTask = useCallback(async () => {
+    if (!pid || !panelTask || !panelForm || !can(role,'edit')) return;
+
+    const trimmedName = panelForm.name.trim();
+    if (!trimmedName) {
+      setPanelSaveError("Укажите название задачи.");
+      return;
+    }
+
+    const workingDays = Math.max(1, parseInt(panelForm.dur, 10) || 1);
+    const workers = Math.max(1, parseInt(panelForm.workers, 10) || 1);
+    const progress = Math.max(0, Math.min(100, parseInt(panelForm.prog, 10) || 0));
+    const normalizedColor = panelForm.color.trim() || "#3b82f6";
+    const resolvedDeps = resolveDependencyInput(panelForm.depends_on, panelTask.id, rows, tasks);
+    const prevDeps = new Set(parseDeps(panelTask.depends_on));
+    const nextDeps = new Set(parseDeps(resolvedDeps));
+
+    const payload: Record<string, string | number | null> = {
+      name: trimmedName,
+      start_date: panelForm.start,
+      working_days: workingDays,
+      color: normalizedColor,
+    };
+
+    if (!panelTaskHasKids) {
+      payload.workers_count = workers;
+      payload.progress_override = progress;
+    }
+
+    setPanelSaving(true);
+    setPanelSaveError(null);
+    try {
+      await ganttApi.update(pid, panelTask.id, payload);
+
+      for (const depId of prevDeps) {
+        if (!nextDeps.has(depId)) await ganttApi.removeDep(pid, panelTask.id, depId);
+      }
+      for (const depId of nextDeps) {
+        if (!prevDeps.has(depId)) await ganttApi.addDep(pid, panelTask.id, depId);
+      }
+
+      await loadTasks(panelTask.id, activeBatchId);
+    } catch (error) {
+      setPanelSaveError(error instanceof Error ? error.message : "Не удалось сохранить задачу.");
+    } finally {
+      setPanelSaving(false);
+    }
+  }, [activeBatchId, loadTasks, panelForm, panelTask, panelTaskHasKids, pid, role, rows, tasks]);
 
   const splitPanelTask = useCallback(async () => {
     if (!pid || !panelTask || !canSplitPanelTask) return;
@@ -1286,9 +1385,32 @@ export default function App() {
                 <div className="panel-section">
                   <div className="panel-section-title">Детали</div>
                   <div className="panel-grid">
+                    <div className="pfield" style={{gridColumn:'1/-1'}}>
+                      <div className="pfield-label">ID</div>
+                      <div className="pfield-val mono">{panelTask.id}</div>
+                    </div>
+                    <div className="pfield" style={{gridColumn:'1/-1'}}>
+                      <div className="pfield-label">Название</div>
+                      {canEditPanelTask && panelForm
+                        ? <input
+                            className="pfield-input"
+                            value={panelForm.name}
+                            onChange={e=>setPanelForm(current => current ? { ...current, name: e.target.value } : current)}
+                          />
+                        : <div className="pfield-val">{panelTask.name}</div>
+                      }
+                    </div>
                     <div className="pfield">
                       <div className="pfield-label">Начало</div>
-                      <div className="pfield-val mono">{dispD(panelTask.start)}</div>
+                      {canEditPanelTask && panelForm
+                        ? <input
+                            type="date"
+                            className="pfield-input"
+                            value={panelForm.start}
+                            onChange={e=>setPanelForm(current => current ? { ...current, start: e.target.value } : current)}
+                          />
+                        : <div className="pfield-val mono">{dispD(panelTask.start)}</div>
+                      }
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Конец</div>
@@ -1296,28 +1418,91 @@ export default function App() {
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Длительность</div>
-                      <div className="pfield-val mono">{panelTask.dur} дн.</div>
+                      {canEditPanelTask && panelForm
+                        ? <input
+                            type="number"
+                            min={1}
+                            className="pfield-input"
+                            value={panelForm.dur}
+                            onChange={e=>setPanelForm(current => current ? { ...current, dur: e.target.value } : current)}
+                          />
+                        : <div className="pfield-val mono">{panelTask.dur} дн.</div>
+                      }
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Исполнители</div>
-                      <div className="pfield-val mono">{panelTask.workers_count ?? "—"}</div>
+                      {canEditPanelTask && panelForm && !panelTaskHasKids
+                        ? <input
+                            type="number"
+                            min={1}
+                            className="pfield-input"
+                            value={panelForm.workers}
+                            onChange={e=>setPanelForm(current => current ? { ...current, workers: e.target.value } : current)}
+                          />
+                        : <div className="pfield-val mono">{panelTask.workers_count ?? "—"}</div>
+                      }
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Зависит от</div>
-                      <div className="pfield-val mono">{depNums2.length?depNums2.map(n=>`#${n}`).join(', '):'—'}</div>
+                      {canEditPanelTask && panelForm
+                        ? <input
+                            className="pfield-input"
+                            placeholder="№,№…"
+                            value={panelForm.depends_on}
+                            onChange={e=>setPanelForm(current => current ? { ...current, depends_on: e.target.value } : current)}
+                          />
+                        : <div className="pfield-val mono">{depNums2.length?depNums2.map(n=>`#${n}`).join(', '):'—'}</div>
+                      }
+                    </div>
+                    <div className="pfield">
+                      <div className="pfield-label">Цвет</div>
+                      {canEditPanelTask && panelForm
+                        ? <input
+                            className="pfield-input"
+                            value={panelForm.color}
+                            onChange={e=>setPanelForm(current => current ? { ...current, color: e.target.value } : current)}
+                          />
+                        : <div className="pfield-val mono">{panelTask.clr}</div>
+                      }
                     </div>
                     <div className="pfield" style={{gridColumn:'1/-1'}}>
                       <div className="pfield-label">Прогресс</div>
-                      <div style={{display:'flex',alignItems:'center',gap:8,marginTop:2}}>
-                        <div className="prog-big" style={{flex:1}}>
-                          <div className="prog-big-fill" style={{width:panelTask.prog+'%',background:progColor}}/>
-                        </div>
-                        <span style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:600,color:progColor}}>
-                          {panelTask.prog}%
-                        </span>
-                      </div>
+                      {canEditPanelTask && panelForm && !panelTaskHasKids
+                        ? <div style={{display:'flex',alignItems:'center',gap:10,marginTop:6}}>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={panelForm.prog}
+                              onChange={e=>setPanelForm(current => current ? { ...current, prog: e.target.value } : current)}
+                              style={{flex:1,accentColor:'var(--blue)'}}
+                            />
+                            <span style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:600,color:progColor,minWidth:44,textAlign:'right'}}>
+                              {panelForm.prog}%
+                            </span>
+                          </div>
+                        : <div style={{display:'flex',alignItems:'center',gap:8,marginTop:2}}>
+                            <div className="prog-big" style={{flex:1}}>
+                              <div className="prog-big-fill" style={{width:panelTask.prog+'%',background:progColor}}/>
+                            </div>
+                            <span style={{fontFamily:'var(--mono)',fontSize:12,fontWeight:600,color:progColor}}>
+                              {panelTask.prog}%
+                            </span>
+                          </div>
+                      }
                     </div>
                   </div>
+                  {canEditPanelTask
+                    ? <div className="panel-actions">
+                        {panelSaveError && <div className="panel-save-error">{panelSaveError}</div>}
+                        <button className="panel-save-btn" onClick={savePanelTask} disabled={panelSaving || !panelForm}>
+                          {panelSaving ? "Сохранение..." : "Сохранить"}
+                        </button>
+                      </div>
+                    : <div className="panel-readonly-note" style={{marginTop:12}}>
+                        Карточка доступна только для просмотра в текущей роли.
+                      </div>
+                  }
                 </div>
 
                 <div className="panel-section">
