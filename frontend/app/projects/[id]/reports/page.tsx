@@ -1,11 +1,12 @@
 "use client";
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { reports } from "@/lib/api";
 import { fmtDate } from "@/lib/dateUtils";
 
 export default function ReportsPage() {
   const { id }   = useParams<{ id: string }>();
+  const router   = useRouter();
   const [today,  setToday]  = useState<any>(null);
   const [list,   setList]   = useState<any[]>([]);
   const [selRep, setSelRep] = useState<any>(null);
@@ -72,7 +73,24 @@ export default function ReportsPage() {
 
         {/* History */}
         <div style={{flex:1,overflow:"auto",padding:16}}>
-          <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em",marginBottom:10,fontFamily:"var(--mono)"}}>История отчётов</div>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8,marginBottom:10}}>
+            <div style={{fontSize:10,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".08em",fontFamily:"var(--mono)"}}>История отчётов</div>
+            <button
+              onClick={() => router.push(`/projects/${id}/reports/new`)}
+              style={{
+                padding:"7px 10px",
+                borderRadius:6,
+                border:"1px solid rgba(59,130,246,.18)",
+                background:"rgba(59,130,246,.08)",
+                color:"#1d4ed8",
+                cursor:"pointer",
+                fontSize:12,
+                fontWeight:600,
+              }}
+            >
+              + Добавить
+            </button>
+          </div>
           {list.map(r => (
             <div key={r.id}
               onClick={()=>openReport(r.id)}

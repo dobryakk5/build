@@ -2,9 +2,10 @@
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import { projects } from "@/lib/api";
+import EmailVerificationBanner from "@/components/EmailVerificationBanner";
+import { auth, projects } from "@/lib/api";
 import { fmtMoney } from "@/lib/dateUtils";
-import type { Project } from "@/lib/types";
+import type { CurrentUser, Project } from "@/lib/types";
 
 const STATUS_CFG = {
   green:  { label: "По графику",     dot: "#22c55e", bg: "rgba(34,197,94,.1)",   border: "rgba(34,197,94,.3)"   },
@@ -18,10 +19,15 @@ export default function ProjectsPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [newName,  setNewName]  = useState("");
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [resendingVerification, setResendingVerification] = useState(false);
 
   useEffect(() => {
-    projects.list()
-      .then(setList)
+    Promise.all([auth.me(), projects.list()])
+      .then(([user, projectList]) => {
+        setCurrentUser(user);
+        setList(projectList);
+      })
       .catch(() => router.push("/auth/login"))
       .finally(() => setLoading(false));
   }, []);
@@ -40,6 +46,17 @@ export default function ProjectsPage() {
     const status = project.dashboard_status;
     if (status in counts) counts[status]++;
   });
+
+  async function handleResendVerification() {
+    setResendingVerification(true);
+    try {
+      await auth.resendVerification();
+    } catch {
+      // the backend already returns a readable message; banner remains visible
+    } finally {
+      setResendingVerification(false);
+    }
+  }
 
   if (loading) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",color:"var(--muted)"}}>Загрузка...</div>;
 
@@ -63,6 +80,10 @@ export default function ProjectsPage() {
       </div>
 
       <div style={{maxWidth:1100,margin:"0 auto",padding:"24px"}}>
+        {currentUser && !currentUser.email_verified && (
+          <EmailVerificationBanner loading={resendingVerification} onResend={handleResendVerification} />
+        )}
+
         {/* Stats */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12,marginBottom:24}}>
           {[

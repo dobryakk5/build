@@ -1,6 +1,7 @@
 from .base         import Base, TimestampMixin, SoftDeleteMixin
 from .organization import Organization
 from .user         import User
+from .auth         import AuthSession, EmailVerificationToken, PasswordResetToken, AuthAuditEvent
 from .project      import Project, ProjectMember
 from .estimate_batch import EstimateBatch
 from .estimate     import Estimate
@@ -42,6 +43,7 @@ from .enir         import (
 __all__ = [
     "Base",
     "Organization", "User",
+    "AuthSession", "EmailVerificationToken", "PasswordResetToken", "AuthAuditEvent",
     "Project", "ProjectMember",
     "EstimateBatch",
     "Estimate",

@@ -300,7 +300,7 @@ export default function UploadPage() {
                 disabled={matching}
                 style={{ padding: "8px 18px", background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border2)", borderRadius: 5, fontSize: 13, fontWeight: 600, cursor: matching ? "default" : "pointer", opacity: matching ? 0.7 : 1 }}
               >
-                {matching && runningBatchId === result.estimate_batch_id ? "Определяем типы ФЕР..." : "Определить типы работ ФЕР"}
+                {matching && runningBatchId === result.estimate_batch_id ? "Векторно сопоставляем..." : "Векторно сопоставить с ФЕР"}
               </button>
             )}
             <button
@@ -332,7 +332,7 @@ export default function UploadPage() {
       {matchStatus === "processing" && (
         <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.18)", borderRadius: 6 }}>
           <div style={{ color: "var(--blue-dark)", fontWeight: 600, fontSize: 13 }}>
-            ⏳ Идёт сопоставление сметы с ФЕР
+            ⏳ Идёт векторное сопоставление сметы с ФЕР
           </div>
         </div>
       )}
@@ -340,7 +340,7 @@ export default function UploadPage() {
       {matchStatus === "done" && matchJob?.result && (
         <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.18)", borderRadius: 6 }}>
           <div style={{ color: "#15803d", fontWeight: 600, fontSize: 13 }}>
-            ✓ Сопоставление с ФЕР завершено
+            ✓ Векторное сопоставление с ФЕР завершено
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
             Размечено строк: <b style={{ color: "var(--text)" }}>{matchJob.result.matched_rows_count ?? 0}</b>
@@ -353,7 +353,7 @@ export default function UploadPage() {
 
       {matchStatus === "failed" && (
         <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.18)", borderRadius: 6 }}>
-          <div style={{ color: "var(--red)", fontWeight: 600, fontSize: 13 }}>❌ Ошибка сопоставления с ФЕР</div>
+          <div style={{ color: "var(--red)", fontWeight: 600, fontSize: 13 }}>❌ Ошибка векторного сопоставления с ФЕР</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{matchJob?.result?.error}</div>
         </div>
       )}
@@ -411,10 +411,10 @@ export default function UploadPage() {
                   style={{ padding: "7px 12px", border: "1px solid var(--border2)", borderRadius: 5, background: "var(--surface)", cursor: matching ? "default" : "pointer", fontSize: 12, fontWeight: 600, opacity: matching ? 0.7 : 1 }}
                 >
                   {matching && runningBatchId === batch.id
-                    ? "Сопоставляем..."
+                    ? "Векторно сопоставляем..."
                     : batch.fer_matched_count > 0
-                      ? "Обновить типы ФЕР"
-                      : "Сопоставить с ФЕР"}
+                      ? "Обновить векторные типы ФЕР"
+                      : "Векторно сопоставить с ФЕР"}
                 </button>
                 <button
                   onClick={() => router.push(`/projects/${id}/estimate?batch=${batch.id}`)}

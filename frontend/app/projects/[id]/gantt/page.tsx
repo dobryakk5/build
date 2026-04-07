@@ -5,7 +5,11 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { estimates, gantt as ganttApi, projects } from "@/lib/api";
 import type { EstimateBatch, Task } from "@/lib/types";
 
-const DAY_W = 24;
+const DEFAULT_DAY_W = 24;
+const MIN_DAY_W = 12;
+const MAX_DAY_W = 56;
+const MOBILE_BREAKPOINT = 980;
+const MIN_RIGHT_PANEL_W = 520;
 const ROW_H = 32;
 
 type TaskRow = Task & {
@@ -55,6 +59,8 @@ type PanelFormState = {
 };
 
 const z = (n: number | string) => String(n).padStart(2, "0");
+const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
+const clampDayWidth = (n: number) => clamp(n, MIN_DAY_W, MAX_DAY_W);
 const pd = (s: string) => {
   const [y, m, d] = s.split("-");
   return new Date(Number(y), Number(m) - 1, Number(d));
@@ -71,6 +77,7 @@ const dispD = (s: string) => {
   return `${z(d.getDate())}.${z(d.getMonth() + 1)}`;
 };
 const MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"] as const;
+const getTouchDistance = (a: Touch, b: Touch) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 
 let _uid = 300;
 const uid = () => String(++_uid);
@@ -324,9 +331,12 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .pname{margin-left:auto;font-size:13px;font-weight:600;color:#e2e8f0;padding:4px 12px;border-radius:4px;background:var(--hdr2);border:1px solid var(--hdr3);cursor:pointer;}
 
 /* split */
-.split{display:flex;flex:1;overflow:hidden;}
+.split-vp{flex:1;overflow:hidden;position:relative;}
+.split-vp.narrow{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;}
+.split{display:flex;flex:1;overflow:hidden;min-height:100%;position:relative;}
 .splitter{width:4px;min-width:4px;background:#e2e8f0;cursor:col-resize;flex-shrink:0;transition:background .15s;}
 .splitter:hover,.splitter.drag{background:var(--blue);}
+.splitter.disabled{cursor:default;background:#cbd5e1;opacity:.55;pointer-events:none;}
 
 /* left */
 .left{display:flex;flex-direction:column;background:var(--surface);border-right:2px solid var(--hdr);flex-shrink:0;}
@@ -371,12 +381,23 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 
 /* right / gantt */
 .right{display:flex;flex-direction:column;flex:1;overflow:hidden;background:var(--surface);}
+.zoom-bar{
+  display:flex;align-items:center;gap:8px;padding:8px 10px;background:#f8fafc;
+  border-bottom:1px solid var(--border);flex-shrink:0;
+}
+.zoom-btn{
+  min-width:32px;height:32px;padding:0 10px;border-radius:8px;border:1px solid var(--border);
+  background:#fff;color:var(--text);font:600 13px var(--sans);cursor:pointer;
+}
+.zoom-btn:hover{border-color:#93c5fd;color:#1d4ed8;}
+.zoom-val{margin-left:auto;font-size:11px;color:var(--muted);font-family:var(--mono);}
 .ghdr{height:52px;min-height:52px;overflow:hidden;background:var(--hdr2);border-bottom:1px solid var(--hdr3);flex-shrink:0;}
 .mr{display:flex;height:26px;border-bottom:1px solid var(--hdr3);}
 .mc{display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#cbd5e1;border-right:1px solid var(--hdr3);flex-shrink:0;}
 .wr{display:flex;height:26px;}
 .wc{display:flex;align-items:center;justify-content:center;font-size:10px;color:#64748b;border-right:1px solid #1e293b;flex-shrink:0;font-family:var(--mono);}
 .gbw{flex:1;overflow:scroll;position:relative;}
+.gbw.zoomable{touch-action:pan-x pan-y;overscroll-behavior:contain;}
 .gb{position:relative;}
 .gl{position:absolute;top:0;bottom:0;width:1px;background:var(--border);pointer-events:none;}
 .gl.m{background:#e2e8f0;}
@@ -543,6 +564,9 @@ export default function App() {
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [editVal, setEditVal] = useState("");
   const [leftW, setLeftW] = useState(620);
+  const [dayWidth, setDayWidth] = useState(DEFAULT_DAY_W);
+  const [viewportW, setViewportW] = useState(1280);
+  const [isTouchDevice, setIsTouchDevice] = useState(false);
   const [pname, setPname] = useState("Объект");
   const [editP, setEditP] = useState(false);
   const [role, setRole] = useState<RoleKey>("pm");
@@ -562,6 +586,22 @@ export default function App() {
   const drg = useRef(false);
   const ssync = useRef(false);
   const inpRef = useRef<HTMLInputElement | null>(null);
+  const dayWidthRef = useRef(DEFAULT_DAY_W);
+  const pinchRef = useRef<{ startDistance: number; startDayWidth: number } | null>(null);
+
+  useEffect(() => {
+    dayWidthRef.current = dayWidth;
+  }, [dayWidth]);
+
+  useEffect(() => {
+    const syncViewport = () => {
+      setViewportW(window.innerWidth);
+      setIsTouchDevice(window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0);
+    };
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
 
   const loadTasks = useCallback(async (preferredTaskId?: string | null, batchIdOverride?: string | null) => {
     if (!pid) return;
@@ -685,7 +725,12 @@ export default function App() {
     return { origin: originDate, totalDays: diff(originDate, maxEnd) + 14 };
   }, [tasks]);
 
-  const W = totalDays * DAY_W;
+  const isCompactLayout = isTouchDevice || viewportW < MOBILE_BREAKPOINT;
+  const effectiveLeftW = isCompactLayout ? clamp(Math.round(viewportW * 0.42), 300, 360) : leftW;
+  const splitMinWidth = isCompactLayout ? effectiveLeftW + MIN_RIGHT_PANEL_W : 0;
+  const showZoomControls = isTouchDevice || viewportW < MOBILE_BREAKPOINT;
+  const canResizeSplit = !isCompactLayout;
+  const W = totalDays * dayWidth;
 
   const { mb, wb } = useMemo(() => {
     const months: Array<{ label: string; x: number; w: number }> = [];
@@ -699,35 +744,35 @@ export default function App() {
       if (start < end) {
         months.push({
           label: `${MONTHS[current.getMonth()]} ${current.getFullYear()}`,
-          x: start * DAY_W,
-          w: (end - start) * DAY_W,
+          x: start * dayWidth,
+          w: (end - start) * dayWidth,
         });
       }
       current = next;
       if (diff(origin, fd(current)) >= totalDays) break;
     }
     for (let day = 0; day < totalDays; day += 7) {
-      weeks.push({ x: day * DAY_W, w: 7 * DAY_W, label: dispD(addD(origin, day)) });
+      weeks.push({ x: day * dayWidth, w: 7 * dayWidth, label: dispD(addD(origin, day)) });
     }
     return { mb: months, wb: weeks };
-  }, [origin, totalDays]);
+  }, [dayWidth, origin, totalDays]);
 
   const gridLines = useMemo(() => {
     const lines: Array<{ x: number; m: boolean }> = [];
-    for (let day = 0; day < totalDays; day += 7) lines.push({ x: day * DAY_W, m: false });
+    for (let day = 0; day < totalDays; day += 7) lines.push({ x: day * dayWidth, m: false });
     const od = pd(origin);
     let current = new Date(od.getFullYear(), od.getMonth(), 1);
     while (true) {
       const next = new Date(current.getFullYear(), current.getMonth() + 1, 1);
       const dx = diff(origin, fd(next));
       if (dx >= totalDays) break;
-      if (dx > 0) lines.push({ x: dx * DAY_W, m: true });
+      if (dx > 0) lines.push({ x: dx * dayWidth, m: true });
       current = next;
     }
     return lines;
-  }, [origin, totalDays]);
+  }, [dayWidth, origin, totalDays]);
 
-  const todayX = diff(origin, TODAY) * DAY_W;
+  const todayX = diff(origin, TODAY) * dayWidth;
 
   const arrows = useMemo(() => {
     const result: DepArrow[] = [];
@@ -737,15 +782,15 @@ export default function App() {
         if (predIndex < 0) return;
         const pred = rows[predIndex];
         result.push({
-          x1: (diff(origin, pred.start) + pred.dur) * DAY_W,
+          x1: (diff(origin, pred.start) + pred.dur) * dayWidth,
           y1: predIndex * ROW_H + ROW_H / 2,
-          x2: diff(origin, row.start) * DAY_W,
+          x2: diff(origin, row.start) * dayWidth,
           y2: rowIndex * ROW_H + ROW_H / 2,
         });
       });
     });
     return result;
-  }, [origin, rows]);
+  }, [dayWidth, origin, rows]);
 
   const onRS = useCallback(() => {
     if (ssync.current || !rbRef.current) return;
@@ -761,6 +806,35 @@ export default function App() {
     if (rbRef.current) rbRef.current.scrollTop = lbRef.current.scrollTop;
     ssync.current = false;
   }, []);
+
+  const syncTimelineScroll = useCallback((nextScrollLeft: number) => {
+    if (!rbRef.current) return;
+    const maxScroll = Math.max(0, rbRef.current.scrollWidth - rbRef.current.clientWidth);
+    const clampedScroll = clamp(nextScrollLeft, 0, maxScroll);
+    ssync.current = true;
+    rbRef.current.scrollLeft = clampedScroll;
+    if (rhRef.current) rhRef.current.scrollLeft = clampedScroll;
+    ssync.current = false;
+  }, []);
+
+  const zoomTimeline = useCallback((nextWidth: number, anchorClientX?: number) => {
+    const clampedWidth = clampDayWidth(nextWidth);
+    const container = rbRef.current;
+    if (!container) {
+      setDayWidth(clampedWidth);
+      return;
+    }
+    if (Math.abs(clampedWidth - dayWidthRef.current) < 0.01) return;
+    const rect = container.getBoundingClientRect();
+    const anchorX = anchorClientX == null
+      ? container.clientWidth / 2
+      : clamp(anchorClientX - rect.left, 0, container.clientWidth);
+    const anchorDay = (container.scrollLeft + anchorX) / dayWidthRef.current;
+    setDayWidth(clampedWidth);
+    requestAnimationFrame(() => {
+      syncTimelineScroll(anchorDay * clampedWidth - anchorX);
+    });
+  }, [syncTimelineScroll]);
 
   useEffect(() => {
     const mv = (e: globalThis.MouseEvent) => {
@@ -778,6 +852,60 @@ export default function App() {
       window.removeEventListener("mouseup", up);
     };
   }, []);
+
+  useEffect(() => {
+    if (canResizeSplit) return;
+    drg.current = false;
+    splRef.current?.classList.remove("drag");
+  }, [canResizeSplit]);
+
+  useEffect(() => {
+    const container = rbRef.current;
+    if (!container) return;
+
+    const clearPinch = () => {
+      pinchRef.current = null;
+    };
+
+    const handleTouchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 2) {
+        clearPinch();
+        return;
+      }
+      const [firstTouch, secondTouch] = [event.touches[0], event.touches[1]];
+      pinchRef.current = {
+        startDistance: getTouchDistance(firstTouch, secondTouch),
+        startDayWidth: dayWidthRef.current,
+      };
+    };
+
+    const handleTouchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 2 || !pinchRef.current) return;
+      const [firstTouch, secondTouch] = [event.touches[0], event.touches[1]];
+      const currentDistance = getTouchDistance(firstTouch, secondTouch);
+      if (!currentDistance || !pinchRef.current.startDistance) return;
+      event.preventDefault();
+      const scale = currentDistance / pinchRef.current.startDistance;
+      const centerClientX = (firstTouch.clientX + secondTouch.clientX) / 2;
+      const nextDayWidth = clampDayWidth(pinchRef.current.startDayWidth * scale);
+      zoomTimeline(nextDayWidth, centerClientX);
+      pinchRef.current = {
+        startDistance: currentDistance,
+        startDayWidth: nextDayWidth,
+      };
+    };
+
+    container.addEventListener("touchstart", handleTouchStart, { passive: true });
+    container.addEventListener("touchmove", handleTouchMove, { passive: false });
+    container.addEventListener("touchend", clearPinch);
+    container.addEventListener("touchcancel", clearPinch);
+    return () => {
+      container.removeEventListener("touchstart", handleTouchStart);
+      container.removeEventListener("touchmove", handleTouchMove);
+      container.removeEventListener("touchend", clearPinch);
+      container.removeEventListener("touchcancel", clearPinch);
+    };
+  }, [zoomTimeline]);
 
   const startEdit = (id: string, field: EditingField, value: string | number | null | undefined) => {
     setEditing({ id, field });
@@ -1101,7 +1229,11 @@ export default function App() {
         )}
 
         {/* SPLIT */}
-        <div className="split">
+        <div className={`split-vp${isCompactLayout ? " narrow" : ""}`}>
+        <div
+          className="split"
+          style={isCompactLayout ? { width: splitMinWidth, minWidth: splitMinWidth } : undefined}
+        >
 
           {/* LOADING STATE */}
         {!apiLoaded && (
@@ -1112,8 +1244,8 @@ export default function App() {
         )}
 
       {/* LEFT */}
-          <div className="left" style={{width:leftW}}>
-            <div className="thead" style={{width:leftW}}>
+          <div className="left" style={{width:effectiveLeftW}}>
+            <div className="thead" style={{width:effectiveLeftW}}>
               <div className="th rn">#</div>
               <div className="th g">Наименование работ</div>
               <div className="th" style={{width:48,justifyContent:'center'}}>Дней</div>
@@ -1257,11 +1389,23 @@ export default function App() {
           </div>
 
           {/* SPLITTER */}
-          <div className="splitter" ref={splRef}
-            onMouseDown={()=>{drg.current=true;splRef.current?.classList.add('drag');}}/>
+          <div className={`splitter${canResizeSplit ? "" : " disabled"}`} ref={splRef}
+            onMouseDown={()=>{
+              if (!canResizeSplit) return;
+              drg.current=true;
+              splRef.current?.classList.add('drag');
+            }}/>
 
           {/* RIGHT GANTT */}
-          <div className="right">
+          <div className="right" style={isCompactLayout ? { minWidth: MIN_RIGHT_PANEL_W } : undefined}>
+            {showZoomControls && (
+              <div className="zoom-bar">
+                <button className="zoom-btn" onClick={() => zoomTimeline(dayWidthRef.current / 1.2)} aria-label="Уменьшить масштаб">−</button>
+                <button className="zoom-btn" onClick={() => zoomTimeline(DEFAULT_DAY_W)} aria-label="Сбросить масштаб">100%</button>
+                <button className="zoom-btn" onClick={() => zoomTimeline(dayWidthRef.current * 1.2)} aria-label="Увеличить масштаб">+</button>
+                <span className="zoom-val">{Math.round((dayWidth / DEFAULT_DAY_W) * 100)}%</span>
+              </div>
+            )}
             <div className="ghdr" ref={rhRef} style={{overflowX:'hidden'}}>
               <div style={{width:W}}>
                 <div className="mr">
@@ -1273,13 +1417,13 @@ export default function App() {
               </div>
             </div>
 
-            <div className="gbw" ref={rbRef} onScroll={onRS}>
+            <div className={`gbw${showZoomControls ? " zoomable" : ""}`} ref={rbRef} onScroll={onRS}>
               <div className="gb" style={{width:W,minHeight:rows.length*ROW_H+120}}>
 
                 {/* Rows — plain flow, no other siblings so nth-child is clean */}
                 {rows.map((row,ri)=>{
-                  const bx=diff(origin,row.start)*DAY_W;
-                  const bw=Math.max(4,row.dur*DAY_W);
+                  const bx=diff(origin,row.start)*dayWidth;
+                  const bw=Math.max(4,row.dur*dayWidth);
                   const isP=row.hasKids;
                   const bh=isP?14:20;
                   return(
@@ -1352,6 +1496,7 @@ export default function App() {
               </div>
             </div>
           </div>
+        </div>
         </div>
       </div>
 

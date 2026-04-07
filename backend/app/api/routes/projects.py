@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps         import get_current_user, get_project_member, require_action, get_db
+from app.api.deps         import get_current_user, get_project_member, require_action, get_db, require_verified_user
 from app.core.permissions import Action
 from app.models           import Project, ProjectMember, User, GanttTask, Estimate
 
@@ -222,6 +222,7 @@ async def list_members(
                 "name":       user.name,
                 "email":      user.email,
                 "avatar_url": user.avatar_url,
+                "email_verified": user.email_verified_at is not None,
             } if user else None,
         })
     return result
@@ -232,6 +233,7 @@ async def add_member(
     project_id: str,
     body:       MemberAdd,
     member:     ProjectMember = Depends(require_action(Action.MANAGE_USERS)),
+    current_user: User        = Depends(require_verified_user),
     db:         AsyncSession  = Depends(get_db),
 ):
     # Проверяем нет ли уже такого участника
@@ -265,6 +267,7 @@ async def update_member_role(
     user_id:    str,
     body:       MemberUpdate,
     member:     ProjectMember = Depends(require_action(Action.MANAGE_USERS)),
+    current_user: User        = Depends(require_verified_user),
     db:         AsyncSession  = Depends(get_db),
 ):
     target = await db.scalar(
@@ -295,6 +298,7 @@ async def remove_member(
     project_id: str,
     user_id:    str,
     member:     ProjectMember = Depends(require_action(Action.MANAGE_USERS)),
+    current_user: User        = Depends(require_verified_user),
     db:         AsyncSession  = Depends(get_db),
 ):
     target = await db.scalar(

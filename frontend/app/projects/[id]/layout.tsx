@@ -2,7 +2,9 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { useRouter, useParams, usePathname } from "next/navigation";
-import { notifications as notifApi } from "@/lib/api";
+import EmailVerificationBanner from "@/components/EmailVerificationBanner";
+import { auth, notifications as notifApi } from "@/lib/api";
+import type { CurrentUser } from "@/lib/types";
 
 export default function ProjectLayout({ children }: { children: ReactNode }) {
   const router   = useRouter();
@@ -12,8 +14,11 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const [unread, setUnread] = useState(0);
   const [showNotif, setShowNotif] = useState(false);
   const [notifs,    setNotifs]    = useState<any[]>([]);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
+  const [resendingVerification, setResendingVerification] = useState(false);
 
   useEffect(() => {
+    auth.me().then(setCurrentUser).catch(() => router.push("/auth/login"));
     notifApi.list(true).then(n => setUnread(n.length)).catch(()=>{});
   }, [pathname]);
 
@@ -23,6 +28,19 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
     setShowNotif(true);
     setUnread(0);
     await notifApi.markAllRead().catch(()=>{});
+  }
+
+  async function handleLogout() {
+    await auth.logout();
+  }
+
+  async function handleResendVerification() {
+    setResendingVerification(true);
+    try {
+      await auth.resendVerification();
+    } finally {
+      setResendingVerification(false);
+    }
   }
 
   const TABS = [
@@ -87,7 +105,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
             )}
           </div>
 
-          <button onClick={()=>{ localStorage.clear(); router.push("/auth/login"); }}
+          <button onClick={handleLogout}
             style={{background:"none",border:"none",cursor:"pointer",color:"#64748b",fontSize:12,padding:"4px 8px"}}>
             Выйти
           </button>
@@ -110,7 +128,12 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
       </div>
 
       {/* Page content */}
-      <div style={{flex:1,overflow:"hidden"}}>
+      <div style={{flex:1,overflow:"hidden",paddingTop: currentUser && !currentUser.email_verified ? 16 : 0}}>
+        {currentUser && !currentUser.email_verified && (
+          <div style={{padding:"0 16px"}}>
+            <EmailVerificationBanner loading={resendingVerification} onResend={handleResendVerification} />
+          </div>
+        )}
         {children}
       </div>
     </div>

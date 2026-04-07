@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config   import settings
 from app.core.database import engine
+from app.core.redis import close_redis, init_redis
 
 from app.api.routes.auth          import router as auth_router
 from app.api.routes.dashboard     import router as dashboard_router
@@ -20,7 +21,9 @@ from app.api.routes.fer           import router as fer_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await init_redis()
     yield
+    await close_redis()
     await engine.dispose()
 
 

@@ -18,7 +18,13 @@ class User(Base):
     password_hash:   Mapped[str]      = mapped_column(String(255), nullable=False)
     avatar_url:      Mapped[str|None]
     is_active:       Mapped[bool]     = mapped_column(Boolean, default=True)
+    email_verified_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    last_login_at:   Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     created_at:      Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=text("NOW()"))
     updated_at:      Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=text("NOW()"))
 
     organization: Mapped["Organization|None"] = relationship(back_populates="users")
+    auth_sessions: Mapped[list["AuthSession"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    email_verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    auth_audit_events: Mapped[list["AuthAuditEvent"]] = relationship(back_populates="user")

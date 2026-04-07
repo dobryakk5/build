@@ -195,7 +195,7 @@ export default function EstimatePage() {
               whiteSpace: "nowrap",
             }}
           >
-            {matching && runningBatchId === activeBatch.id ? "Сопоставляем с ФЕР..." : "Определить типы работ ФЕР"}
+            {matching && runningBatchId === activeBatch.id ? "Векторно сопоставляем с ФЕР..." : "Векторно сопоставить с ФЕР"}
           </button>
         )}
       </div>
@@ -209,13 +209,13 @@ export default function EstimatePage() {
 
       {matchStatus === "processing" && (
         <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.16)", fontSize: 12, color: "var(--blue-dark)" }}>
-          Сопоставление сметы с ФЕР выполняется.
+          Векторное сопоставление сметы с ФЕР выполняется.
         </div>
       )}
 
       {matchStatus === "done" && matchJob?.result && (
         <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.18)", fontSize: 12, color: "#166534" }}>
-          Сопоставление завершено: найден тип ФЕР для {matchJob.result.matched_rows_count ?? 0} строк
+          Векторное сопоставление завершено: найден тип ФЕР для {matchJob.result.matched_rows_count ?? 0} строк
           {typeof matchJob.result.low_confidence_count === "number"
             ? `, из них ${matchJob.result.low_confidence_count} с низкой уверенностью.`
             : "."}
@@ -224,7 +224,7 @@ export default function EstimatePage() {
 
       {matchStatus === "failed" && (
         <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.18)", fontSize: 12, color: "var(--red)" }}>
-          Не удалось сопоставить смету с ФЕР: {matchJob?.result?.error ?? "неизвестная ошибка"}.
+          Не удалось выполнить векторное сопоставление с ФЕР: {matchJob?.result?.error ?? "неизвестная ошибка"}.
         </div>
       )}
 

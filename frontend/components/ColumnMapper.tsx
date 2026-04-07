@@ -97,12 +97,11 @@ export default function ColumnMapper({
     setError(null);
 
     try {
-      const token = localStorage.getItem("access_token");
-      const res = await fetch(`/api/projects/${projectId}/estimates/upload/confirm-mapping`, {
+      const sendRequest = () => fetch(`/api/projects/${projectId}/estimates/upload/confirm-mapping`, {
         method: "POST",
+        credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
           tmp_path,
@@ -112,6 +111,14 @@ export default function ColumnMapper({
           workers,
         }),
       });
+
+      let res = await sendRequest();
+      if (res.status === 401) {
+        const refresh = await fetch("/api/auth/refresh", { method: "POST", credentials: "include" });
+        if (refresh.ok) {
+          res = await sendRequest();
+        }
+      }
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));

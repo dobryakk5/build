@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from dataclasses import dataclass
 from datetime import datetime
-from difflib import SequenceMatcher
-from typing import Iterable
+from typing import Sequence
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -13,114 +11,27 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Estimate, EstimateBatch, Job
+from app.services.openrouter_embeddings import create_embeddings
 
 
-_TOKEN_RE = re.compile(r"[a-zа-я0-9]+", re.IGNORECASE)
-_NUMBER_RE = re.compile(r"\b\d+(?:[.,]\d+)?\b")
-_MULTISPACE_RE = re.compile(r"\s+")
 _LOW_CONFIDENCE_SCORE = 0.45
-_STEM_SUFFIXES = (
-    "иями",
-    "ями",
-    "ами",
-    "ого",
-    "ему",
-    "ому",
-    "ыми",
-    "ими",
-    "иях",
-    "ах",
-    "ях",
-    "ия",
-    "ья",
-    "ие",
-    "ье",
-    "ий",
-    "ый",
-    "ой",
-    "ая",
-    "ое",
-    "ее",
-    "ые",
-    "ых",
-    "их",
-    "ам",
-    "ям",
-    "ом",
-    "ем",
-    "ов",
-    "ев",
-    "ей",
-    "ую",
-    "юю",
-    "а",
-    "я",
-    "ы",
-    "и",
-    "о",
-    "е",
-    "у",
-    "ю",
-    "ь",
-)
-_STOP_WORDS = {
-    "без",
-    "более",
-    "в",
-    "во",
-    "внутри",
-    "до",
-    "для",
-    "и",
-    "из",
-    "или",
-    "к",
-    "кг",
-    "км",
-    "м",
-    "м2",
-    "м3",
-    "мм",
-    "на",
-    "над",
-    "не",
-    "один",
-    "одного",
-    "одной",
-    "одно",
-    "от",
-    "по",
-    "под",
-    "при",
-    "раз",
-    "раза",
-    "с",
-    "слой",
-    "слоя",
-    "слоев",
-    "со",
-    "готов",
-    "монтаж",
-    "армирован",
-    "установк",
-    "устройство",
-    "устройств",
-}
-
-
-@dataclass(slots=True)
-class FerCandidate:
-    table_id: int
-    work_type: str
-    normalized: str
-    tokens: tuple[str, ...]
 
 
 @dataclass(slots=True)
 class MatchResult:
-    table_id: int
+    table_id: int | None
     work_type: str
     score: float
+
+
+def _build_estimate_search_text(estimate: Estimate) -> str:
+    parts: list[str] = []
+    if estimate.section and str(estimate.section).strip():
+        parts.append(f"Раздел: {str(estimate.section).strip()}")
+    parts.append(f"Работа: {str(estimate.work_name).strip()}")
+    if estimate.unit and str(estimate.unit).strip():
+        parts.append(f"Единица: {str(estimate.unit).strip()}")
+    return "\n".join(parts)
 
 
 async def start_fer_match_job(
@@ -147,6 +58,12 @@ async def start_fer_match_job(
     )
     if not estimate_count:
         raise HTTPException(400, "В выбранном блоке нет строк сметы")
+
+    vector_index_count = await db.scalar(
+        text("SELECT COUNT(*) FROM fer.vector_index WHERE entity_kind = 'row'")
+    )
+    if not vector_index_count:
+        raise HTTPException(400, "Векторный индекс ФЕР пуст. Сначала выполните векторизацию ФЕР.")
 
     job = Job(
         id=str(uuid4()),
@@ -193,29 +110,24 @@ async def _process_fer_match(job_id: str) -> None:
             if not estimates:
                 raise ValueError("В блоке сметы не найдено строк для сопоставления")
 
-            fallback_rows = await _fetch_fallback_candidate_rows(db)
-            fallback_candidates = [_build_candidate(row) for row in fallback_rows if row["work_type"]]
-            if not fallback_candidates:
-                raise ValueError("В базе ФЕР нет записей для сопоставления")
+            search_texts = [_build_estimate_search_text(estimate) for estimate in estimates]
+            embeddings = await create_embeddings(search_texts)
 
             matched_at = datetime.utcnow()
             matched_count = 0
             low_confidence_count = 0
-            candidate_cache: dict[str, list[FerCandidate]] = {}
 
             for estimate in estimates:
-                query = _build_tsquery(estimate.work_name)
-                if query not in candidate_cache:
-                    if query:
-                        rows = await _fetch_candidate_rows(db, query)
-                        candidate_cache[query] = [_build_candidate(row) for row in rows if row["work_type"]]
-                    else:
-                        candidate_cache[query] = []
+                estimate.fer_table_id = None
+                estimate.fer_work_type = None
+                estimate.fer_match_score = None
+                estimate.fer_matched_at = None
 
-                candidates = candidate_cache[query] or fallback_candidates
-                match = _match_best(str(estimate.work_name), candidates)
+            for estimate, embedding in zip(estimates, embeddings):
+                match = await _find_best_vector_match(db, embedding)
                 if match is None:
                     continue
+
                 estimate.fer_table_id = match.table_id
                 estimate.fer_work_type = match.work_type
                 estimate.fer_match_score = round(match.score, 4)
@@ -230,221 +142,54 @@ async def _process_fer_match(job_id: str) -> None:
                 "estimate_batch_name": job.input.get("estimate_batch_name"),
                 "matched_rows_count": matched_count,
                 "low_confidence_count": low_confidence_count,
+                "strategy": "fer_vector_index",
             }
         except Exception as exc:
             job.status = "failed"
-            job.result = {"error": str(exc)}
+            job.result = {"error": str(exc), "strategy": "fer_vector_index"}
         finally:
             job.finished_at = datetime.utcnow()
             await db.commit()
 
 
-def _build_candidate(row: dict) -> FerCandidate:
-    work_type = str(row["work_type"]).strip()
-    search_text = " ".join(
-        part.strip()
-        for part in (
-            work_type,
-            row.get("table_title") or "",
+async def _find_best_vector_match(
+    db: AsyncSession,
+    embedding: Sequence[float],
+) -> MatchResult | None:
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    vi.table_id,
+                    COALESCE(NULLIF(t.common_work_name, ''), t.table_title, vi.source_text) AS work_type,
+                    GREATEST(
+                        0.0,
+                        LEAST(
+                            1.0,
+                            1 - (vi.embedding OPERATOR(fer.<=>) CAST(:embedding AS fer.vector))
+                        )
+                    ) AS similarity
+                FROM fer.vector_index vi
+                LEFT JOIN fer.fer_tables t ON t.id = vi.table_id
+                WHERE vi.entity_kind = 'row'
+                ORDER BY vi.embedding OPERATOR(fer.<=>) CAST(:embedding AS fer.vector), vi.id
+                LIMIT 1
+                """
+            ),
+            {"embedding": _format_vector(embedding)},
         )
-        if part and str(part).strip()
-    )
-    normalized = _normalize_text(search_text)
-    return FerCandidate(
-        table_id=int(row["id"]),
-        work_type=work_type,
-        normalized=_normalize_text(work_type),
-        tokens=tuple(_tokenize(normalized)),
-    )
+    ).mappings().first()
 
-
-def _match_best(estimate_name: str, candidates: Iterable[FerCandidate]) -> MatchResult | None:
-    normalized = _normalize_text(estimate_name)
-    estimate_tokens = tuple(_tokenize(normalized))
-    candidate_list = list(candidates)
-
-    matched_token_counts = {
-        candidate.table_id: _shared_token_count(estimate_tokens, candidate.tokens)
-        for candidate in candidate_list
-    }
-    candidate_pool = [
-        candidate
-        for candidate in candidate_list
-        if matched_token_counts[candidate.table_id] > 0
-    ] or candidate_list
-
-    best_candidate: FerCandidate | None = None
-    best_score = -1.0
-
-    for candidate in candidate_pool:
-        score = _score_match(
-            normalized,
-            estimate_tokens,
-            candidate,
-            matched_token_counts.get(candidate.table_id, 0),
-        )
-        if score > best_score:
-            best_score = score
-            best_candidate = candidate
-
-    if best_candidate is None:
+    if row is None or not row["work_type"]:
         return None
 
     return MatchResult(
-        table_id=best_candidate.table_id,
-        work_type=best_candidate.work_type,
-        score=max(0.0, min(best_score, 1.0)),
+        table_id=int(row["table_id"]) if row["table_id"] is not None else None,
+        work_type=str(row["work_type"]).strip(),
+        score=float(row["similarity"] or 0.0),
     )
 
 
-async def _fetch_candidate_rows(db: AsyncSession, query: str) -> list[dict]:
-    return (
-        await db.execute(
-            text(
-                """
-                SELECT
-                    t.id,
-                    COALESCE(NULLIF(t.common_work_name, ''), t.table_title) AS work_type,
-                    t.table_title
-                FROM fer.fer_tables t
-                WHERE to_tsvector('russian', COALESCE(NULLIF(t.common_work_name, ''), '') || ' ' || t.table_title)
-                      @@ to_tsquery('russian', :query)
-                ORDER BY ts_rank_cd(
-                    to_tsvector('russian', COALESCE(NULLIF(t.common_work_name, ''), '') || ' ' || t.table_title),
-                    to_tsquery('russian', :query)
-                ) DESC, t.id
-                LIMIT 40
-                """
-            ),
-            {"query": query},
-        )
-    ).mappings().all()
-
-
-async def _fetch_fallback_candidate_rows(db: AsyncSession) -> list[dict]:
-    return (
-        await db.execute(
-            text(
-                """
-                SELECT
-                    t.id,
-                    COALESCE(NULLIF(t.common_work_name, ''), t.table_title) AS work_type,
-                    t.table_title
-                FROM fer.fer_tables t
-                ORDER BY t.id
-                """
-            )
-        )
-    ).mappings().all()
-
-
-def _build_tsquery(work_name: str) -> str:
-    tokens = list(dict.fromkeys(_tokenize(_normalize_text(work_name))))
-    return " | ".join(f"{token}:*" for token in tokens)
-
-
-def _score_match(
-    estimate_text: str,
-    estimate_tokens: tuple[str, ...],
-    candidate: FerCandidate,
-    matched_token_count: int,
-) -> float:
-    if not estimate_text or not candidate.normalized:
-        return 0.0
-
-    token_overlap = _token_recall(estimate_tokens, candidate.tokens)
-    sequence_score = SequenceMatcher(None, estimate_text, candidate.normalized).ratio()
-    leading_token_bonus = 0.0
-    if estimate_tokens and _token_matches_any(estimate_tokens[0], candidate.tokens):
-        leading_token_bonus = 0.12
-
-    return (
-        (token_overlap * 0.75)
-        + (sequence_score * 0.25)
-        + (min(matched_token_count, 3) * 0.03)
-        + leading_token_bonus
-    )
-
-
-def _normalize_text(value: str) -> str:
-    lowered = value.lower().replace("ё", "е")
-    without_numbers = _NUMBER_RE.sub(" ", lowered)
-    cleaned = " ".join(_TOKEN_RE.findall(without_numbers))
-    return _MULTISPACE_RE.sub(" ", cleaned).strip()
-
-
-def _tokenize(value: str) -> list[str]:
-    return [
-        _stem_token(token)
-        for token in value.split()
-        if len(token) > 2 and _stem_token(token) not in _STOP_WORDS
-    ]
-
-
-def _stem_token(token: str) -> str:
-    if len(token) <= 4:
-        return token
-    for suffix in _STEM_SUFFIXES:
-        if token.endswith(suffix) and len(token) - len(suffix) >= 4:
-            return token[:-len(suffix)]
-    return token
-
-
-def _token_recall(left: tuple[str, ...], right: tuple[str, ...]) -> float:
-    if not left or not right:
-        return 0.0
-
-    used: set[int] = set()
-    score = 0.0
-
-    for left_token in left:
-        best_score = 0.0
-        best_index: int | None = None
-        for index, right_token in enumerate(right):
-            if index in used:
-                continue
-            similarity = _token_similarity(left_token, right_token)
-            if similarity > best_score:
-                best_score = similarity
-                best_index = index
-        if best_index is not None:
-            used.add(best_index)
-            score += best_score
-
-    return score / len(left)
-
-
-def _shared_token_count(left: tuple[str, ...], right: tuple[str, ...]) -> int:
-    count = 0
-    used: set[int] = set()
-
-    for left_token in left:
-        for index, right_token in enumerate(right):
-            if index in used:
-                continue
-            if _token_similarity(left_token, right_token) > 0:
-                used.add(index)
-                count += 1
-                break
-    return count
-
-
-def _token_matches_any(token: str, candidates: tuple[str, ...]) -> bool:
-    return any(_token_similarity(token, candidate) > 0 for candidate in candidates)
-
-
-def _token_similarity(left: str, right: str) -> float:
-    if left == right:
-        return 1.0
-    if left.startswith(right) or right.startswith(left):
-        return 0.92
-
-    common_prefix = 0
-    for left_char, right_char in zip(left, right):
-        if left_char != right_char:
-            break
-        common_prefix += 1
-
-    if common_prefix >= 5:
-        return 0.75
-    return 0.0
+def _format_vector(values: Sequence[float]) -> str:
+    return "[" + ",".join(f"{float(value):.12f}" for value in values) + "]"

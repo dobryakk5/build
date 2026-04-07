@@ -65,7 +65,16 @@ export interface User {
   id: string;
   email: string;
   name: string;
+  avatar_url?: string | null;
   role?: string | null;
+  email_verified: boolean;
+}
+
+export interface CurrentUser extends User {
+  projects: Array<{
+    project_id: string;
+    role: string;
+  }>;
 }
 
 export interface EnirCollectionSummary {

@@ -52,10 +52,7 @@ export default function AuthLoginForm({
   };
 
   async function completeLogin(loginEmail: string, loginPassword: string) {
-    const data = await auth.login(loginEmail, loginPassword);
-    localStorage.setItem("access_token", data.access_token);
-    localStorage.setItem("refresh_token", data.refresh_token);
-    localStorage.setItem("user", JSON.stringify(data.user));
+    await auth.login(loginEmail, loginPassword);
     onSuccess?.();
     router.push("/projects");
   }
@@ -182,7 +179,34 @@ export default function AuthLoginForm({
         >
           Тестовый вход
         </button>
+
+        <button
+          type="button"
+          onClick={() => router.push("/auth/forgot-password")}
+          style={{
+            padding: "6px 0 0",
+            background: "transparent",
+            color: "var(--blue-dark)",
+            border: "none",
+            fontSize: 13,
+            cursor: "pointer",
+            textAlign: "left" as const,
+          }}
+        >
+          Забыли пароль?
+        </button>
       </form>
+
+      <div style={{ marginTop: 16, fontSize: 13, color: "var(--muted)" }}>
+        Нет аккаунта?{" "}
+        <button
+          type="button"
+          onClick={() => router.push("/auth/register")}
+          style={{ background: "transparent", border: "none", color: "var(--blue-dark)", cursor: "pointer", padding: 0, fontSize: 13, fontWeight: 600 }}
+        >
+          Зарегистрироваться
+        </button>
+      </div>
     </div>
   );
 }

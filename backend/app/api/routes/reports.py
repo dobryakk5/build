@@ -75,7 +75,23 @@ async def report_journal(
     member:     ProjectMember = Depends(require_action(Action.VIEW)),
     db:         AsyncSession  = Depends(get_db),
 ):
-    rows = (
+    completed_tasks = (
+        await db.execute(
+            select(GanttTask, Estimate)
+            .join(Estimate, Estimate.id == GanttTask.estimate_id, isouter=True)
+            .where(GanttTask.project_id == project_id)
+            .where(GanttTask.deleted_at == None)
+            .where(GanttTask.is_group == False)
+            .where(GanttTask.progress >= 100)
+            .order_by(GanttTask.updated_at.desc(), GanttTask.row_order.asc())
+        )
+    ).all()
+
+    if not completed_tasks:
+        return []
+
+    task_ids = [task.id for task, _ in completed_tasks]
+    report_rows = (
         await db.execute(
             select(
                 DailyReportItem.id.label("id"),
@@ -87,7 +103,6 @@ async def report_journal(
                 DailyReportItem.volume_unit.label("volume_unit"),
                 DailyReportItem.created_at.label("created_at"),
                 DailyReport.report_date.label("report_date"),
-                GanttTask.name.label("task_name"),
                 Estimate.labor_hours.label("estimate_labor_hours"),
             )
             .join(DailyReport, DailyReport.id == DailyReportItem.report_id)
@@ -95,29 +110,51 @@ async def report_journal(
             .join(Estimate, Estimate.id == GanttTask.estimate_id, isouter=True)
             .where(DailyReport.project_id == project_id)
             .where(DailyReport.status.in_(("submitted", "reviewed")))
+            .where(DailyReportItem.task_id.in_(task_ids))
             .order_by(DailyReport.report_date.desc(), DailyReportItem.created_at.desc())
         )
     ).mappings()
 
-    return [
-        {
-            "man_hours": (
-                round(float(row["estimate_labor_hours"]) * float(row["volume_done"]), 2)
-                if row["estimate_labor_hours"] is not None and row["volume_done"] is not None
-                else None
+    latest_report_by_task: dict[str, dict] = {}
+    for row in report_rows:
+        if row["task_id"] not in latest_report_by_task:
+            latest_report_by_task[row["task_id"]] = dict(row)
+
+    result = []
+    for task, estimate in completed_tasks:
+        report_row = latest_report_by_task.get(task.id)
+
+        planned_man_hours = None
+        if estimate and estimate.labor_hours is not None and estimate.quantity is not None:
+            planned_man_hours = round(float(estimate.labor_hours) * float(estimate.quantity), 2)
+        elif task.workers_count:
+            planned_man_hours = round(float(task.workers_count) * float(task.working_days) * 8, 2)
+
+        actual_man_hours = None
+        if report_row and report_row["estimate_labor_hours"] is not None and report_row["volume_done"] is not None:
+            actual_man_hours = round(
+                float(report_row["estimate_labor_hours"]) * float(report_row["volume_done"]),
+                2,
+            )
+
+        result.append({
+            "id":            report_row["id"] if report_row else task.id,
+            "report_id":     report_row["report_id"] if report_row else None,
+            "task_id":       task.id,
+            "task_name":     task.name,
+            "work_done":     report_row["work_done"] if report_row else task.name,
+            "workers_count": report_row["workers_count"] if report_row else task.workers_count,
+            "volume_done":   float(report_row["volume_done"]) if report_row and report_row["volume_done"] is not None else None,
+            "volume_unit":   report_row["volume_unit"] if report_row else None,
+            "man_hours":     actual_man_hours if actual_man_hours is not None else planned_man_hours,
+            "report_date":   (
+                str(report_row["report_date"])
+                if report_row and report_row["report_date"] is not None
+                else task.updated_at.date().isoformat()
             ),
-            "id":            row["id"],
-            "report_id":     row["report_id"],
-            "task_id":       row["task_id"],
-            "task_name":     row["task_name"],
-            "work_done":     row["work_done"],
-            "workers_count": row["workers_count"],
-            "volume_done":   float(row["volume_done"]) if row["volume_done"] is not None else None,
-            "volume_unit":   row["volume_unit"],
-            "report_date":   str(row["report_date"]),
-        }
-        for row in rows
-    ]
+        })
+
+    return result
 
 
 # ── Статус отчётов за сегодня ─────────────────────────────────────────────────

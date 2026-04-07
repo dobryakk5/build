@@ -1,5 +1,6 @@
 // frontend/lib/api.ts
 import type {
+  CurrentUser,
   EnirCollectionSummary,
   EnirParagraphFull,
   EnirParagraphShort,
@@ -17,28 +18,36 @@ import type {
 const BASE = "/api";
 
 type AuthPayload = {
-  access_token: string;
-  refresh_token: string;
   user: User;
+  email_verified: boolean;
+  requires_email_verification: boolean;
 };
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token =
-    typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+const AUTH_REFRESH_SKIP = new Set([
+  "/auth/login",
+  "/auth/register",
+  "/auth/refresh",
+  "/auth/forgot-password",
+  "/auth/reset-password",
+  "/auth/verify-email",
+]);
+
+async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
 
   const res = await fetch(`${BASE}${path}`, {
     ...options,
+    credentials: "include",
     headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(isFormData ? {} : { "Content-Type": "application/json" }),
       ...(options.headers ?? {}),
     },
   });
 
-  if (res.status === 401) {
+  if (res.status === 401 && retry && !AUTH_REFRESH_SKIP.has(path)) {
     const ok = await tryRefresh();
     if (!ok) { window.location.href = "/auth/login"; throw new Error("Unauthorized"); }
-    return request<T>(path, options);
+    return request<T>(path, options, false);
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -49,18 +58,12 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 async function tryRefresh(): Promise<boolean> {
-  const refresh = localStorage.getItem("refresh_token");
-  if (!refresh) return false;
   try {
     const res = await fetch(`${BASE}/auth/refresh`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refresh_token: refresh }),
+      credentials: "include",
     });
     if (!res.ok) return false;
-    const data = await res.json();
-    localStorage.setItem("access_token",  data.access_token);
-    localStorage.setItem("refresh_token", data.refresh_token);
     return true;
   } catch { return false; }
 }
@@ -70,10 +73,17 @@ export const auth = {
     request<AuthPayload>("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) }),
   register: (body: any) =>
     request<AuthPayload>("/auth/register", { method: "POST", body: JSON.stringify(body) }),
-  me:       () => request<User>("/auth/me"),
-  logout:   () => {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
+  me:       () => request<CurrentUser>("/auth/me"),
+  verifyEmail: (token: string) =>
+    request<{ verified: boolean }>("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) }),
+  resendVerification: () =>
+    request<void>("/auth/resend-verification", { method: "POST" }),
+  forgotPassword: (email: string) =>
+    request<void>("/auth/forgot-password", { method: "POST", body: JSON.stringify({ email }) }),
+  resetPassword: (token: string, newPassword: string) =>
+    request<void>("/auth/reset-password", { method: "POST", body: JSON.stringify({ token, new_password: newPassword }) }),
+  logout:   async () => {
+    await request<void>("/auth/logout", { method: "POST" }).catch(() => undefined);
     window.location.href = "/auth/login";
   },
 };
@@ -122,14 +132,19 @@ export const estimates = {
     estimateKind: string,
     complexMode: boolean,
   ) => {
-    const token = localStorage.getItem("access_token");
     const form  = new FormData();
     form.append("file", file);
     return fetch(
       `${BASE}/projects/${pid}/estimates/upload?start_date=${startDate}&workers=${workers}&estimate_kind=${encodeURIComponent(estimateKind)}&complex_mode=${complexMode}`,
-      { method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form }
+      { method: "POST", credentials: "include", body: form }
     ).then(async (r) => {
       const data = await r.json().catch(() => ({}));
+      if (r.status === 401) {
+        const ok = await tryRefresh();
+        if (ok) {
+          return estimates.upload(pid, file, startDate, workers, estimateKind, complexMode);
+        }
+      }
       if (!r.ok) {
         throw new Error(data?.detail?.error ?? data?.detail ?? `HTTP ${r.status}`);
       }

@@ -4,10 +4,11 @@ FastAPI dependencies для аутентификации и авторизаци
 Используются через Depends() в роутерах.
 """
 from uuid import UUID
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from app.core.config import settings
 from app.core.security import decode_token
 
 from app.core.database    import get_db
@@ -15,16 +16,29 @@ from app.core.permissions import Action, can
 from app.models           import User, ProjectMember
 
 
-bearer_scheme = HTTPBearer()
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 # ── Аутентификация ────────────────────────────────────────────────────────────
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    token = credentials.credentials
+    token = None
+    if credentials is not None:
+        token = credentials.credentials
+    if token is None:
+        token = request.cookies.get(settings.AUTH_ACCESS_COOKIE_NAME)
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Требуется авторизация",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
         payload = decode_token(token)
         user_id: str = payload.get("sub")
@@ -41,6 +55,17 @@ async def get_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="Пользователь не найден")
     return user
+
+
+async def require_verified_user(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    if current_user.email_verified_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Подтвердите email для выполнения этого действия",
+        )
+    return current_user
 
 
 # ── Авторизация по проекту ────────────────────────────────────────────────────

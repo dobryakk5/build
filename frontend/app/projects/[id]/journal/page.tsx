@@ -7,7 +7,7 @@ import { fmtDate } from "@/lib/dateUtils";
 
 type JournalEntry = {
   id: string;
-  report_id: string;
+  report_id: string | null;
   task_id: string;
   task_name: string;
   work_done: string;
