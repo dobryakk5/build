@@ -38,6 +38,12 @@ const SORTABLE_HEADER_BUTTON: CSSProperties = {
   cursor: "pointer",
 };
 
+const SORTABLE_HEADER_BUTTON_RIGHT: CSSProperties = {
+  ...SORTABLE_HEADER_BUTTON,
+  width: "100%",
+  justifyContent: "flex-end",
+};
+
 function formatReportDate(iso: string) {
   if (!iso) return "—";
   return `${fmtDate(iso)}.${new Date(iso).getFullYear()}`;
@@ -104,9 +110,10 @@ export default function JournalPage() {
   function renderSortLabel(title: string, key: SortKey) {
     const isActive = sortKey === key;
     const arrow = !isActive ? "↕" : sortDirection === "asc" ? "↑" : "↓";
+    const buttonStyle = key === "man_hours" ? SORTABLE_HEADER_BUTTON_RIGHT : SORTABLE_HEADER_BUTTON;
 
     return (
-      <button type="button" onClick={() => toggleSort(key)} style={SORTABLE_HEADER_BUTTON}>
+      <button type="button" onClick={() => toggleSort(key)} style={buttonStyle}>
         <span>{title}</span>
         <span aria-hidden="true" style={{ fontSize: 11, lineHeight: 1 }}>
           {arrow}
@@ -151,6 +158,7 @@ export default function JournalPage() {
                 textTransform: "uppercase",
                 letterSpacing: ".08em",
                 fontFamily: "var(--mono)",
+                fontWeight: 600,
               }}
             >
               Название
@@ -163,6 +171,7 @@ export default function JournalPage() {
                 textTransform: "uppercase",
                 letterSpacing: ".08em",
                 fontFamily: "var(--mono)",
+                fontWeight: 600,
               }}
             >
               {renderSortLabel("чел. часов", "man_hours")}
@@ -175,6 +184,7 @@ export default function JournalPage() {
                 textTransform: "uppercase",
                 letterSpacing: ".08em",
                 fontFamily: "var(--mono)",
+                fontWeight: 600,
               }}
             >
               {renderSortLabel("Дата", "report_date")}
@@ -227,6 +237,7 @@ export default function JournalPage() {
                       fontSize: 12,
                       color: "var(--text)",
                       fontFamily: "var(--mono)",
+                      fontWeight: 600,
                       display: "flex",
                       alignItems: "center",
                       justifyContent: "flex-end",
@@ -241,6 +252,7 @@ export default function JournalPage() {
                       fontSize: 12,
                       color: "var(--text)",
                       fontFamily: "var(--mono)",
+                      fontWeight: 600,
                       display: "flex",
                       alignItems: "center",
                     }}
