@@ -19,6 +19,7 @@ from app.services.auth_service import (
     get_active_session_by_refresh_token,
     issue_email_verification_token,
     issue_password_reset_token,
+    is_effectively_email_verified,
     log_auth_event,
     revoke_all_user_sessions,
     revoke_session,
@@ -96,7 +97,7 @@ def user_dict(user: User, role: str | None = None) -> AuthUserResponse:
         email=user.email,
         avatar_url=user.avatar_url,
         role=role,
-        email_verified=user.email_verified_at is not None,
+        email_verified=is_effectively_email_verified(user),
     )
 
 
@@ -302,7 +303,7 @@ async def resend_verification(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if current_user.email_verified_at is not None:
+    if is_effectively_email_verified(current_user):
         raise HTTPException(409, "Email уже подтверждён")
 
     await enforce_rate_limit(

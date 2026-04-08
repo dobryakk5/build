@@ -1,4 +1,9 @@
+import asyncio
 import logging
+import smtplib
+import ssl
+from email.message import EmailMessage
+from email.utils import parseaddr
 
 import httpx
 
@@ -11,6 +16,48 @@ logger = logging.getLogger(__name__)
 def _full_url(path: str, token: str) -> str:
     separator = "&" if "?" in path else "?"
     return f"{settings.APP_BASE_URL.rstrip('/')}{path}{separator}token={token}"
+
+
+def _smtp_sender_email() -> str:
+    _, email = parseaddr(settings.EMAIL_FROM)
+    return email or settings.EMAIL_FROM
+
+
+def _build_message(*, to_email: str, subject: str, html: str) -> EmailMessage:
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = settings.EMAIL_FROM
+    message["To"] = to_email
+    message.set_content(
+        "Ваш почтовый клиент не поддерживает HTML-версию письма. "
+        "Откройте письмо в современном почтовом клиенте."
+    )
+    message.add_alternative(html, subtype="html")
+    return message
+
+
+def _send_via_smtp(*, to_email: str, subject: str, html: str) -> None:
+    if not settings.SMTP_HOST:
+        raise RuntimeError("SMTP_HOST is not configured")
+
+    message = _build_message(to_email=to_email, subject=subject, html=html)
+    timeout = settings.SMTP_TIMEOUT_SECONDS
+
+    if settings.SMTP_USE_SSL:
+        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
+            if settings.SMTP_USERNAME:
+                server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+            server.send_message(message, from_addr=_smtp_sender_email(), to_addrs=[to_email])
+        return
+
+    with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
+        server.ehlo()
+        if settings.SMTP_USE_TLS:
+            server.starttls(context=ssl.create_default_context())
+            server.ehlo()
+        if settings.SMTP_USERNAME:
+            server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+        server.send_message(message, from_addr=_smtp_sender_email(), to_addrs=[to_email])
 
 
 async def _send_email(*, to_email: str, subject: str, html: str) -> None:
@@ -32,7 +79,16 @@ async def _send_email(*, to_email: str, subject: str, html: str) -> None:
             response.raise_for_status()
         return
 
-    logger.info("Email provider fallback", extra={"to_email": to_email, "subject": subject, "html": html})
+    if settings.EMAIL_PROVIDER == "smtp":
+        await asyncio.to_thread(
+            _send_via_smtp,
+            to_email=to_email,
+            subject=subject,
+            html=html,
+        )
+        return
+
+    logger.info("Email provider fallback", extra={"provider": settings.EMAIL_PROVIDER, "to_email": to_email, "subject": subject, "html": html})
 
 
 async def send_verification_email(*, to_email: str, token: str) -> None:

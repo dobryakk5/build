@@ -20,7 +20,11 @@ docker-compose exec backend alembic upgrade head
 # Frontend → http://localhost:3000
 # Backend  → http://localhost:8000
 # API docs → http://localhost:8000/docs
+# Логи     → backend/logs/*.log и frontend/logs/*.log
 ```
+
+Логи `backend` и `frontend` теперь пишутся в свои папки и ротируются понедельно.
+Примеры файлов: `backend/logs/api-2026-W15.log`, `backend/logs/celery-worker-2026-W15.log`, `frontend/logs/frontend-2026-W15.log`.
 
 ## Структура проекта
 

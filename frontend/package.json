@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev":   "next dev",
+    "dev":   "node scripts/run-with-weekly-logs.mjs --log-dir ./logs --log-name frontend -- npx next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/run-with-weekly-logs.mjs --log-dir ./logs --log-name frontend -- npx next start",
     "lint":  "next lint"
   },
   "dependencies": {

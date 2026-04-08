@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 from fastapi import HTTPException, Response
 import pytest
@@ -7,7 +8,7 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.core import redis as redis_module
-from app.services.auth_service import clear_auth_cookies, hash_token, set_auth_cookies
+from app.services.auth_service import clear_auth_cookies, hash_token, is_effectively_email_verified, set_auth_cookies
 from app.services.rate_limit_service import clear_rate_limit, enforce_rate_limit
 
 
@@ -74,3 +75,11 @@ def test_hash_token_is_deterministic_and_opaque() -> None:
     assert hashed == hash_token("plain-token")
     assert hashed != "plain-token"
     assert len(hashed) == 64
+
+
+def test_effective_email_verification_allows_seed_test_account() -> None:
+    test_user = SimpleNamespace(email="test@example.com", email_verified_at=None)
+    regular_user = SimpleNamespace(email="user@example.com", email_verified_at=None)
+
+    assert is_effectively_email_verified(test_user) is True
+    assert is_effectively_email_verified(regular_user) is False

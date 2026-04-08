@@ -3,6 +3,7 @@
 out/
 node_modules/
 .env.local
+logs/*.log
 
 # Build
 build/

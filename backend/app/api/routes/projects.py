@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps         import get_current_user, get_project_member, require_action, get_db, require_verified_user
 from app.core.permissions import Action
 from app.models           import Project, ProjectMember, User, GanttTask, Estimate
+from app.services.auth_service import is_effectively_email_verified
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -222,7 +223,7 @@ async def list_members(
                 "name":       user.name,
                 "email":      user.email,
                 "avatar_url": user.avatar_url,
-                "email_verified": user.email_verified_at is not None,
+                "email_verified": is_effectively_email_verified(user),
             } if user else None,
         })
     return result

@@ -41,6 +41,7 @@ services:
       REDIS_URL:             redis://redis:6379/0
       CELERY_BROKER_URL:     redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
+      API_RELOAD:            "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,7 +49,17 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command:
+      - python
+      - scripts/run_with_weekly_logs.py
+      - --log-dir
+      - /app/logs
+      - --log-name
+      - api
+      - --
+      - python
+      - -m
+      - app.run_api
 
   celery_worker:
     build:
@@ -64,7 +75,20 @@ services:
       - backend
     volumes:
       - ./backend:/app
-    command: celery -A app.tasks.celery_tasks.celery_app worker --loglevel=info --concurrency=4
+    command:
+      - python
+      - scripts/run_with_weekly_logs.py
+      - --log-dir
+      - /app/logs
+      - --log-name
+      - celery-worker
+      - --
+      - celery
+      - -A
+      - app.tasks.celery_app.celery_app
+      - worker
+      - --loglevel=info
+      - --concurrency=4
 
   celery_beat:
     build:
@@ -79,7 +103,19 @@ services:
       - redis
     volumes:
       - ./backend:/app
-    command: celery -A app.tasks.celery_tasks.celery_app beat --loglevel=info
+    command:
+      - python
+      - scripts/run_with_weekly_logs.py
+      - --log-dir
+      - /app/logs
+      - --log-name
+      - celery-beat
+      - --
+      - celery
+      - -A
+      - app.tasks.celery_app.celery_app
+      - beat
+      - --loglevel=info
 
   frontend:
     build:

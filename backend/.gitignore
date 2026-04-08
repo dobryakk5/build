@@ -12,6 +12,7 @@ alembic/versions/*.pyc
 # Coverage
 .coverage
 htmlcov/
+logs/*.log
 
 # IDE
 .idea/

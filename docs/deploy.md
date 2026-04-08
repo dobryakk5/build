@@ -89,8 +89,9 @@ After=postgresql.service redis.service
 User=www-data
 WorkingDirectory=/srv/app/backend
 EnvironmentFile=/srv/app/backend/.env
-ExecStart=/srv/app/backend/venv/bin/uvicorn app.main:app \
-          --host 127.0.0.1 --port 8000 --workers 4
+ExecStart=/srv/app/backend/venv/bin/python scripts/run_with_weekly_logs.py \
+          --log-dir /srv/app/backend/logs --log-name api -- \
+          /srv/app/backend/venv/bin/python -m app.run_api
 Restart=always
 
 [Install]
@@ -107,9 +108,10 @@ After=redis.service
 User=www-data
 WorkingDirectory=/srv/app/backend
 EnvironmentFile=/srv/app/backend/.env
-ExecStart=/srv/app/backend/venv/bin/celery \
-          -A app.tasks.celery_tasks.celery_app worker \
-          --loglevel=info --concurrency=4
+ExecStart=/srv/app/backend/venv/bin/python scripts/run_with_weekly_logs.py \
+          --log-dir /srv/app/backend/logs --log-name celery-worker -- \
+          /srv/app/backend/venv/bin/celery -A app.tasks.celery_app.celery_app \
+          worker --loglevel=info --concurrency=4
 Restart=always
 
 [Install]
@@ -126,8 +128,10 @@ After=redis.service
 User=www-data
 WorkingDirectory=/srv/app/backend
 EnvironmentFile=/srv/app/backend/.env
-ExecStart=/srv/app/backend/venv/bin/celery \
-          -A app.tasks.celery_tasks.celery_app beat --loglevel=info
+ExecStart=/srv/app/backend/venv/bin/python scripts/run_with_weekly_logs.py \
+          --log-dir /srv/app/backend/logs --log-name celery-beat -- \
+          /srv/app/backend/venv/bin/celery -A app.tasks.celery_app.celery_app \
+          beat --loglevel=info
 Restart=always
 
 [Install]
@@ -162,7 +166,7 @@ After=network.target
 [Service]
 User=www-data
 WorkingDirectory=/srv/app/frontend
-ExecStart=/usr/bin/npm start
+ExecStart=/usr/bin/npm run start
 Environment=PORT=3000
 Restart=always
 
@@ -219,6 +223,8 @@ sudo systemctl status construction-api construction-worker construction-beat con
 # Логи
 journalctl -u construction-api -f
 ```
+
+Недельные файлы логов будут появляться в `/srv/app/backend/logs` и `/srv/app/frontend/logs`.
 
 | Сервис | Адрес |
 |--------|-------|

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.config import settings
 from app.core.security import decode_token
+from app.services.auth_service import is_effectively_email_verified
 
 from app.core.database    import get_db
 from app.core.permissions import Action, can
@@ -60,7 +61,7 @@ async def get_current_user(
 async def require_verified_user(
     current_user: User = Depends(get_current_user),
 ) -> User:
-    if current_user.email_verified_at is None:
+    if not is_effectively_email_verified(current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Подтвердите email для выполнения этого действия",

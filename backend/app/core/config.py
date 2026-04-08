@@ -4,6 +4,11 @@ from functools import lru_cache
 
 class Settings(BaseSettings):
     APP_BASE_URL: str = "http://localhost:3000"
+    API_HOST: str = "0.0.0.0"
+    API_PORT: int = 8000
+    API_RELOAD: bool = False
+    LOG_LEVEL: str = "INFO"
+    LOG_FORMAT: str = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
     # Database
     DATABASE_URL: str = "postgresql+asyncpg://postgres:secret@localhost:5432/construction"
@@ -32,6 +37,13 @@ class Settings(BaseSettings):
     EMAIL_FROM: str = "noreply@example.com"
     EMAIL_PROVIDER: str = "log"
     RESEND_API_KEY: str = ""
+    SMTP_HOST: str = ""
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_USE_TLS: bool = True
+    SMTP_USE_SSL: bool = False
+    SMTP_TIMEOUT_SECONDS: int = 10
 
     # Embeddings / OpenRouter
     OPENROUTER_API_KEY: str = ""
