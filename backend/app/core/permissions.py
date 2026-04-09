@@ -12,6 +12,7 @@ class Action(str, Enum):
     MANAGE_PROJECTS  = "manage_projects"
     SUBMIT_REPORT    = "submit_report"
     VIEW_REPORTS     = "view_reports"
+    REPORT_DELAY     = "report_delay"
 
 
 ROLE_PERMISSIONS: dict[str, set[Action]] = {
@@ -32,6 +33,7 @@ ROLE_PERMISSIONS: dict[str, set[Action]] = {
     },
     "supplier": {
         Action.VIEW, Action.COMMENT,
+        Action.REPORT_DELAY,
     },
     "viewer": {
         Action.VIEW,

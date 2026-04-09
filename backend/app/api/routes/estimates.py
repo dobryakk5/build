@@ -5,7 +5,7 @@ Fix 4: Асинхронный upload → 202 + job_id
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query
+from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -220,6 +220,40 @@ async def match_estimate_batch_with_fer(
         job_id=job.id,
         message="Сопоставление сметы с ФЕР запущено.",
     )
+
+
+class ActFlagsUpdate(BaseModel):
+    req_hidden_work_act: bool | None = None
+    req_intermediate_act: bool | None = None
+    req_ks2_ks3: bool | None = None
+
+
+@router.patch("/estimates/{estimate_id}/acts")
+async def update_estimate_acts(
+    project_id: UUID,
+    estimate_id: UUID,
+    body: ActFlagsUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    if body.req_hidden_work_act is not None:
+        est.req_hidden_work_act = body.req_hidden_work_act
+    if body.req_intermediate_act is not None:
+        est.req_intermediate_act = body.req_intermediate_act
+    if body.req_ks2_ks3 is not None:
+        est.req_ks2_ks3 = body.req_ks2_ks3
+
+    await db.commit()
+    return {
+        "id": est.id,
+        "req_hidden_work_act": est.req_hidden_work_act,
+        "req_intermediate_act": est.req_intermediate_act,
+        "req_ks2_ks3": est.req_ks2_ks3,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

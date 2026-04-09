@@ -6,9 +6,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps         import require_action, get_db
+from app.api.deps         import require_action, get_current_user, get_db
 from app.core.permissions import Action
-from app.models           import Material, ProjectMember
+from app.models           import Material, MaterialDelayEvent, ProjectMember, User
 
 router = APIRouter(prefix="/projects/{project_id}/materials", tags=["materials"])
 
@@ -33,6 +33,11 @@ class MaterialUpdate(BaseModel):
     delivery_date: date | None  = None
     status:        str | None   = Field(default=None, pattern="^(planned|ordered|delivered)$")
     supplier_note: str | None   = None
+
+
+class DeliveryDelayIn(BaseModel):
+    new_delivery_date: date = Field(description="Новая дата поставки")
+    reason: str = Field(min_length=5, description="Причина переноса поставки")
 
 
 @router.get("")
@@ -102,6 +107,49 @@ async def update_material(
         setattr(mat, field, value)
     await db.commit()
     return {"id": mat.id, "status": mat.status}
+
+
+@router.post("/{material_id}/delay", status_code=201)
+async def report_delivery_delay(
+    project_id: str,
+    material_id: str,
+    body: DeliveryDelayIn,
+    current_user: User = Depends(get_current_user),
+    member: ProjectMember = Depends(require_action(Action.REPORT_DELAY)),
+    db: AsyncSession = Depends(get_db),
+):
+    mat = await db.get(Material, material_id)
+    if not mat or mat.project_id != project_id or mat.deleted_at:
+        raise HTTPException(404, "Материал не найден")
+
+    old_date = mat.delivery_date
+    new_date = body.new_delivery_date
+    if old_date and new_date <= old_date:
+        raise HTTPException(422, f"Новая дата ({new_date}) должна быть позже текущей ({old_date})")
+
+    days_shifted = (new_date - old_date).days if old_date else None
+    mat.delivery_date = new_date
+
+    event = MaterialDelayEvent(
+        id=str(uuid4()),
+        project_id=project_id,
+        material_id=mat.id,
+        reported_by=current_user.id,
+        material_name=mat.name,
+        old_delivery_date=old_date,
+        new_delivery_date=new_date,
+        days_shifted=days_shifted,
+        reason=body.reason,
+    )
+    db.add(event)
+    await db.commit()
+
+    return {
+        "event_id": event.id,
+        "old_delivery_date": str(old_date) if old_date else None,
+        "new_delivery_date": str(new_date),
+        "days_shifted": days_shifted,
+    }
 
 
 @router.delete("/{material_id}", status_code=204)

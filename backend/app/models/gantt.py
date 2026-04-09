@@ -23,6 +23,8 @@ class GanttTask(Base, TimestampMixin, SoftDeleteMixin):
     # Fix 10: working_days — РАБОЧИЕ дни (пн–пт, без праздников)
     working_days: Mapped[int]       = mapped_column(Integer, nullable=False)
     workers_count: Mapped[int|None] = mapped_column(SmallInteger)
+    labor_hours: Mapped[float|None] = mapped_column(Numeric(10, 2))
+    hours_per_day: Mapped[float]    = mapped_column(Numeric(6, 2), nullable=False, server_default=text("8"))
     # Хранится только у листовых задач (is_group=False).
     # У групп — вычисляется через get_effective_progress() как взвешенное среднее
     progress:     Mapped[int]       = mapped_column(SmallInteger, default=0)

@@ -28,6 +28,24 @@ _SKIP_RE = re.compile(
 
 # ИТОГО РАБОТА → next section = Материалы
 _SECTION_WORK_END_RE = re.compile(r'ИТОГО\s+РАБОТ', re.IGNORECASE)
+_SECTION_HEADER_RE = re.compile(
+    r'^(?:\d+[.)]\s*)?[А-ЯЁA-Z][А-ЯЁA-ZA-Za-z0-9\s().,\-]{2,120}$'
+)
+
+
+def _detect_section_header(name: str, unit: str, qty_s: str, price_s: str, sum_s: str) -> str | None:
+    clean_name = " ".join(name.split()).strip()
+    if not clean_name:
+        return None
+    if unit or qty_s or price_s or sum_s:
+        return None
+    if _SKIP_RE.search(clean_name):
+        return None
+    if not _SECTION_HEADER_RE.match(clean_name):
+        return None
+    if len(clean_name.split()) <= 1 and clean_name.lower() not in {"работа", "материалы"}:
+        return None
+    return re.sub(r'^\d+[.)]\s*', '', clean_name).strip()
 
 
 class NoCodeTextParser:
@@ -115,6 +133,11 @@ class NoCodeTextParser:
             # Section transition: after ИТОГО РАБОТА
             if _SECTION_WORK_END_RE.search(all_text):
                 section = 'Материалы'
+                continue
+
+            section_header = _detect_section_header(name, unit, qty_s, price_s, sum_s)
+            if section_header:
+                section = section_header
                 continue
 
             # Skip headers / totals / titles

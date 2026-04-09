@@ -3,9 +3,10 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { estimates, gantt as ganttApi, projects } from "@/lib/api";
-import type { EstimateBatch, Task } from "@/lib/types";
+import type { BaselineStatus, EstimateBatch, Task } from "@/lib/types";
 
 const DEFAULT_DAY_W = 24;
+const DEFAULT_HOURS_PER_DAY = 8;
 const MIN_DAY_W = 12;
 const MAX_DAY_W = 56;
 const MOBILE_BREAKPOINT = 980;
@@ -18,7 +19,7 @@ type TaskRow = Task & {
   isOpen: boolean;
 };
 
-type EditingField = "name" | "dur" | "workers" | "start" | "prog" | "depends_on";
+type EditingField = "name" | "workers" | "start" | "prog" | "depends_on";
 
 type EditingState = {
   id: string;
@@ -28,11 +29,18 @@ type EditingState = {
 type ApiTask = {
   id: string;
   estimate_batch_id?: string | null;
+  estimate_id?: string | null;
   parent_id: string | null;
   name: string;
   start_date: string;
   working_days: number;
+  is_group?: boolean;
   workers_count?: number | null;
+  labor_hours?: number | null;
+  hours_per_day?: number | null;
+  req_hidden_work_act?: boolean;
+  req_intermediate_act?: boolean;
+  req_ks2_ks3?: boolean;
   progress: number;
   color?: string | null;
   assignee?: {
@@ -51,7 +59,8 @@ type DepArrow = {
 type PanelFormState = {
   name: string;
   start: string;
-  dur: string;
+  labor: string;
+  norm: string;
   workers: string;
   prog: string;
   depends_on: string;
@@ -72,6 +81,48 @@ const addD = (s: string, n: number) => {
   return fd(d);
 };
 const diff = (a: string, b: string) => Math.round((pd(b).getTime() - pd(a).getTime()) / 86400000);
+const roundTo = (value: number, digits = 2) => Number(value.toFixed(digits));
+const normalizeWorkersCount = (value: number | null | undefined) => Math.max(1, Number(value) || 1);
+const normalizeHoursPerDay = (value: number | null | undefined) => {
+  const parsed = Number(value);
+  return parsed > 0 ? parsed : DEFAULT_HOURS_PER_DAY;
+};
+const calculateDurationDays = (
+  laborHours: number | null | undefined,
+  workersCount: number | null | undefined,
+  hoursPerDay: number | null | undefined,
+  fallback = 1,
+) => {
+  const labor = Number(laborHours);
+  if (!Number.isFinite(labor) || labor <= 0) return Math.max(1, fallback);
+  return Math.max(1, Math.ceil(labor / (normalizeWorkersCount(workersCount) * normalizeHoursPerDay(hoursPerDay))));
+};
+const deriveLaborHours = (
+  workingDays: number,
+  workersCount: number | null | undefined,
+  hoursPerDay: number | null | undefined,
+) => roundTo(Math.max(1, workingDays) * normalizeWorkersCount(workersCount) * normalizeHoursPerDay(hoursPerDay));
+const formatHoursValue = (value: number | null | undefined) => {
+  if (value == null || Number.isNaN(Number(value))) return "—";
+  const normalized = roundTo(Number(value));
+  return Number.isInteger(normalized) ? String(normalized) : normalized.toString();
+};
+const syncTaskDerivedFields = (task: Task): Task => {
+  if (task.is_group) return task;
+  const workers = normalizeWorkersCount(task.workers_count);
+  const hoursPerDay = normalizeHoursPerDay(task.hours_per_day);
+  const laborHours = task.labor_hours != null
+    ? roundTo(Number(task.labor_hours))
+    : deriveLaborHours(task.dur, workers, hoursPerDay);
+
+  return {
+    ...task,
+    workers_count: workers,
+    hours_per_day: hoursPerDay,
+    labor_hours: laborHours,
+    dur: calculateDurationDays(laborHours, workers, hoursPerDay, task.dur),
+  };
+};
 const dispD = (s: string) => {
   const d = pd(s);
   return `${z(d.getDate())}.${z(d.getMonth() + 1)}`;
@@ -287,10 +338,8 @@ function updateTaskField(task: Task, field: EditingField, value: string | number
   switch (field) {
     case "name":
       return { ...task, name: String(value ?? "") };
-    case "dur":
-      return { ...task, dur: Number(value) };
     case "workers":
-      return { ...task, workers_count: Number(value) };
+      return syncTaskDerivedFields({ ...task, workers_count: Number(value) });
     case "start":
       return { ...task, start: String(value ?? "") };
     case "prog":
@@ -525,6 +574,21 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 }
 .batch-chip.active{border-color:var(--blue);background:rgba(59,130,246,.08);color:#1d4ed8;}
 .batch-chip-meta{font-size:10px;color:var(--muted);font-family:var(--mono);}
+.baseline-bar{
+  display:flex;align-items:center;gap:10px;padding:8px 12px;background:#f8fafc;border-bottom:1px solid var(--border);
+  flex-wrap:wrap;
+}
+.baseline-meta{font-size:11px;color:var(--muted);}
+.baseline-btn{
+  padding:6px 12px;border-radius:8px;border:1px solid rgba(15,23,42,.12);background:#fff;cursor:pointer;
+  font-size:12px;font-weight:600;color:#0f172a;
+}
+.baseline-btn.primary{background:#0f172a;color:#fff;border-color:#0f172a;}
+.baseline-btn:disabled{opacity:.55;cursor:not-allowed;}
+.act-grid{display:grid;gap:8px;margin-top:8px;}
+.act-item{display:flex;gap:10px;align-items:flex-start;font-size:12px;line-height:1.4;color:var(--text);}
+.act-item input{margin-top:2px;}
+.act-hint{font-size:11px;color:var(--muted);line-height:1.45;}
 /* locked overlay */
 .locked{opacity:.45;pointer-events:none;cursor:not-allowed!important;}
 `;
@@ -542,9 +606,16 @@ export default function App() {
   const apiToLocal = useCallback((t: ApiTask): Task => ({
     ...t,
     estimate_batch_id: t.estimate_batch_id ?? null,
+    estimate_id: t.estimate_id ?? null,
     pid: t.parent_id,
+    is_group: t.is_group ?? false,
     dur: t.working_days,
     workers_count: t.workers_count ?? null,
+    labor_hours: t.labor_hours ?? null,
+    hours_per_day: t.hours_per_day ?? DEFAULT_HOURS_PER_DAY,
+    req_hidden_work_act: t.req_hidden_work_act ?? false,
+    req_intermediate_act: t.req_intermediate_act ?? false,
+    req_ks2_ks3: t.req_ks2_ks3 ?? false,
     start: t.start_date,
     prog: t.progress,
     clr: t.color ?? "#3b82f6",
@@ -578,6 +649,10 @@ export default function App() {
   const [panelForm, setPanelForm] = useState<PanelFormState | null>(null);
   const [panelSaving, setPanelSaving] = useState(false);
   const [panelSaveError, setPanelSaveError] = useState<string | null>(null);
+  const [baselineStatus, setBaselineStatus] = useState<BaselineStatus | null>(null);
+  const [baselineLoading, setBaselineLoading] = useState(false);
+  const [baselineReason, setBaselineReason] = useState("");
+  const [actsSaving, setActsSaving] = useState(false);
 
   const lbRef = useRef<HTMLDivElement | null>(null);
   const rbRef = useRef<HTMLDivElement | null>(null);
@@ -603,6 +678,16 @@ export default function App() {
     return () => window.removeEventListener("resize", syncViewport);
   }, []);
 
+  const loadBaselineStatus = useCallback(async () => {
+    if (!pid) return;
+    try {
+      const data = await ganttApi.baselineStatus(pid);
+      setBaselineStatus(data);
+    } catch {
+      setBaselineStatus(null);
+    }
+  }, [pid]);
+
   const loadTasks = useCallback(async (preferredTaskId?: string | null, batchIdOverride?: string | null) => {
     if (!pid) return;
     const targetBatchId = batchIdOverride !== undefined ? batchIdOverride : activeBatchId;
@@ -615,7 +700,7 @@ export default function App() {
       const data = await ganttApi.list(pid, targetBatchId);
       const apiTasks = (data?.tasks ?? []) as ApiTask[];
       if (apiTasks.length > 0) {
-        setTasks(resolveDates(apiTasks.map(apiToLocal)));
+        setTasks(resolveDates(apiTasks.map((task) => syncTaskDerivedFields(apiToLocal(task)))));
         setSel(preferredTaskId ?? apiTasks[0]?.id ?? null);
       } else {
         setTasks([]);
@@ -632,7 +717,11 @@ export default function App() {
     if (!pid) return;
     projects.get(pid).then((project) => {
       if (project?.name) setPname(project.name);
+      if (project?.my_role && ["owner", "pm", "foreman", "supplier", "viewer"].includes(project.my_role)) {
+        setRole(project.my_role as RoleKey);
+      }
     }).catch(() => {});
+    loadBaselineStatus().catch(() => {});
     setBatchError(null);
     estimates.batches(pid).then((data) => {
       setBatches(data);
@@ -644,7 +733,7 @@ export default function App() {
       setActiveBatchId(batchFromUrl ?? null);
       setBatchError("Не удалось загрузить блоки сметы для Ганта. Проверьте backend и миграции БД.");
     }).finally(() => setBatchesLoaded(true));
-  }, [batchFromUrl, pid]);
+  }, [batchFromUrl, loadBaselineStatus, pid]);
 
   useEffect(() => {
     if (!batchesLoaded) return;
@@ -706,7 +795,8 @@ export default function App() {
     setPanelForm({
       name: panelTask.name,
       start: panelTask.start,
-      dur: String(panelTask.dur),
+      labor: panelTask.labor_hours != null ? formatHoursValue(panelTask.labor_hours) : "",
+      norm: formatHoursValue(panelTask.hours_per_day ?? DEFAULT_HOURS_PER_DAY),
       workers: panelTask.workers_count != null ? String(panelTask.workers_count) : "",
       prog: String(panelTask.prog),
       depends_on: depNums.join(","),
@@ -918,7 +1008,6 @@ export default function App() {
 
   const applyAndClose = useCallback((id: string, field: EditingField, raw: string) => {
     let value: string | number | null = raw;
-    if (field === "dur") value = Math.max(1, parseInt(raw, 10) || 1);
     if (field === "workers") value = Math.max(1, parseInt(raw, 10) || 1);
     if (field === "prog") value = Math.max(0, Math.min(100, parseInt(raw, 10) || 0));
     if (field === "depends_on") {
@@ -945,7 +1034,6 @@ export default function App() {
       }
       const apiField: Record<Exclude<EditingField, "depends_on">, string> = {
         name: "name",
-        dur: "working_days",
         workers: "workers_count",
         start: "start_date",
         prog: "progress_override",
@@ -964,11 +1052,14 @@ export default function App() {
     const newTask: Task = {
       id: uid(),
       pid: src?.pid ?? null,
+      is_group: false,
       depends_on: null,
       name: "Новая задача",
       start: src ? addD(src.start, src.dur) : TODAY,
       dur: 5,
       workers_count: src?.workers_count ?? 1,
+      labor_hours: src?.labor_hours ?? deriveLaborHours(5, src?.workers_count ?? 1, src?.hours_per_day ?? DEFAULT_HOURS_PER_DAY),
+      hours_per_day: src?.hours_per_day ?? DEFAULT_HOURS_PER_DAY,
       prog: 0,
       clr: src?.clr ?? "#3b82f6",
     };
@@ -1014,11 +1105,14 @@ export default function App() {
     const newTask: Task = {
       id: uid(),
       pid: sel,
+      is_group: false,
       depends_on: null,
       name: "Подзадача",
       start: src?.start ?? TODAY,
       dur: 3,
       workers_count: src?.workers_count ?? 1,
+      labor_hours: src?.labor_hours ?? deriveLaborHours(3, src?.workers_count ?? 1, src?.hours_per_day ?? DEFAULT_HOURS_PER_DAY),
+      hours_per_day: src?.hours_per_day ?? DEFAULT_HOURS_PER_DAY,
       prog: 0,
       clr: src?.clr ?? "#3b82f6",
     };
@@ -1102,8 +1196,9 @@ export default function App() {
       return;
     }
 
-    const workingDays = Math.max(1, parseInt(panelForm.dur, 10) || 1);
     const workers = Math.max(1, parseInt(panelForm.workers, 10) || 1);
+    const laborHours = Number(panelForm.labor);
+    const hoursPerDay = Number(panelForm.norm);
     const progress = Math.max(0, Math.min(100, parseInt(panelForm.prog, 10) || 0));
     const normalizedColor = panelForm.color.trim() || "#3b82f6";
     const resolvedDeps = resolveDependencyInput(panelForm.depends_on, panelTask.id, rows, tasks);
@@ -1113,12 +1208,21 @@ export default function App() {
     const payload: Record<string, string | number | null> = {
       name: trimmedName,
       start_date: panelForm.start,
-      working_days: workingDays,
       color: normalizedColor,
     };
 
     if (!panelTaskHasKids) {
+      if (!Number.isFinite(laborHours) || laborHours < 0) {
+        setPanelSaveError("Укажите корректную трудоемкость.");
+        return;
+      }
+      if (!Number.isFinite(hoursPerDay) || hoursPerDay <= 0) {
+        setPanelSaveError("Укажите корректную норму часов в день.");
+        return;
+      }
       payload.workers_count = workers;
+      payload.labor_hours = roundTo(laborHours);
+      payload.hours_per_day = roundTo(hoursPerDay);
       payload.progress_override = progress;
     }
 
@@ -1141,6 +1245,40 @@ export default function App() {
       setPanelSaving(false);
     }
   }, [activeBatchId, loadTasks, panelForm, panelTask, panelTaskHasKids, pid, role, rows, tasks]);
+
+  const saveTaskActs = useCallback(async (patch: {
+    req_hidden_work_act?: boolean;
+    req_intermediate_act?: boolean;
+    req_ks2_ks3?: boolean;
+  }) => {
+    if (!pid || !panelTask?.estimate_id) return;
+    setActsSaving(true);
+    setPanelSaveError(null);
+    try {
+      const result = await estimates.updateActs(pid, panelTask.estimate_id, patch);
+      setTasks((current) => current.map((task) => (
+        task.id === panelTask.id ? { ...task, ...result } : task
+      )));
+    } catch (error) {
+      setPanelSaveError(error instanceof Error ? error.message : "Не удалось обновить флаги актов.");
+    } finally {
+      setActsSaving(false);
+    }
+  }, [panelTask, pid]);
+
+  const acceptBaseline = useCallback(async () => {
+    if (!pid) return;
+    setBaselineLoading(true);
+    try {
+      await ganttApi.acceptOverdue(pid, { reason: baselineReason.trim() || null });
+      setBaselineReason("");
+      await loadBaselineStatus();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось принять просроченный график");
+    } finally {
+      setBaselineLoading(false);
+    }
+  }, [baselineReason, loadBaselineStatus, pid]);
 
   const splitPanelTask = useCallback(async () => {
     if (!pid || !panelTask || !canSplitPanelTask) return;
@@ -1195,6 +1333,47 @@ export default function App() {
           <span className="role-access-hint">
             {ROLES[role].can.map(a=>a).join(' · ')}
           </span>
+        </div>
+
+        <div className="baseline-bar">
+          <span className="baseline-meta">
+            {baselineStatus
+              ? baselineStatus.has_overdue_tasks
+                ? `Просроченных задач: ${baselineStatus.overdue_tasks_count}`
+                : "Просроченных задач нет"
+              : "Статус baseline недоступен"}
+          </span>
+          {baselineStatus?.latest && (
+            <span className="baseline-meta">
+              Последний baseline: W{baselineStatus.latest.baseline_week}/{baselineStatus.latest.baseline_year}
+              {baselineStatus.latest.created_by?.name ? ` · ${baselineStatus.latest.created_by.name}` : ""}
+            </span>
+          )}
+          {role === "pm" && (
+            <>
+              <input
+                value={baselineReason}
+                onChange={(e) => setBaselineReason(e.target.value)}
+                placeholder="Причина принятия просроченного графика"
+                style={{
+                  minWidth: 260,
+                  flex: "1 1 260px",
+                  padding: "7px 10px",
+                  border: "1px solid var(--border)",
+                  borderRadius: 8,
+                  fontSize: 12,
+                  fontFamily: "var(--sans)",
+                }}
+              />
+              <button
+                className="baseline-btn primary"
+                onClick={acceptBaseline}
+                disabled={baselineLoading || !baselineStatus?.can_accept}
+              >
+                {baselineLoading ? "Фиксируем..." : "Принять просроченный график как текущий"}
+              </button>
+            </>
+          )}
         </div>
 
         {batches.length > 0 && (
@@ -1305,14 +1484,8 @@ export default function App() {
                     </div>
 
                     {/* Dur */}
-                    <div className={`td mn c${isEd&&editing.field==='dur'?' ed':''}`}
-                      style={{width:48}} onDoubleClick={()=>startEdit(row.id,'dur',row.dur)}>
-                      {isEd&&editing.field==='dur'
-                        ? <input ref={inpRef} style={{width:32,textAlign:'center'}}
-                            value={editVal} onChange={e=>setEditVal(e.target.value)}
-                            onBlur={commit} onKeyDown={onKD}/>
-                        : row.dur+'д'
-                      }
+                    <div className="td mn c" style={{width:48,color:'var(--muted)'}}>
+                      {row.dur+'д'}
                     </div>
 
                     {/* Workers */}
@@ -1505,6 +1678,18 @@ export default function App() {
         const tc = comments[panelId] || [];
         const depNums2 = parseDeps(panelTask.depends_on).map(d=>numMap[d]??'?');
         const progColor = panelTask.prog>=100?'#22c55e':panelTask.prog>=50?'#f59e0b':'#3b82f6';
+        const panelWorkers = panelForm && !panelTaskHasKids
+          ? normalizeWorkersCount(Number(panelForm.workers))
+          : normalizeWorkersCount(panelTask.workers_count);
+        const panelLaborHours = panelForm && !panelTaskHasKids
+          ? (Number.isFinite(Number(panelForm.labor)) ? Number(panelForm.labor) : 0)
+          : Number(panelTask.labor_hours ?? 0);
+        const panelHoursPerDay = panelForm && !panelTaskHasKids
+          ? normalizeHoursPerDay(Number(panelForm.norm))
+          : normalizeHoursPerDay(panelTask.hours_per_day);
+        const computedPanelDuration = panelTaskHasKids
+          ? panelTask.dur
+          : calculateDurationDays(panelLaborHours, panelWorkers, panelHoursPerDay, panelTask.dur);
         return(
           <div className="panel-overlay" onClick={()=>setPanelId(null)}>
             <div className="panel" onClick={e=>e.stopPropagation()}>
@@ -1559,19 +1744,24 @@ export default function App() {
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Конец</div>
-                      <div className="pfield-val mono">{dispD(addD(panelTask.start,panelTask.dur))}</div>
+                      <div className="pfield-val mono">{dispD(addD(panelTask.start,computedPanelDuration))}</div>
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Длительность</div>
-                      {canEditPanelTask && panelForm
+                      <div className="pfield-val mono">{computedPanelDuration} дн.</div>
+                    </div>
+                    <div className="pfield">
+                      <div className="pfield-label">Трудоемкость</div>
+                      {canEditPanelTask && panelForm && !panelTaskHasKids
                         ? <input
                             type="number"
-                            min={1}
+                            min={0}
+                            step="0.1"
                             className="pfield-input"
-                            value={panelForm.dur}
-                            onChange={e=>setPanelForm(current => current ? { ...current, dur: e.target.value } : current)}
+                            value={panelForm.labor}
+                            onChange={e=>setPanelForm(current => current ? { ...current, labor: e.target.value } : current)}
                           />
-                        : <div className="pfield-val mono">{panelTask.dur} дн.</div>
+                        : <div className="pfield-val mono">{panelTaskHasKids ? "—" : `${formatHoursValue(panelTask.labor_hours)} ч`}</div>
                       }
                     </div>
                     <div className="pfield">
@@ -1585,6 +1775,20 @@ export default function App() {
                             onChange={e=>setPanelForm(current => current ? { ...current, workers: e.target.value } : current)}
                           />
                         : <div className="pfield-val mono">{panelTask.workers_count ?? "—"}</div>
+                      }
+                    </div>
+                    <div className="pfield">
+                      <div className="pfield-label">Норма</div>
+                      {canEditPanelTask && panelForm && !panelTaskHasKids
+                        ? <input
+                            type="number"
+                            min={0.1}
+                            step="0.1"
+                            className="pfield-input"
+                            value={panelForm.norm}
+                            onChange={e=>setPanelForm(current => current ? { ...current, norm: e.target.value } : current)}
+                          />
+                        : <div className="pfield-val mono">{panelTaskHasKids ? "—" : `${formatHoursValue(panelTask.hours_per_day ?? DEFAULT_HOURS_PER_DAY)} ч/день`}</div>
                       }
                     </div>
                     <div className="pfield">
@@ -1636,6 +1840,14 @@ export default function App() {
                           </div>
                       }
                     </div>
+                    <div className="pfield" style={{gridColumn:'1/-1'}}>
+                      <div className="pfield-label">Формула</div>
+                      <div className="pfield-val mono">
+                        {panelTaskHasKids
+                          ? "Для групповой задачи длительность задается дочерними работами."
+                          : `${formatHoursValue(panelLaborHours)} ч / ${panelWorkers} чел / ${formatHoursValue(panelHoursPerDay)} ч/день = ${computedPanelDuration} дн.`}
+                      </div>
+                    </div>
                   </div>
                   {canEditPanelTask
                     ? <div className="panel-actions">
@@ -1646,6 +1858,37 @@ export default function App() {
                       </div>
                     : <div className="panel-readonly-note" style={{marginTop:12}}>
                         Карточка доступна только для просмотра в текущей роли.
+                      </div>
+                  }
+                </div>
+
+                <div className="panel-section">
+                  <div className="panel-section-title">Акты</div>
+                  {panelTask.estimate_id
+                    ? <>
+                        <div className="act-grid">
+                          {[
+                            ["req_hidden_work_act", "Акты скрытых работ с приглашением технадзора"],
+                            ["req_intermediate_act", "Акты промежуточного выполнения работ"],
+                            ["req_ks2_ks3", "КС-2, КС-3 и исполнительная съемка по этапу"],
+                          ].map(([key, label]) => (
+                            <label key={key} className="act-item">
+                              <input
+                                type="checkbox"
+                                checked={Boolean(panelTask[key as keyof Task])}
+                                disabled={!canEditPanelTask || actsSaving}
+                                onChange={(e) => saveTaskActs({ [key]: e.target.checked })}
+                              />
+                              <span>{label}</span>
+                            </label>
+                          ))}
+                        </div>
+                        <div className="act-hint">
+                          Флаги сохраняются на строке сметы и отображаются в карточке связанной задачи.
+                        </div>
+                      </>
+                    : <div className="act-hint">
+                        У этой задачи нет связанной строки сметы, поэтому флаги актов недоступны.
                       </div>
                   }
                 </div>

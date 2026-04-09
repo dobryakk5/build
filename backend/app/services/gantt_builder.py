@@ -11,6 +11,11 @@ from datetime import date
 from uuid import uuid4
 
 from app.core.date_utils import add_working_days
+from app.services.gantt_calculations import (
+    DEFAULT_HOURS_PER_DAY,
+    calculate_labor_hours,
+    calculate_working_days,
+)
 
 
 # ── Нормы трудоёмкости (упрощённый справочник ЕНиР) ─────────────────────────
@@ -92,6 +97,8 @@ class GanttTaskDTO:
     start_date:  date
     working_days: int
     workers_count: int | None
+    labor_hours: float | None
+    hours_per_day: float
     is_group:    bool
     type:        str       # task | project
     color:       str
@@ -101,7 +108,7 @@ class GanttTaskDTO:
 # ── Builder ───────────────────────────────────────────────────────────────────
 
 class GanttBuilder:
-    HOURS_PER_DAY = 8
+    HOURS_PER_DAY = DEFAULT_HOURS_PER_DAY
 
     def build(
         self,
@@ -144,7 +151,8 @@ class GanttBuilder:
             task_start  = current_start
 
             for est in section_estimates:
-                dur = self._calc_days(est, workers)
+                labor_hours = self._calc_labor_hours(est, workers)
+                dur = calculate_working_days(labor_hours, workers, self.HOURS_PER_DAY) or 1
                 task_id = str(uuid4())
                 row_order += 10.0
 
@@ -157,6 +165,8 @@ class GanttBuilder:
                     start_date   = task_start,
                     working_days = dur,
                     workers_count = workers,
+                    labor_hours  = labor_hours,
+                    hours_per_day = self.HOURS_PER_DAY,
                     is_group     = False,
                     type         = "task",
                     color        = color,
@@ -170,7 +180,8 @@ class GanttBuilder:
 
             # Родительская задача
             total_days = max(1, sum(
-                self._calc_days(e, workers) for e in section_estimates
+                calculate_working_days(self._calc_labor_hours(e, workers), workers, self.HOURS_PER_DAY) or 1
+                for e in section_estimates
             ))
             row_order += 10.0
             section_task = GanttTaskDTO(
@@ -182,6 +193,8 @@ class GanttBuilder:
                 start_date   = current_start,
                 working_days = total_days,
                 workers_count = None,
+                labor_hours  = None,
+                hours_per_day = self.HOURS_PER_DAY,
                 is_group     = True,
                 type         = "project",
                 color        = color,
@@ -208,29 +221,25 @@ class GanttBuilder:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _calc_days(self, estimate, workers: int) -> int:
-        """Рассчитывает длительность в рабочих днях."""
+    def _calc_labor_hours(self, estimate, workers: int) -> float:
+        """Рассчитывает плановую трудоёмкость задачи в человеко-часах."""
         # Из трудоёмкости ЕНиР если есть
         if estimate.labor_hours and estimate.quantity:
-            hours = float(estimate.labor_hours) * float(estimate.quantity)
-            days  = hours / (self.HOURS_PER_DAY * workers)
-            return max(1, round(days))
+            return round(float(estimate.labor_hours) * float(estimate.quantity), 2)
 
         # По ключевым словам
         name_lower = estimate.work_name.lower()
         for keyword, norm in ENIR_NORMS.items():
             if keyword in name_lower:
                 qty   = float(estimate.quantity or 1)
-                hours = norm["hours"] * qty
-                days  = hours / (self.HOURS_PER_DAY * workers)
-                return max(1, round(days))
+                return round(norm["hours"] * qty, 2)
 
         # Fallback по стоимости (~50 000 ₽/день бригады)
         if estimate.total_price:
             days = float(estimate.total_price) / 50_000
-            return max(1, min(30, round(days)))
+            return calculate_labor_hours(max(1, min(30, round(days))), workers, self.HOURS_PER_DAY)
 
-        return 3
+        return calculate_labor_hours(3, workers, self.HOURS_PER_DAY)
 
     def _sort_sections(self, sections: list[str]) -> list[str]:
         def key(name: str) -> int:

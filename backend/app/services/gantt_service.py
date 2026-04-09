@@ -16,7 +16,8 @@ from sqlalchemy import select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.date_utils import task_end_date, working_days_between
-from app.models import GanttTask, TaskDependency, TaskHistory
+from app.models import GanttTask, ScheduleBaseline, ScheduleBaselineTask, TaskDependency, TaskHistory
+from app.services.gantt_calculations import calculate_labor_hours
 
 
 # ── Прогресс ─────────────────────────────────────────────────────────────────
@@ -224,6 +225,8 @@ async def split_task_by_date(
     second_days = task.working_days - first_days
     original_name = task.name
     original_workers = task.workers_count or 1
+    hours_per_day = float(task.hours_per_day or 8)
+    original_labor_hours = float(task.labor_hours) if task.labor_hours is not None else None
 
     next_order = await _get_next_row_order(task, db)
     if next_order - float(task.row_order) < 0.001:
@@ -242,6 +245,8 @@ async def split_task_by_date(
         start_date=split_date,
         working_days=second_days,
         workers_count=new_workers_count,
+        labor_hours=calculate_labor_hours(second_days, new_workers_count, hours_per_day),
+        hours_per_day=hours_per_day,
         progress=task.progress,
         is_group=False,
         type=task.type,
@@ -266,6 +271,8 @@ async def split_task_by_date(
     task.name = f"{original_name} (этап 1)"
     task.working_days = first_days
     task.workers_count = original_workers
+    task.labor_hours = calculate_labor_hours(first_days, original_workers, hours_per_day)
+    task.hours_per_day = hours_per_day
     db.add(task)
 
     db.add(TaskHistory(
@@ -278,17 +285,21 @@ async def split_task_by_date(
             "name": original_name,
             "working_days": first_days + second_days,
             "workers_count": original_workers,
+            "labor_hours": original_labor_hours,
+            "hours_per_day": hours_per_day,
         },
         new_data={
             "first_task_id": task.id,
             "first_name": task.name,
             "first_working_days": first_days,
             "first_workers_count": task.workers_count,
+            "first_labor_hours": float(task.labor_hours) if task.labor_hours is not None else None,
             "second_task_id": second_task.id,
             "second_name": second_task.name,
             "second_start_date": str(second_task.start_date),
             "second_working_days": second_task.working_days,
             "second_workers_count": second_task.workers_count,
+            "second_labor_hours": float(second_task.labor_hours) if second_task.labor_hours is not None else None,
         },
     ))
 
@@ -384,3 +395,116 @@ async def soft_delete_task(
         await _refresh_is_group(task.parent_id, db)
 
     return deleted_ids
+
+
+async def get_baseline_status(
+    project_id: str,
+    db: AsyncSession,
+) -> dict:
+    today = date.today()
+    iso_year, iso_week, _ = today.isocalendar()
+
+    latest = await db.scalar(
+        select(ScheduleBaseline)
+        .where(ScheduleBaseline.project_id == project_id)
+        .where(ScheduleBaseline.kind == "accepted_overdue")
+        .order_by(ScheduleBaseline.created_at.desc())
+        .limit(1)
+    )
+    accepted_this_week = await db.scalar(
+        select(ScheduleBaseline)
+        .where(ScheduleBaseline.project_id == project_id)
+        .where(ScheduleBaseline.kind == "accepted_overdue")
+        .where(ScheduleBaseline.baseline_year == iso_year)
+        .where(ScheduleBaseline.baseline_week == iso_week)
+        .limit(1)
+    )
+
+    active_tasks = list(
+        await db.scalars(
+            select(GanttTask)
+            .where(GanttTask.project_id == project_id)
+            .where(GanttTask.deleted_at == None)
+            .where(GanttTask.is_group == False)
+        )
+    )
+    overdue_tasks_count = sum(
+        1
+        for task in active_tasks
+        if task.progress < 100 and task_end_date(task.start_date, task.working_days) < today
+    )
+
+    return {
+        "accepted_this_week": accepted_this_week is not None,
+        "current_year": iso_year,
+        "current_week": iso_week,
+        "has_overdue_tasks": overdue_tasks_count > 0,
+        "overdue_tasks_count": overdue_tasks_count,
+        "latest": latest,
+    }
+
+
+async def accept_overdue_baseline(
+    project_id: str,
+    actor_id: str,
+    reason: str | None,
+    db: AsyncSession,
+) -> ScheduleBaseline:
+    status = await get_baseline_status(project_id, db)
+    if status["accepted_this_week"]:
+        raise ValueError("Просроченный график уже принят как текущий на этой неделе")
+    if not status["has_overdue_tasks"]:
+        raise ValueError("В проекте нет просроченных задач для фиксации текущего графика")
+
+    baseline = ScheduleBaseline(
+        id=str(uuid4()),
+        project_id=project_id,
+        created_by=actor_id,
+        kind="accepted_overdue",
+        baseline_year=status["current_year"],
+        baseline_week=status["current_week"],
+        reason=reason,
+    )
+    db.add(baseline)
+    await db.flush()
+
+    tasks = list(
+        await db.scalars(
+            select(GanttTask)
+            .where(GanttTask.project_id == project_id)
+            .where(GanttTask.deleted_at == None)
+            .order_by(GanttTask.row_order)
+        )
+    )
+    task_ids = [task.id for task in tasks]
+    dep_rows = (
+        list(await db.scalars(select(TaskDependency).where(TaskDependency.task_id.in_(task_ids))))
+        if task_ids else []
+    )
+    dep_map: dict[str, list[str]] = defaultdict(list)
+    for dep in dep_rows:
+        dep_map[dep.task_id].append(dep.depends_on)
+
+    for task in tasks:
+        db.add(ScheduleBaselineTask(
+            id=str(uuid4()),
+            baseline_id=baseline.id,
+            task_id=task.id,
+            estimate_id=task.estimate_id,
+            estimate_batch_id=task.estimate_batch_id,
+            parent_id=task.parent_id,
+            name=task.name,
+            start_date=task.start_date,
+            working_days=task.working_days,
+            workers_count=task.workers_count,
+            labor_hours=float(task.labor_hours) if task.labor_hours is not None else None,
+            hours_per_day=float(task.hours_per_day) if task.hours_per_day is not None else None,
+            progress=task.progress,
+            is_group=task.is_group,
+            type=task.type,
+            color=task.color,
+            row_order=float(task.row_order),
+            depends_on=",".join(sorted(dep_map.get(task.id, []))) or None,
+        ))
+
+    return baseline

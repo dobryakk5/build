@@ -8,7 +8,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps         import get_current_user, require_action, get_project_member, get_db
 from app.core.permissions import Action
-from app.models           import DailyReport, DailyReportItem, Estimate, GanttTask, ProjectMember, User
+from app.models           import (
+    DailyReport,
+    DailyReportItem,
+    Estimate,
+    GanttTask,
+    MaterialDelayEvent,
+    ProjectMember,
+    ScheduleBaseline,
+    User,
+)
 from app.services.gantt_service import update_leaf_progress
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["reports"])
@@ -87,74 +96,127 @@ async def report_journal(
         )
     ).all()
 
-    if not completed_tasks:
-        return []
-
-    task_ids = [task.id for task, _ in completed_tasks]
-    report_rows = (
-        await db.execute(
-            select(
-                DailyReportItem.id.label("id"),
-                DailyReportItem.report_id.label("report_id"),
-                DailyReportItem.task_id.label("task_id"),
-                DailyReportItem.work_done.label("work_done"),
-                DailyReportItem.workers_count.label("workers_count"),
-                DailyReportItem.volume_done.label("volume_done"),
-                DailyReportItem.volume_unit.label("volume_unit"),
-                DailyReportItem.created_at.label("created_at"),
-                DailyReport.report_date.label("report_date"),
-                Estimate.labor_hours.label("estimate_labor_hours"),
+    work_entries: list[dict] = []
+    if completed_tasks:
+        task_ids = [task.id for task, _ in completed_tasks]
+        report_rows = (
+            await db.execute(
+                select(
+                    DailyReportItem.id.label("id"),
+                    DailyReportItem.report_id.label("report_id"),
+                    DailyReportItem.task_id.label("task_id"),
+                    DailyReportItem.work_done.label("work_done"),
+                    DailyReportItem.workers_count.label("workers_count"),
+                    DailyReportItem.volume_done.label("volume_done"),
+                    DailyReportItem.volume_unit.label("volume_unit"),
+                    DailyReportItem.created_at.label("created_at"),
+                    DailyReport.report_date.label("report_date"),
+                    Estimate.labor_hours.label("estimate_labor_hours"),
+                )
+                .join(DailyReport, DailyReport.id == DailyReportItem.report_id)
+                .join(GanttTask, GanttTask.id == DailyReportItem.task_id)
+                .join(Estimate, Estimate.id == GanttTask.estimate_id, isouter=True)
+                .where(DailyReport.project_id == project_id)
+                .where(DailyReport.status.in_(("submitted", "reviewed")))
+                .where(DailyReportItem.task_id.in_(task_ids))
+                .order_by(DailyReport.report_date.desc(), DailyReportItem.created_at.desc())
             )
-            .join(DailyReport, DailyReport.id == DailyReportItem.report_id)
-            .join(GanttTask, GanttTask.id == DailyReportItem.task_id)
-            .join(Estimate, Estimate.id == GanttTask.estimate_id, isouter=True)
-            .where(DailyReport.project_id == project_id)
-            .where(DailyReport.status.in_(("submitted", "reviewed")))
-            .where(DailyReportItem.task_id.in_(task_ids))
-            .order_by(DailyReport.report_date.desc(), DailyReportItem.created_at.desc())
-        )
-    ).mappings()
+        ).mappings()
 
-    latest_report_by_task: dict[str, dict] = {}
-    for row in report_rows:
-        if row["task_id"] not in latest_report_by_task:
-            latest_report_by_task[row["task_id"]] = dict(row)
+        latest_report_by_task: dict[str, dict] = {}
+        for row in report_rows:
+            if row["task_id"] not in latest_report_by_task:
+                latest_report_by_task[row["task_id"]] = dict(row)
 
-    result = []
-    for task, estimate in completed_tasks:
-        report_row = latest_report_by_task.get(task.id)
+        for task, estimate in completed_tasks:
+            report_row = latest_report_by_task.get(task.id)
 
-        planned_man_hours = None
-        if estimate and estimate.labor_hours is not None and estimate.quantity is not None:
-            planned_man_hours = round(float(estimate.labor_hours) * float(estimate.quantity), 2)
-        elif task.workers_count:
-            planned_man_hours = round(float(task.workers_count) * float(task.working_days) * 8, 2)
+            planned_man_hours = None
+            if estimate and estimate.labor_hours is not None and estimate.quantity is not None:
+                planned_man_hours = round(float(estimate.labor_hours) * float(estimate.quantity), 2)
+            elif task.labor_hours is not None:
+                planned_man_hours = round(float(task.labor_hours), 2)
+            elif task.workers_count:
+                planned_man_hours = round(
+                    float(task.workers_count) * float(task.working_days) * float(task.hours_per_day or 8),
+                    2,
+                )
 
-        actual_man_hours = None
-        if report_row and report_row["estimate_labor_hours"] is not None and report_row["volume_done"] is not None:
-            actual_man_hours = round(
-                float(report_row["estimate_labor_hours"]) * float(report_row["volume_done"]),
-                2,
-            )
+            actual_man_hours = None
+            if report_row and report_row["estimate_labor_hours"] is not None and report_row["volume_done"] is not None:
+                actual_man_hours = round(
+                    float(report_row["estimate_labor_hours"]) * float(report_row["volume_done"]),
+                    2,
+                )
 
-        result.append({
-            "id":            report_row["id"] if report_row else task.id,
-            "report_id":     report_row["report_id"] if report_row else None,
-            "task_id":       task.id,
-            "task_name":     task.name,
-            "work_done":     report_row["work_done"] if report_row else task.name,
-            "workers_count": report_row["workers_count"] if report_row else task.workers_count,
-            "volume_done":   float(report_row["volume_done"]) if report_row and report_row["volume_done"] is not None else None,
-            "volume_unit":   report_row["volume_unit"] if report_row else None,
-            "man_hours":     actual_man_hours if actual_man_hours is not None else planned_man_hours,
-            "report_date":   (
+            report_date = (
                 str(report_row["report_date"])
                 if report_row and report_row["report_date"] is not None
                 else task.updated_at.date().isoformat()
-            ),
+            )
+            work_entries.append({
+                "entry_type": "work",
+                "id": report_row["id"] if report_row else task.id,
+                "report_id": report_row["report_id"] if report_row else None,
+                "task_id": task.id,
+                "task_name": task.name,
+                "work_done": report_row["work_done"] if report_row else task.name,
+                "workers_count": report_row["workers_count"] if report_row else task.workers_count,
+                "volume_done": float(report_row["volume_done"]) if report_row and report_row["volume_done"] is not None else None,
+                "volume_unit": report_row["volume_unit"] if report_row else None,
+                "man_hours": actual_man_hours if actual_man_hours is not None else planned_man_hours,
+                "event_date": f"{report_date}T00:00:00",
+                "report_date": report_date,
+            })
+
+    delay_entries: list[dict] = []
+    delay_events = await db.scalars(
+        select(MaterialDelayEvent)
+        .where(MaterialDelayEvent.project_id == project_id)
+        .order_by(MaterialDelayEvent.reported_at.desc())
+    )
+    for ev in delay_events:
+        reporter = await db.get(User, ev.reported_by) if ev.reported_by else None
+        delay_entries.append({
+            "entry_type": "material_delay",
+            "id": ev.id,
+            "material_id": ev.material_id,
+            "material_name": ev.material_name,
+            "old_delivery_date": str(ev.old_delivery_date) if ev.old_delivery_date else None,
+            "new_delivery_date": str(ev.new_delivery_date),
+            "days_shifted": ev.days_shifted,
+            "reason": ev.reason,
+            "reporter": {"id": reporter.id, "name": reporter.name} if reporter else None,
+            "event_date": ev.reported_at.isoformat(),
+            "report_date": ev.reported_at.date().isoformat(),
         })
 
-    return result
+    baseline_entries: list[dict] = []
+    baselines = await db.scalars(
+        select(ScheduleBaseline)
+        .where(ScheduleBaseline.project_id == project_id)
+        .where(ScheduleBaseline.kind == "accepted_overdue")
+        .order_by(ScheduleBaseline.created_at.desc())
+    )
+    for baseline in baselines:
+        actor = await db.get(User, baseline.created_by) if baseline.created_by else None
+        baseline_entries.append({
+            "entry_type": "schedule_baseline",
+            "id": baseline.id,
+            "kind": baseline.kind,
+            "baseline_year": baseline.baseline_year,
+            "baseline_week": baseline.baseline_week,
+            "reason": baseline.reason,
+            "created_by": {"id": actor.id, "name": actor.name} if actor else None,
+            "event_date": baseline.created_at.isoformat(),
+            "report_date": baseline.created_at.date().isoformat(),
+        })
+
+    return sorted(
+        work_entries + delay_entries + baseline_entries,
+        key=lambda item: item["event_date"],
+        reverse=True,
+    )
 
 
 # ── Статус отчётов за сегодня ─────────────────────────────────────────────────

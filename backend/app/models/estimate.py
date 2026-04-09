@@ -1,6 +1,6 @@
 from datetime import datetime
 import uuid
-from sqlalchemy import String, Text, Integer, Numeric, ForeignKey, text
+from sqlalchemy import String, Text, Integer, Numeric, ForeignKey, text, Boolean
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy import TIMESTAMP
@@ -26,6 +26,9 @@ class Estimate(Base, SoftDeleteMixin):
     fer_match_score: Mapped[float|None] = mapped_column(Numeric(5, 4))
     fer_matched_at: Mapped[datetime|None] = mapped_column(TIMESTAMPTZ)
     labor_hours: Mapped[float|None] = mapped_column(Numeric(10, 2))        # трудоёмкость чел/час
+    req_hidden_work_act: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    req_intermediate_act: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    req_ks2_ks3: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     row_order:   Mapped[int]        = mapped_column(Integer, default=0)
     raw_data:    Mapped[dict|None]  = mapped_column(JSONB)                 # исходная строка Excel
     created_at:  Mapped[datetime]   = mapped_column(TIMESTAMPTZ, server_default=text("NOW()"))

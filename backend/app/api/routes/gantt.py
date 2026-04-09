@@ -8,19 +8,27 @@ from datetime import date
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps        import require_action, require_task_in_project, get_project_member, get_db, get_current_user
 from app.core.permissions import Action
 from app.core.date_utils  import task_end_date
-from app.models           import GanttTask, TaskDependency, Comment, User, ProjectMember
+from app.models           import GanttTask, TaskDependency, Comment, Estimate, User, ProjectMember
 from app.schemas          import (
     TaskCreate, TaskUpdate, TaskResponse, TaskPatchResponse,
     TaskReorderRequest, GanttResponse, DependencyAdd,
     TaskSplitRequest, TaskSplitResponse,
 )
+from app.services.gantt_calculations import (
+    DEFAULT_HOURS_PER_DAY,
+    calculate_labor_hours,
+    calculate_working_days,
+)
 from app.services.gantt_service import (
+    accept_overdue_baseline,
+    get_baseline_status,
     get_effective_progress, update_leaf_progress,
     resolve_project_dates, reorder_task, soft_delete_task, split_task_by_date,
     _refresh_is_group,
@@ -63,6 +71,7 @@ async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
         u = await db.get(User, task.assignee_id)
         if u:
             assignee = {"id": u.id, "name": u.name, "avatar_url": u.avatar_url}
+    estimate = await db.get(Estimate, task.estimate_id) if task.estimate_id else None
 
     return TaskResponse(
         id             = task.id,
@@ -74,6 +83,8 @@ async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
         start_date     = task.start_date,
         working_days   = task.working_days,
         workers_count  = task.workers_count,
+        labor_hours    = float(task.labor_hours) if task.labor_hours is not None else None,
+        hours_per_day  = float(task.hours_per_day or DEFAULT_HOURS_PER_DAY),
         end_date       = end_date,
         progress       = progress,
         is_group       = task.is_group,
@@ -81,11 +92,18 @@ async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
         color          = task.color,
         requires_act   = task.requires_act,
         act_signed     = task.act_signed,
+        req_hidden_work_act = estimate.req_hidden_work_act if estimate else False,
+        req_intermediate_act = estimate.req_intermediate_act if estimate else False,
+        req_ks2_ks3 = estimate.req_ks2_ks3 if estimate else False,
         row_order      = float(task.row_order),
         assignee       = assignee,
         depends_on     = ",".join(list(deps)),
         comments_count = comments_count or 0,
     )
+
+
+class BaselineAcceptRequest(BaseModel):
+    reason: str | None = None
 
 
 # ── GET /projects/{pid}/gantt ─────────────────────────────────────────────────
@@ -146,21 +164,35 @@ async def create_task(
         parent = await db.get(GanttTask, body.parent_id)
         estimate_batch_id = parent.estimate_batch_id if parent else None
 
+    is_group_task = body.type == "project"
+    workers_count = None if is_group_task else max(1, int(body.workers_count or 1))
+    hours_per_day = float(body.hours_per_day or DEFAULT_HOURS_PER_DAY)
+    labor_hours = None if is_group_task else body.labor_hours
+    working_days = body.working_days or 1
+
+    if not is_group_task:
+        if labor_hours is not None:
+            working_days = calculate_working_days(labor_hours, workers_count, hours_per_day) or 1
+        else:
+            labor_hours = calculate_labor_hours(working_days, workers_count, hours_per_day)
+
     task = GanttTask(
         id           = str(uuid4()),
         project_id   = str(project_id),
         estimate_batch_id = estimate_batch_id,
         name         = body.name,
         start_date   = body.start_date,
-        working_days = body.working_days,
-        workers_count = body.workers_count if body.type != "project" else None,
+        working_days = working_days,
+        workers_count = workers_count,
+        labor_hours  = labor_hours,
+        hours_per_day = hours_per_day,
         parent_id    = body.parent_id,
         assignee_id  = body.assignee_id,
         type         = body.type,
         color        = body.color,
         requires_act = body.requires_act,
         row_order    = body.row_order,
-        is_group     = False,
+        is_group     = is_group_task,
         progress     = 0,
     )
     db.add(task)
@@ -211,6 +243,8 @@ async def update_task(
                 "Есть черновик отчёта прораба — прогресс будет обновлён при его отправке"
             )
 
+    schedule_fields = {"working_days", "workers_count", "labor_hours", "hours_per_day"}
+
     # Применяем изменения
     dates_changed = False
     for field, value in update_fields.items():
@@ -220,8 +254,24 @@ async def update_task(
                 await update_leaf_progress(task, value, current_user.id, db)
         else:
             setattr(task, field, value)
-            if field in ("start_date", "working_days"):
+            if field in ("start_date", "working_days") or field in schedule_fields:
                 dates_changed = True
+
+    if not task.is_group:
+        workers_count = max(1, int(task.workers_count or 1))
+        hours_per_day = float(task.hours_per_day or DEFAULT_HOURS_PER_DAY)
+
+        if any(field in update_fields for field in ("labor_hours", "workers_count", "hours_per_day")):
+            task.workers_count = workers_count
+            task.hours_per_day = hours_per_day
+            task.working_days = calculate_working_days(task.labor_hours, workers_count, hours_per_day) or 1
+        elif "working_days" in update_fields:
+            task.workers_count = workers_count
+            task.hours_per_day = hours_per_day
+            task.labor_hours = calculate_labor_hours(task.working_days, workers_count, hours_per_day)
+    else:
+        task.workers_count = None
+        task.labor_hours = None
 
     await db.flush()
 
@@ -318,6 +368,69 @@ async def resolve(
     changed = await resolve_project_dates(str(project_id), db)
     await db.commit()
     return {"resolved_count": len(changed), "affected": changed}
+
+
+@router.get("/baseline-status")
+async def baseline_status(
+    project_id: UUID,
+    member: ProjectMember = Depends(require_action(Action.VIEW)),
+    db: AsyncSession = Depends(get_db),
+):
+    status = await get_baseline_status(str(project_id), db)
+    latest = status["latest"]
+    latest_user = await db.get(User, latest.created_by) if latest and latest.created_by else None
+
+    return {
+        "can_accept": member.role == "pm" and status["has_overdue_tasks"] and not status["accepted_this_week"],
+        "accepted_this_week": status["accepted_this_week"],
+        "current_year": status["current_year"],
+        "current_week": status["current_week"],
+        "has_overdue_tasks": status["has_overdue_tasks"],
+        "overdue_tasks_count": status["overdue_tasks_count"],
+        "latest": (
+            {
+                "id": latest.id,
+                "kind": latest.kind,
+                "baseline_year": latest.baseline_year,
+                "baseline_week": latest.baseline_week,
+                "reason": latest.reason,
+                "created_at": latest.created_at.isoformat(),
+                "created_by": {"id": latest_user.id, "name": latest_user.name} if latest_user else None,
+            }
+            if latest else None
+        ),
+    }
+
+
+@router.post("/accept-overdue", status_code=201)
+async def accept_overdue(
+    project_id: UUID,
+    body: BaselineAcceptRequest,
+    current_user = Depends(get_current_user),
+    member: ProjectMember = Depends(require_action(Action.VIEW)),
+    db: AsyncSession = Depends(get_db),
+):
+    if member.role != "pm":
+        raise HTTPException(403, "Только руководитель проекта может принять просроченный график как текущий")
+
+    try:
+        baseline = await accept_overdue_baseline(
+            project_id=str(project_id),
+            actor_id=current_user.id,
+            reason=body.reason.strip() if body.reason else None,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+    await db.commit()
+    return {
+        "id": baseline.id,
+        "kind": baseline.kind,
+        "baseline_year": baseline.baseline_year,
+        "baseline_week": baseline.baseline_week,
+        "created_at": baseline.created_at.isoformat(),
+    }
 
 
 # ── Зависимости задач ─────────────────────────────────────────────────────────

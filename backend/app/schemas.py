@@ -29,8 +29,10 @@ class UserShort(BaseModel):
 class TaskCreate(BaseModel):
     name:         str       = Field(min_length=1, max_length=500)
     start_date:   date
-    working_days: int       = Field(ge=1, le=3650)
+    working_days: int | None = Field(default=None, ge=1, le=3650)
     workers_count: int | None = Field(default=1, ge=1, le=500)
+    labor_hours:  float | None = Field(default=None, ge=0)
+    hours_per_day: float = Field(default=8, gt=0, le=24)
     parent_id:    str | None = None
     assignee_id:  str | None = None
     type:         str       = Field(default="task", pattern="^(task|project|milestone)$")
@@ -50,6 +52,8 @@ class TaskUpdate(BaseModel):
     start_date:       date | None = None
     working_days:     int | None  = Field(default=None, ge=1)
     workers_count:    int | None  = Field(default=None, ge=1, le=500)
+    labor_hours:      float | None = Field(default=None, ge=0)
+    hours_per_day:    float | None = Field(default=None, gt=0, le=24)
     parent_id:        str | None  = None
     assignee_id:      str | None  = None
     color:            str | None  = None
@@ -71,6 +75,8 @@ class TaskResponse(BaseModel):
     start_date:   date
     working_days: int
     workers_count: int | None
+    labor_hours:  float | None
+    hours_per_day: float
     end_date:     date         # вычисляется в сервисе
     progress:     int          # для группы — вычисленный, для листа — stored
     is_group:     bool
@@ -78,6 +84,9 @@ class TaskResponse(BaseModel):
     color:        str | None
     requires_act: bool
     act_signed:   bool
+    req_hidden_work_act: bool = False
+    req_intermediate_act: bool = False
+    req_ks2_ks3: bool = False
     row_order:    float
     assignee:     UserShort | None = None
     depends_on:   str = ""  # comma-separated IDs, совместимо с Gantt-страницей
@@ -161,6 +170,9 @@ class EstimateRow(BaseModel):
     fer_table_id: int | None
     fer_work_type: str | None
     fer_match_score: float | None
+    req_hidden_work_act: bool = False
+    req_intermediate_act: bool = False
+    req_ks2_ks3: bool = False
 
 class EstimateSummary(BaseModel):
     total:    float

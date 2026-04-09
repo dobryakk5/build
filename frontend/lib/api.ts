@@ -1,9 +1,11 @@
 // frontend/lib/api.ts
 import type {
+  BaselineStatus,
   CurrentUser,
   EnirCollectionSummary,
   EnirParagraphFull,
   EnirParagraphShort,
+  JournalEntry,
   FerBrowseResponse,
   FerCollectionSummary,
   FerSearchResult,
@@ -110,6 +112,9 @@ export const gantt = {
   delete:    (pid: string, tid: string)             => request<any>(`/projects/${pid}/gantt/${tid}`, { method: "DELETE" }),
   reorder:   (pid: string, body: any)               => request<any>(`/projects/${pid}/gantt/reorder`, { method: "POST", body: JSON.stringify(body) }),
   resolve:   (pid: string)                          => request<any>(`/projects/${pid}/gantt/resolve`, { method: "POST" }),
+  baselineStatus: (pid: string)                    => request<BaselineStatus>(`/projects/${pid}/gantt/baseline-status`),
+  acceptOverdue: (pid: string, body: { reason?: string | null }) =>
+    request<any>(`/projects/${pid}/gantt/accept-overdue`, { method: "POST", body: JSON.stringify(body) }),
   addDep:    (pid: string, tid: string, depId: string) =>
     request<any>(`/projects/${pid}/gantt/${tid}/dependencies`, { method: "POST", body: JSON.stringify({ depends_on: depId }) }),
   removeDep: (pid: string, tid: string, depId: string) =>
@@ -122,6 +127,15 @@ export const estimates = {
   summary: (pid: string, estimateBatchId?: string | null) =>
     request<EstimateSummary>(`/projects/${pid}/estimates/summary${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
   batches: (pid: string) => request<EstimateBatch[]>(`/projects/${pid}/estimate-batches`),
+  updateActs: (pid: string, eid: string, body: {
+    req_hidden_work_act?: boolean;
+    req_intermediate_act?: boolean;
+    req_ks2_ks3?: boolean;
+  }) =>
+    request<any>(`/projects/${pid}/estimates/${eid}/acts`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   matchFer: (pid: string, batchId: string) =>
     request<{ job_id: string; message: string }>(`/projects/${pid}/estimate-batches/${batchId}/match-fer`, { method: "POST" }),
   upload:  (
@@ -167,7 +181,7 @@ export const comments = {
 
 export const reports = {
   list:   (pid: string)               => request<any[]>(`/projects/${pid}/reports`),
-  journal:(pid: string)               => request<any[]>(`/projects/${pid}/reports/journal`),
+  journal:(pid: string)               => request<JournalEntry[]>(`/projects/${pid}/reports/journal`),
   today:  (pid: string)               => request<any>(`/projects/${pid}/reports/today`),
   get:    (pid: string, rid: string)  => request<any>(`/projects/${pid}/reports/${rid}`),
   create: (pid: string, body: any)    => request<any>(`/projects/${pid}/reports`, { method: "POST", body: JSON.stringify(body) }),
@@ -192,6 +206,8 @@ export const materials = {
     request<any>(`/projects/${pid}/materials`, { method: "POST", body: JSON.stringify(body) }),
   update: (pid: string, mid: string, body: any) =>
     request<any>(`/projects/${pid}/materials/${mid}`, { method: "PATCH", body: JSON.stringify(body) }),
+  reportDelay: (pid: string, mid: string, body: { new_delivery_date: string; reason: string }) =>
+    request<any>(`/projects/${pid}/materials/${mid}/delay`, { method: "POST", body: JSON.stringify(body) }),
   delete: (pid: string, mid: string) =>
     request<void>(`/projects/${pid}/materials/${mid}`, { method: "DELETE" }),
 };

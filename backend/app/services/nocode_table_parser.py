@@ -13,6 +13,8 @@ _SECTION_KEYWORDS = {
     'работ':          'Работа',
     'материал':       'Материалы',
     'управлени':      'Управление',
+    'раздел':         'Раздел',
+    'этап':           'Этап',
 }
 
 # Row skip patterns
@@ -28,6 +30,17 @@ def _section_from_header(cell: str) -> Optional[str]:
         if kw in low:
             return name
     return None
+
+
+def _normalize_section(cell: str) -> Optional[str]:
+    clean = re.sub(r'^\d+[.)]\s*', '', cell).strip()
+    if not clean:
+      return None
+    if len(clean) > 120:
+      return None
+    if re.search(r'\d', clean) and not re.match(r'^\d+[.)]\s', cell.strip()):
+      return None
+    return clean
 
 
 class NoCodeTableParser:
@@ -81,6 +94,11 @@ class NoCodeTableParser:
                                 section = sec
                             continue
 
+                        normalized_section = _normalize_section(name)
+                        if normalized_section and not qty_s and not price_s and not sum_s:
+                            section = normalized_section
+                            continue
+
                         # Empty / stub rows
                         if not name:
                             continue
@@ -131,6 +149,9 @@ class NoCodeTableParser:
                 if low.startswith(kw) and not any(c.isdigit() for c in line):
                     current_section = name
                     break
+            normalized_section = _normalize_section(line)
+            if normalized_section:
+                current_section = normalized_section
             # ИТОГО → next table gets next section
             if low.startswith('итого') and table_idx not in section_map:
                 section_map[table_idx] = current_section

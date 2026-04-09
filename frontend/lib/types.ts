@@ -3,11 +3,18 @@ export type DashboardStatus = "green" | "yellow" | "red";
 export interface Task {
   id: string;
   estimate_batch_id?: string | null;
+  estimate_id?: string | null;
   pid: string | null;
   name: string;
   start: string;
   dur: number;
+  is_group?: boolean;
   workers_count?: number | null;
+  labor_hours?: number | null;
+  hours_per_day?: number | null;
+  req_hidden_work_act?: boolean;
+  req_intermediate_act?: boolean;
+  req_ks2_ks3?: boolean;
   prog: number;
   clr: string;
   depends_on: string | null;
@@ -22,6 +29,7 @@ export interface Project {
   budget?: number | null;
   tasks_count?: number;
   members_count?: number;
+  my_role?: string | null;
 }
 
 export interface EstimateBatch {
@@ -50,6 +58,78 @@ export interface EstimateRow {
   fer_table_id?: number | null;
   fer_work_type?: string | null;
   fer_match_score?: number | null;
+  req_hidden_work_act?: boolean;
+  req_intermediate_act?: boolean;
+  req_ks2_ks3?: boolean;
+}
+
+export interface UserRef {
+  id: string;
+  name: string;
+}
+
+export interface WorkJournalEntry {
+  entry_type: "work";
+  id: string;
+  report_id: string | null;
+  task_id: string;
+  task_name: string;
+  work_done: string;
+  man_hours: number | null;
+  workers_count: number | null;
+  volume_done: number | null;
+  volume_unit: string | null;
+  event_date: string;
+  report_date: string;
+}
+
+export interface MaterialDelayJournalEntry {
+  entry_type: "material_delay";
+  id: string;
+  material_id: string;
+  material_name: string;
+  old_delivery_date: string | null;
+  new_delivery_date: string;
+  days_shifted: number | null;
+  reason: string;
+  reporter?: UserRef | null;
+  event_date: string;
+  report_date: string;
+}
+
+export interface ScheduleBaselineJournalEntry {
+  entry_type: "schedule_baseline";
+  id: string;
+  kind: string;
+  baseline_year: number;
+  baseline_week: number;
+  reason: string | null;
+  created_by?: UserRef | null;
+  event_date: string;
+  report_date: string;
+}
+
+export type JournalEntry =
+  | WorkJournalEntry
+  | MaterialDelayJournalEntry
+  | ScheduleBaselineJournalEntry;
+
+export interface BaselineStatus {
+  can_accept: boolean;
+  accepted_this_week: boolean;
+  current_year: number;
+  current_week: number;
+  has_overdue_tasks: boolean;
+  overdue_tasks_count: number;
+  latest: {
+    id: string;
+    kind: string;
+    baseline_year: number;
+    baseline_week: number;
+    reason: string | null;
+    created_at: string;
+    created_by?: UserRef | null;
+  } | null;
 }
 
 export interface EstimateSummary {

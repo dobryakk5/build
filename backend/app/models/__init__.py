@@ -5,6 +5,8 @@ from .auth         import AuthSession, EmailVerificationToken, PasswordResetToke
 from .project      import Project, ProjectMember
 from .estimate_batch import EstimateBatch
 from .estimate     import Estimate
+from .material_delay import MaterialDelayEvent
+from .schedule_baseline import ScheduleBaseline, ScheduleBaselineTask
 from .gantt        import GanttTask, TaskDependency
 from .other        import (
     Comment,
@@ -47,6 +49,8 @@ __all__ = [
     "Project", "ProjectMember",
     "EstimateBatch",
     "Estimate",
+    "MaterialDelayEvent",
+    "ScheduleBaseline", "ScheduleBaselineTask",
     "GanttTask", "TaskDependency",
     "Comment", "TaskHistory", "Job",
     "DailyReport", "DailyReportItem",
