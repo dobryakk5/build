@@ -380,15 +380,15 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .pname{margin-left:auto;font-size:13px;font-weight:600;color:#e2e8f0;padding:4px 12px;border-radius:4px;background:var(--hdr2);border:1px solid var(--hdr3);cursor:pointer;}
 
 /* split */
-.split-vp{flex:1;overflow:hidden;position:relative;}
+.split-vp{display:flex;flex:1;min-height:0;overflow:hidden;position:relative;}
 .split-vp.narrow{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;}
-.split{display:flex;flex:1;overflow:hidden;min-height:100%;position:relative;}
+.split{display:flex;flex:1;min-height:0;height:100%;overflow:hidden;position:relative;}
 .splitter{width:4px;min-width:4px;background:#e2e8f0;cursor:col-resize;flex-shrink:0;transition:background .15s;}
 .splitter:hover,.splitter.drag{background:var(--blue);}
 .splitter.disabled{cursor:default;background:#cbd5e1;opacity:.55;pointer-events:none;}
 
 /* left */
-.left{display:flex;flex-direction:column;background:var(--surface);border-right:2px solid var(--hdr);flex-shrink:0;}
+.left{display:flex;flex-direction:column;min-height:0;background:var(--surface);border-right:2px solid var(--hdr);flex-shrink:0;}
 .thead{background:var(--hdr2);display:flex;align-items:stretch;border-bottom:1px solid var(--hdr3);flex-shrink:0;height:52px;padding-right:8px;}
 .th{display:flex;align-items:center;padding:0 7px;font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono);border-right:1px solid var(--hdr3);white-space:nowrap;flex-shrink:0;}
 .th.g{flex:1;}
@@ -429,7 +429,7 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .rn{width:30px;min-width:30px;justify-content:center;color:var(--muted);font-family:var(--mono);font-size:10px;}
 
 /* right / gantt */
-.right{display:flex;flex-direction:column;flex:1;overflow:hidden;background:var(--surface);}
+.right{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;background:var(--surface);}
 .zoom-bar{
   display:flex;align-items:center;gap:8px;padding:8px 10px;background:#f8fafc;
   border-bottom:1px solid var(--border);flex-shrink:0;
@@ -1715,10 +1715,6 @@ export default function App() {
                 <div className="panel-section">
                   <div className="panel-section-title">Детали</div>
                   <div className="panel-grid">
-                    <div className="pfield" style={{gridColumn:'1/-1'}}>
-                      <div className="pfield-label">ID</div>
-                      <div className="pfield-val mono">{panelTask.id}</div>
-                    </div>
                     <div className="pfield" style={{gridColumn:'1/-1'}}>
                       <div className="pfield-label">Название</div>
                       {canEditPanelTask && panelForm
