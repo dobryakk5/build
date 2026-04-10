@@ -1,7 +1,7 @@
 # backend/app/schemas/__init__.py
 
 # ── Общие ─────────────────────────────────────────────────────────────────────
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from datetime import date, datetime
 from typing import Any, Generic, TypeVar
 from uuid import UUID
@@ -174,6 +174,11 @@ class EstimateRow(BaseModel):
     req_hidden_work_act: bool = False
     req_intermediate_act: bool = False
     req_ks2_ks3: bool = False
+
+    @field_validator("materials", mode="before")
+    @classmethod
+    def _normalize_materials(cls, value):
+        return [] if value is None else value
 
 class EstimateSummary(BaseModel):
     total:    float

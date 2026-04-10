@@ -113,7 +113,15 @@ export default function UploadPage() {
   }
 
   return (
-    <div style={{ padding: 24, maxWidth: 980 }}>
+    <div
+      style={{
+        height: "100%",
+        overflow: "auto",
+        padding: 24,
+        maxWidth: 980,
+        boxSizing: "border-box",
+      }}
+    >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 20 }}>
         <div>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>Загрузка сметы</h2>

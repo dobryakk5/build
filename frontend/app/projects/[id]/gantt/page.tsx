@@ -1332,7 +1332,7 @@ export default function App() {
           <div className="tb-sep"/>
           <button className={`btn danger${!can(role,'delete')?' locked':''}`} onClick={delTask} disabled={!sel}>✕ Удалить</button>
           <div className="tb-sep"/>
-          <span className="hint">Enter = новая задача · Dbl.click = ред. · «Зависит от»: номера через запятую</span>
+          <span className="hint">Enter = новая задача · Двойной клик = ред. · «Зависит от»: номера через запятую</span>
           {editP
             ? <input style={{marginLeft:'auto',background:'#1e293b',border:'1px solid #3b82f6',color:'#e2e8f0',
                 padding:'4px 10px',borderRadius:4,fontSize:13,fontWeight:600,fontFamily:'DM Sans,sans-serif',outline:'none',minWidth:280}}

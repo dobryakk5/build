@@ -44,7 +44,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   }
 
   const TABS = [
-    { id: "gantt",    label: "📊 Ганта",   path: `/projects/${id}/gantt`    },
+    { id: "gantt",    label: "📊 Гант",    path: `/projects/${id}/gantt`    },
     { id: "estimate", label: "📋 Смета",   path: `/projects/${id}/estimate` },
     { id: "journal",  label: "🗒 Журнал",  path: `/projects/${id}/journal`  },
     { id: "fer",      label: "🧾 ФЕР",     path: `/projects/${id}/fer`      },
