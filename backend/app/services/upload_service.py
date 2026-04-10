@@ -310,10 +310,10 @@ async def _process_upload(job_id: str) -> None:
             await db.flush()
 
             # ── 5. Зависимости между разделами ───────────────────────────────
-            for pred_id, succ_id in builder.get_dependencies(task_dtos):
+            for task_id, depends_on_id in builder.get_dependencies(task_dtos):
                 db.add(TaskDependency(
-                    task_id    = succ_id,
-                    depends_on = pred_id,
+                    task_id    = task_id,
+                    depends_on = depends_on_id,
                 ))
 
             # ── 6. Пересчёт дат ──────────────────────────────────────────────
