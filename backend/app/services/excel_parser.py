@@ -242,6 +242,14 @@ def _make_material(
     }
 
 
+def _pick_rightmost_numeric(ws: Worksheet, row_idx: int, columns: list[int]) -> Optional[float]:
+    for col_idx in sorted(set(columns), reverse=True):
+        value = _to_optional_float(ws.cell(row_idx, col_idx).value, treat_zero_as_none=False)
+        if value is not None:
+            return value
+    return None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # СТРАТЕГИЯ 0: СТРУКТУРИРОВАННАЯ СМЕТА (группа → работа → материалы)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,9 +268,9 @@ class StructuredSmetaParser:
 
     def can_parse(self, ws: Worksheet) -> float:
         if self._find_type1_header(ws):
-            return 0.99
+            return 1.0
         if self._find_type2_header(ws):
-            return 0.99
+            return 1.0
         return 0.0
 
     def parse(self, ws: Worksheet) -> list[ParsedRow]:
@@ -275,6 +283,8 @@ class StructuredSmetaParser:
     def _find_type1_header(self, ws: Worksheet) -> Optional[dict]:
         for row_idx in range(1, min(ws.max_row + 1, 16)):
             mapping: dict[str, int] = {}
+            price_cols: list[int] = []
+            total_cols: list[int] = []
             for col_idx in range(1, min(ws.max_column + 1, 20)):
                 val = normalize(_cell_text(ws.cell(row_idx, col_idx).value))
                 if not val:
@@ -285,15 +295,20 @@ class StructuredSmetaParser:
                     mapping.setdefault("type", col_idx)
                 elif any(token in val for token in ("позиц", "наименование", "вид работ", "работы/материалы")):
                     mapping.setdefault("name", col_idx)
+                elif "цен" in val:
+                    price_cols.append(col_idx)
                 elif "ед" in val:
                     mapping.setdefault("unit", col_idx)
                 elif "кол" in val or "объем" in val or "объём" in val:
                     mapping.setdefault("qty", col_idx)
-                elif "цен" in val:
-                    mapping.setdefault("price", col_idx)
                 elif any(token in val for token in ("стоим", "сумм", "итого", "всего")):
-                    mapping.setdefault("total", col_idx)
+                    total_cols.append(col_idx)
             if {"num", "name", "type"} <= mapping.keys():
+                if price_cols:
+                    mapping["price"] = min(price_cols)
+                if total_cols:
+                    price_anchor = mapping.get("price", 0)
+                    mapping["total"] = max([c for c in total_cols if c > price_anchor] or total_cols)
                 mapping["header_row"] = row_idx
                 return mapping
         return None
@@ -301,17 +316,25 @@ class StructuredSmetaParser:
     def _find_type2_header(self, ws: Worksheet) -> Optional[dict]:
         for row_idx in range(1, min(ws.max_row + 1, 16)):
             work_col = material_col = None
+            price_cols: list[int] = []
+            total_cols: list[int] = []
             for col_idx in range(1, min(ws.max_column + 1, 20)):
                 val = normalize(_cell_text(ws.cell(row_idx, col_idx).value))
                 if "вид работы" in val:
                     work_col = col_idx
                 elif "материал" in val:
                     material_col = col_idx
+                if "цен" in val or "стоим" in val:
+                    price_cols.append(col_idx)
+                if "сумм" in val or "итого" in val:
+                    total_cols.append(col_idx)
             if work_col and material_col:
+                price_anchor = max(price_cols) if price_cols else material_col
                 return {
                     "header_row": row_idx,
                     "work_col": work_col,
                     "material_col": material_col,
+                    "rightmost_total_cols": [c for c in total_cols if c > price_anchor] or total_cols,
                 }
         return None
 
@@ -410,6 +433,7 @@ class StructuredSmetaParser:
             work_total = ws.cell(row_idx, cols["work_total"]).value
             material_total = ws.cell(row_idx, cols["material_total"]).value
             grand_total = ws.cell(row_idx, cols["grand_total"]).value
+            row_rightmost_total = _pick_rightmost_numeric(ws, row_idx, info.get("rightmost_total_cols", []))
 
             if not work_name and not material_name:
                 continue
@@ -428,7 +452,8 @@ class StructuredSmetaParser:
                     quantity=_to_optional_float(work_qty),
                     unit_price=_to_optional_float(work_price, treat_zero_as_none=True)
                     or _to_optional_float(work_price_markup, treat_zero_as_none=True),
-                    total_price=_to_optional_float(work_total, treat_zero_as_none=True)
+                    total_price=_to_optional_float(row_rightmost_total, treat_zero_as_none=True)
+                    or _to_optional_float(work_total, treat_zero_as_none=True)
                     or _to_optional_float(grand_total, treat_zero_as_none=True),
                     materials=list(pending_materials),
                     row_order=order,
@@ -474,13 +499,11 @@ class StructuredSmetaParser:
         )
 
     def _detect_type1_row_kind(self, num: str, tipo: str, unit, qty, total) -> str:
-        if "мат" in tipo:
+        if "матер" in tipo or tipo.strip() == "материал":
             return "material"
-        if "работ" in tipo:
-            return "work"
         if _TYPE1_ITEM_RE.match(num):
-            return "work" if (unit or not _is_empty_metric(qty) or not _is_empty_metric(total)) else "other"
-        return "work" if (unit or not _is_empty_metric(qty) or not _is_empty_metric(total)) else "other"
+            return "work"
+        return "work" if (unit or not _is_empty_metric(qty) or not _is_empty_metric(total) or tipo) else "other"
 
     def _is_group_row_type2(
         self,
@@ -1065,7 +1088,6 @@ class ExcelEstimateParser:
     """
 
     STRATEGIES: list = [
-        StructuredSmetaParser(),
         RowOrientedParser(),
         ColumnOrientedParser(),
         BlockOrientedParser(),
@@ -1073,6 +1095,26 @@ class ExcelEstimateParser:
 
     def parse(self, file_path: str | Path) -> tuple[list[ParsedRow], dict]:
         file_path = Path(file_path)
+
+        # ── Приоритетный путь: сначала определяем явный тип сметы и разбираем
+        # его отдельным алгоритмом до общих эвристик. Это нужно для файлов,
+        # где есть явные указатели "работы/материалы".
+        wb_structured = openpyxl.load_workbook(file_path, data_only=True)
+        structured = StructuredSmetaParser()
+        for sheet_name in wb_structured.sheetnames:
+            ws_structured = wb_structured[sheet_name]
+            confidence = structured.can_parse(ws_structured)
+            if confidence >= CONFIDENCE_THRESHOLD:
+                rows = structured.parse(ws_structured)
+                if rows:
+                    wb_structured.close()
+                    return rows, {
+                        "strategy": structured.name,
+                        "sheet": sheet_name,
+                        "confidence": confidence,
+                        "rows_found": len(rows),
+                    }
+        wb_structured.close()
 
         # ── Быстрая проверка: есть ли лист типа «Смета»? ──────────────────
         wb_ro = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)

@@ -90,6 +90,7 @@ class TaskResponse(BaseModel):
     row_order:    float
     assignee:     UserShort | None = None
     depends_on:   str = ""  # comma-separated IDs, совместимо с Gantt-страницей
+    materials:    list[dict] = Field(default_factory=list)
     comments_count: int = 0
 
 

@@ -66,6 +66,7 @@ def test_structured_type2_parser_keeps_materials_under_work(tmp_path: Path) -> N
     assert rows[0].section == "ПОЛЫ"
     assert rows[0].work_name == "Устройство стяжки"
     assert rows[0].quantity == 18
+    assert rows[0].total_price == 8100
     assert len(rows[0].materials) == 2
     assert rows[0].materials[0]["name"] == "Цемент М500"
     assert rows[0].materials[0]["quantity"] == 9
@@ -73,9 +74,61 @@ def test_structured_type2_parser_keeps_materials_under_work(tmp_path: Path) -> N
     assert rows[0].materials[1]["total_price"] == 1140
 
 
+def test_structured_type2_uses_rightmost_total_column(tmp_path: Path) -> None:
+    def fill(ws):
+        ws.title = "СМЕТА"
+        headers = [
+            "",
+            "ВИД РАБОТЫ",
+            "ИСПОЛЬЗУЕМЫЕ МАТЕРИАЛЫ",
+            "Ед.изм. Работ",
+            "Ед.изм. Материала",
+            "Кол-во работ",
+            "Кол-во материала",
+            "Цена ед. Работ",
+            "Цена ед. Работ",
+            "Цена ед. Материала",
+            "Сумма работ",
+            "Сумма материалов",
+            "ИТОГО",
+            "Стоимость ед. работ и  материалов",
+            "Сумма работ  и материалов",
+        ]
+        for idx, value in enumerate(headers, start=1):
+            ws.cell(4, idx).value = value
+
+        ws.cell(5, 2).value = "ПОЛЫ"
+
+        ws.cell(6, 2).value = "Устройство пола"
+        ws.cell(6, 4).value = "м2"
+        ws.cell(6, 6).value = 10
+        ws.cell(6, 8).value = 100
+        ws.cell(6, 11).value = 1000
+        ws.cell(6, 13).value = 1000
+        ws.cell(6, 15).value = 1450
+
+        ws.cell(7, 3).value = "Смесь"
+        ws.cell(7, 5).value = "меш"
+        ws.cell(7, 7).value = 5
+        ws.cell(7, 10).value = 90
+        ws.cell(7, 12).value = 450
+        ws.cell(7, 13).value = 450
+
+    path = _save_workbook(tmp_path, "ОбразецИтого", fill)
+
+    rows, meta = ExcelEstimateParser().parse(path)
+
+    assert meta["strategy"] == "structured_smeta"
+    assert len(rows) == 1
+    assert rows[0].work_name == "Устройство пола"
+    assert rows[0].total_price == 1450
+    assert rows[0].materials[0]["total_price"] == 450
+
+
 def test_structured_type1_parser_attaches_material_rows_to_previous_work(tmp_path: Path) -> None:
     def fill(ws):
-        headers = ["№", "Позиция", "Тип", "Ед.изм", "Кол-во", "Цена", "Стоимость"]
+        ws.title = "Журнал"
+        headers = ["№", "Позиция", "Тип", "Ед.изм", "Кол-во", "Цена за ед.", "Стоимость"]
         for idx, value in enumerate(headers, start=1):
             ws.cell(1, idx).value = value
 
@@ -98,12 +151,20 @@ def test_structured_type1_parser_attaches_material_rows_to_previous_work(tmp_pat
         ws.cell(4, 6).value = 340
         ws.cell(4, 7).value = 5440
 
+        ws.cell(5, 1).value = "1.3"
+        ws.cell(5, 2).value = "Доставка смеси"
+        ws.cell(5, 3).value = "Накладные"
+        ws.cell(5, 4).value = "рейс"
+        ws.cell(5, 5).value = 1
+        ws.cell(5, 6).value = 1800
+        ws.cell(5, 7).value = 1800
+
     path = _save_workbook(tmp_path, "Лист1", fill)
 
     rows, meta = ExcelEstimateParser().parse(path)
 
     assert meta["strategy"] == "structured_smeta"
-    assert len(rows) == 1
+    assert len(rows) == 2
     assert rows[0].section == "Внутренняя отделка"
     assert rows[0].work_name == "Штукатурка стен"
     assert rows[0].total_price == 16640
@@ -116,3 +177,6 @@ def test_structured_type1_parser_attaches_material_rows_to_previous_work(tmp_pat
             "total_price": 5440.0,
         }
     ]
+    assert rows[1].work_name == "Доставка смеси"
+    assert rows[1].unit_price == 1800
+    assert rows[1].total_price == 1800

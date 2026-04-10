@@ -18,6 +18,7 @@ export interface Task {
   prog: number;
   clr: string;
   depends_on: string | null;
+  materials?: EstimateMaterial[];
   who?: string;
 }
 

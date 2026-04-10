@@ -3,7 +3,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { estimates, gantt as ganttApi, projects } from "@/lib/api";
-import type { BaselineStatus, EstimateBatch, Task } from "@/lib/types";
+import type { BaselineStatus, EstimateBatch, EstimateMaterial, Task } from "@/lib/types";
 
 const DEFAULT_DAY_W = 24;
 const DEFAULT_HOURS_PER_DAY = 8;
@@ -47,6 +47,7 @@ type ApiTask = {
     name?: string | null;
   } | null;
   depends_on?: string | null;
+  materials?: EstimateMaterial[] | null;
 };
 
 type DepArrow = {
@@ -547,6 +548,12 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .comment-submit:hover{background:#2563eb;}
 .comment-submit:disabled{opacity:.4;cursor:not-allowed;}
 .no-comments{font-size:12px;color:var(--muted);text-align:center;padding:16px 0;}
+.materials-list{display:flex;flex-direction:column;gap:8px;}
+.material-item{background:var(--stripe);border:1px solid var(--border);border-radius:8px;padding:10px 12px;}
+.material-row{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;}
+.material-name{font-size:13px;font-weight:600;color:var(--text);}
+.material-qty{font-size:11px;color:var(--muted);font-family:var(--mono);white-space:nowrap;}
+.material-meta{margin-top:4px;font-size:11px;color:var(--muted);line-height:1.5;}
 
 /* ── ROLE SWITCHER ─────────────────────────────────────────────────────────── */
 .role-bar{
@@ -622,6 +629,7 @@ export default function App() {
     clr: t.color ?? "#3b82f6",
     who: t.assignee?.name ?? "—",
     depends_on: t.depends_on ?? "",
+    materials: t.materials ?? [],
   }), []);
 
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -1702,6 +1710,7 @@ export default function App() {
       {panelId && panelTask && (()=>{
         const tc = comments[panelId] || [];
         const depNums2 = parseDeps(panelTask.depends_on).map(d=>numMap[d]??'?');
+        const taskMaterials = panelTask.materials ?? [];
         const progColor = panelTask.prog>=100?'#22c55e':panelTask.prog>=50?'#f59e0b':'#3b82f6';
         const panelWorkers = panelForm && !panelTaskHasKids
           ? normalizeWorkersCount(Number(panelForm.workers))
@@ -1879,6 +1888,36 @@ export default function App() {
                       </div>
                     : <div className="panel-readonly-note" style={{marginTop:12}}>
                         Карточка доступна только для просмотра в текущей роли.
+                      </div>
+                  }
+                </div>
+
+                <div className="panel-section">
+                  <div className="panel-section-title">Материалы</div>
+                  {panelTask.estimate_id
+                    ? taskMaterials.length > 0
+                      ? <div className="materials-list">
+                          {taskMaterials.map((material, index) => (
+                            <div key={`${material.name}-${index}`} className="material-item">
+                              <div className="material-row">
+                                <div className="material-name">{material.name}</div>
+                                <div className="material-qty">
+                                  {material.quantity != null ? `${material.quantity}` : "—"}{material.unit ? ` ${material.unit}` : ""}
+                                </div>
+                              </div>
+                              <div className="material-meta">
+                                {material.unit_price != null ? `Цена: ${material.unit_price}` : "Цена: —"}
+                                {" · "}
+                                {material.total_price != null ? `Сумма: ${material.total_price}` : "Сумма: —"}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      : <div className="panel-readonly-note">
+                          У связанной строки сметы материалы не указаны.
+                        </div>
+                    : <div className="panel-readonly-note">
+                        У этой задачи нет связанной строки сметы, поэтому материалы недоступны.
                       </div>
                   }
                 </div>

@@ -98,6 +98,7 @@ async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
         row_order      = float(task.row_order),
         assignee       = assignee,
         depends_on     = ",".join(list(deps)),
+        materials      = estimate.materials or [] if estimate else [],
         comments_count = comments_count or 0,
     )
 
