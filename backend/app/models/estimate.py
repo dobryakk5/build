@@ -20,6 +20,7 @@ class Estimate(Base, SoftDeleteMixin):
     quantity:    Mapped[float|None] = mapped_column(Numeric(12, 3))
     unit_price:  Mapped[float|None] = mapped_column(Numeric(12, 2))
     total_price: Mapped[float|None] = mapped_column(Numeric(14, 2))
+    materials:   Mapped[list[dict]|None] = mapped_column(JSONB)
     enir_code:   Mapped[str|None]   = mapped_column(String(50))            # код ЕНиР / ГЭСН
     fer_table_id: Mapped[int|None]  = mapped_column(Integer)
     fer_work_type: Mapped[str|None] = mapped_column(Text)

@@ -39,6 +39,7 @@ class ParsedRow:
     quantity: Optional[float] = None
     unit_price: Optional[float] = None
     total_price: Optional[float] = None
+    materials: list[dict] = field(default_factory=list)
     row_order: int = 0
     raw_data: dict = field(default_factory=dict)
     source_strategy: str = "unknown"   # для отладки: "row" | "column"
@@ -172,6 +173,353 @@ def match_any_field(cell_value: str) -> Optional[str]:
         if match_alias(cell_value, field_name):
             return field_name
     return None
+
+
+_TYPE1_ITEM_RE = re.compile(r"^\d+\.\d+$")
+
+
+def _cell_text(value) -> str:
+    return str(value).strip() if value is not None else ""
+
+
+def _to_optional_float(value, *, treat_zero_as_none: bool = False) -> Optional[float]:
+    num = _to_float(value)
+    if num is None:
+        return None
+    if treat_zero_as_none and num == 0:
+        return None
+    return num
+
+
+def _is_empty_metric(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str) and not value.strip():
+        return True
+    num = _to_float(value)
+    return num == 0 if num is not None else False
+
+
+def _looks_like_group_label(text: str) -> bool:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if not cleaned or len(cleaned) > 120:
+        return False
+    letters = re.sub(r"[^A-Za-zА-Яа-яЁё]", "", cleaned)
+    return bool(letters) and (cleaned.isupper() or len(cleaned.split()) <= 8)
+
+
+def _cell_is_emphasized(ws: Worksheet, row_idx: int, col_idx: int) -> bool:
+    cell = ws.cell(row_idx, col_idx)
+    font = getattr(cell, "font", None)
+    if font and font.bold:
+        return True
+
+    fill = getattr(cell, "fill", None)
+    if not fill or not getattr(fill, "fill_type", None) or fill.fill_type == "none":
+        return False
+
+    fg = getattr(fill, "fgColor", None)
+    rgb = getattr(fg, "rgb", None) or getattr(fg, "value", None)
+    if rgb is None:
+        return fill.fill_type not in (None, "none")
+    return str(rgb).upper() not in {"00000000", "000000", "00FFFFFF", "FFFFFFFF"}
+
+
+def _make_material(
+    name: str,
+    *,
+    unit=None,
+    qty=None,
+    price=None,
+    total=None,
+) -> dict:
+    return {
+        "name": name,
+        "unit": _to_str(unit),
+        "quantity": _to_optional_float(qty),
+        "unit_price": _to_optional_float(price, treat_zero_as_none=True),
+        "total_price": _to_optional_float(total, treat_zero_as_none=True),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# СТРАТЕГИЯ 0: СТРУКТУРИРОВАННАЯ СМЕТА (группа → работа → материалы)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StructuredSmetaParser:
+    """
+    Приоритетная стратегия для смет вида:
+      - № | Позиция | Тип | Ед.изм | Кол-во | Цена | Стоимость
+      - ВИД РАБОТЫ | МАТЕРИАЛЫ | ...
+
+    В БД сохраняются только строки работ, а материалы прикрепляются к ним
+    в поле `materials`, чтобы не превращать материалы в задачи Ганта.
+    """
+
+    name = "structured_smeta"
+
+    def can_parse(self, ws: Worksheet) -> float:
+        if self._find_type1_header(ws):
+            return 0.99
+        if self._find_type2_header(ws):
+            return 0.99
+        return 0.0
+
+    def parse(self, ws: Worksheet) -> list[ParsedRow]:
+        if info := self._find_type1_header(ws):
+            return self._parse_type1(ws, info)
+        if info := self._find_type2_header(ws):
+            return self._parse_type2(ws, info)
+        return []
+
+    def _find_type1_header(self, ws: Worksheet) -> Optional[dict]:
+        for row_idx in range(1, min(ws.max_row + 1, 16)):
+            mapping: dict[str, int] = {}
+            for col_idx in range(1, min(ws.max_column + 1, 20)):
+                val = normalize(_cell_text(ws.cell(row_idx, col_idx).value))
+                if not val:
+                    continue
+                if val in {"№", "номер"} or val.startswith("№"):
+                    mapping.setdefault("num", col_idx)
+                elif "тип" in val:
+                    mapping.setdefault("type", col_idx)
+                elif any(token in val for token in ("позиц", "наименование", "вид работ", "работы/материалы")):
+                    mapping.setdefault("name", col_idx)
+                elif "ед" in val:
+                    mapping.setdefault("unit", col_idx)
+                elif "кол" in val or "объем" in val or "объём" in val:
+                    mapping.setdefault("qty", col_idx)
+                elif "цен" in val:
+                    mapping.setdefault("price", col_idx)
+                elif any(token in val for token in ("стоим", "сумм", "итого", "всего")):
+                    mapping.setdefault("total", col_idx)
+            if {"num", "name", "type"} <= mapping.keys():
+                mapping["header_row"] = row_idx
+                return mapping
+        return None
+
+    def _find_type2_header(self, ws: Worksheet) -> Optional[dict]:
+        for row_idx in range(1, min(ws.max_row + 1, 16)):
+            work_col = material_col = None
+            for col_idx in range(1, min(ws.max_column + 1, 20)):
+                val = normalize(_cell_text(ws.cell(row_idx, col_idx).value))
+                if "вид работы" in val:
+                    work_col = col_idx
+                elif "материал" in val:
+                    material_col = col_idx
+            if work_col and material_col:
+                return {
+                    "header_row": row_idx,
+                    "work_col": work_col,
+                    "material_col": material_col,
+                }
+        return None
+
+    def _parse_type1(self, ws: Worksheet, info: dict) -> list[ParsedRow]:
+        results: list[ParsedRow] = []
+        current_section: Optional[str] = None
+        current_work: ParsedRow | None = None
+        pending_materials: list[dict] = []
+        order = 0
+
+        for row_idx in range(info["header_row"] + 1, ws.max_row + 1):
+            num = ws.cell(row_idx, info["num"]).value
+            name = _cell_text(ws.cell(row_idx, info["name"]).value)
+            tipo = _cell_text(ws.cell(row_idx, info["type"]).value).lower()
+            unit = ws.cell(row_idx, info.get("unit", 0)).value if info.get("unit") else None
+            qty = ws.cell(row_idx, info.get("qty", 0)).value if info.get("qty") else None
+            price = ws.cell(row_idx, info.get("price", 0)).value if info.get("price") else None
+            total = ws.cell(row_idx, info.get("total", 0)).value if info.get("total") else None
+
+            if not any((num, name, tipo, unit, qty, price, total)):
+                continue
+
+            num_str = _cell_text(num)
+            if self._is_group_row_type1(ws, row_idx, info["name"], num_str, name, unit, qty):
+                current_section = name or current_section
+                current_work = None
+                pending_materials.clear()
+                continue
+
+            row_kind = self._detect_type1_row_kind(num_str, tipo, unit, qty, total)
+            if row_kind == "material" and name:
+                material = _make_material(name, unit=unit, qty=qty, price=price, total=total)
+                if current_work is not None:
+                    current_work.materials.append(material)
+                else:
+                    pending_materials.append(material)
+                continue
+
+            if row_kind != "work" or not name:
+                continue
+
+            current_work = ParsedRow(
+                section=current_section,
+                work_name=name,
+                unit=_to_str(unit),
+                quantity=_to_optional_float(qty),
+                unit_price=_to_optional_float(price, treat_zero_as_none=True),
+                total_price=_to_optional_float(total, treat_zero_as_none=True),
+                materials=list(pending_materials),
+                row_order=order,
+                raw_data={
+                    "num": num_str,
+                    "type": tipo or "work",
+                },
+                source_strategy=self.name,
+            )
+            pending_materials.clear()
+            results.append(current_work)
+            order += 1
+
+        return results
+
+    def _parse_type2(self, ws: Worksheet, info: dict) -> list[ParsedRow]:
+        results: list[ParsedRow] = []
+        current_section: Optional[str] = None
+        current_work: ParsedRow | None = None
+        pending_materials: list[dict] = []
+        order = 0
+
+        base = info["work_col"]
+        cols = {
+            "work_name": base,
+            "material_name": base + 1,
+            "work_unit": base + 2,
+            "material_unit": base + 3,
+            "work_qty": base + 4,
+            "material_qty": base + 5,
+            "work_price": base + 6,
+            "work_price_markup": base + 7,
+            "material_price": base + 8,
+            "work_total": base + 9,
+            "material_total": base + 10,
+            "grand_total": base + 11,
+        }
+
+        for row_idx in range(info["header_row"] + 1, ws.max_row + 1):
+            work_name = _cell_text(ws.cell(row_idx, cols["work_name"]).value)
+            material_name = _cell_text(ws.cell(row_idx, cols["material_name"]).value)
+            work_unit = ws.cell(row_idx, cols["work_unit"]).value
+            material_unit = ws.cell(row_idx, cols["material_unit"]).value
+            work_qty = ws.cell(row_idx, cols["work_qty"]).value
+            material_qty = ws.cell(row_idx, cols["material_qty"]).value
+            work_price = ws.cell(row_idx, cols["work_price"]).value
+            work_price_markup = ws.cell(row_idx, cols["work_price_markup"]).value
+            material_price = ws.cell(row_idx, cols["material_price"]).value
+            work_total = ws.cell(row_idx, cols["work_total"]).value
+            material_total = ws.cell(row_idx, cols["material_total"]).value
+            grand_total = ws.cell(row_idx, cols["grand_total"]).value
+
+            if not work_name and not material_name:
+                continue
+
+            if self._is_group_row_type2(ws, row_idx, cols["work_name"], work_name, material_name, work_unit, work_qty, work_total):
+                current_section = work_name or current_section
+                current_work = None
+                pending_materials.clear()
+                continue
+
+            if work_name and self._is_work_row_type2(work_name, work_unit, work_qty, work_total, work_price, material_name):
+                current_work = ParsedRow(
+                    section=current_section,
+                    work_name=work_name,
+                    unit=_to_str(work_unit),
+                    quantity=_to_optional_float(work_qty),
+                    unit_price=_to_optional_float(work_price, treat_zero_as_none=True)
+                    or _to_optional_float(work_price_markup, treat_zero_as_none=True),
+                    total_price=_to_optional_float(work_total, treat_zero_as_none=True)
+                    or _to_optional_float(grand_total, treat_zero_as_none=True),
+                    materials=list(pending_materials),
+                    row_order=order,
+                    raw_data={},
+                    source_strategy=self.name,
+                )
+                pending_materials.clear()
+                results.append(current_work)
+                order += 1
+                continue
+
+            if material_name:
+                material = _make_material(
+                    material_name,
+                    unit=material_unit,
+                    qty=material_qty,
+                    price=material_price,
+                    total=material_total or grand_total,
+                )
+                if current_work is not None:
+                    current_work.materials.append(material)
+                else:
+                    pending_materials.append(material)
+
+        return results
+
+    def _is_group_row_type1(
+        self,
+        ws: Worksheet,
+        row_idx: int,
+        name_col: int,
+        num: str,
+        name: str,
+        unit,
+        qty,
+    ) -> bool:
+        if not name:
+            return False
+        if num.isdigit():
+            return True
+        return _is_empty_metric(unit) and _is_empty_metric(qty) and (
+            _cell_is_emphasized(ws, row_idx, name_col) or _looks_like_group_label(name)
+        )
+
+    def _detect_type1_row_kind(self, num: str, tipo: str, unit, qty, total) -> str:
+        if "мат" in tipo:
+            return "material"
+        if "работ" in tipo:
+            return "work"
+        if _TYPE1_ITEM_RE.match(num):
+            return "work" if (unit or not _is_empty_metric(qty) or not _is_empty_metric(total)) else "other"
+        return "work" if (unit or not _is_empty_metric(qty) or not _is_empty_metric(total)) else "other"
+
+    def _is_group_row_type2(
+        self,
+        ws: Worksheet,
+        row_idx: int,
+        work_col: int,
+        work_name: str,
+        material_name: str,
+        work_unit,
+        work_qty,
+        work_total,
+    ) -> bool:
+        if not work_name or material_name:
+            return False
+        if not _is_empty_metric(work_qty) or not _is_empty_metric(work_total) or _to_str(work_unit):
+            return False
+        return _cell_is_emphasized(ws, row_idx, work_col) or _looks_like_group_label(work_name)
+
+    def _is_work_row_type2(
+        self,
+        work_name: str,
+        work_unit,
+        work_qty,
+        work_total,
+        work_price,
+        material_name: str,
+    ) -> bool:
+        if not work_name:
+            return False
+        if not material_name and not any(
+            (
+                _to_str(work_unit),
+                not _is_empty_metric(work_qty),
+                not _is_empty_metric(work_total),
+                not _is_empty_metric(work_price),
+            )
+        ):
+            return False
+        return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -717,6 +1065,7 @@ class ExcelEstimateParser:
     """
 
     STRATEGIES: list = [
+        StructuredSmetaParser(),
         RowOrientedParser(),
         ColumnOrientedParser(),
         BlockOrientedParser(),
@@ -733,6 +1082,23 @@ class ExcelEstimateParser:
         wb_ro.close()
 
         if smeta_sheet:
+            wb_named = openpyxl.load_workbook(str(file_path), data_only=True)
+            ws_named = wb_named[smeta_sheet]
+
+            structured = StructuredSmetaParser()
+            if structured.can_parse(ws_named) >= CONFIDENCE_THRESHOLD:
+                rows = structured.parse(ws_named)
+                wb_named.close()
+                if rows:
+                    return rows, {
+                        "strategy":   structured.name,
+                        "sheet":      smeta_sheet,
+                        "confidence": 0.99,
+                        "rows_found": len(rows),
+                    }
+
+            wb_named.close()
+
             wb_ro = openpyxl.load_workbook(str(file_path), read_only=True, data_only=True)
             ws = wb_ro[smeta_sheet]
             strategy = TemplateSheetStrategy()

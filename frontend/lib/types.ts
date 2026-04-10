@@ -45,6 +45,14 @@ export interface EstimateBatch {
   created_at: string;
 }
 
+export interface EstimateMaterial {
+  name: string;
+  unit?: string | null;
+  quantity?: number | null;
+  unit_price?: number | null;
+  total_price?: number | null;
+}
+
 export interface EstimateRow {
   id: string;
   estimate_batch_id?: string | null;
@@ -54,6 +62,7 @@ export interface EstimateRow {
   quantity?: number | null;
   unit_price?: number | null;
   total_price?: number | null;
+  materials?: EstimateMaterial[];
   enir_code?: string | null;
   fer_table_id?: number | null;
   fer_work_type?: string | null;

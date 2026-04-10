@@ -261,6 +261,7 @@ async def _process_upload(job_id: str) -> None:
                     quantity    = row.quantity,
                     unit_price  = row.unit_price,
                     total_price = row.total_price,
+                    materials   = getattr(row, "materials", None) or None,
                     row_order   = i,
                     raw_data    = row.raw_data,
                 )

@@ -1,9 +1,0 @@
-# Next.js
-.next/
-out/
-node_modules/
-.env.local
-
-# Build
-build/
-dist/

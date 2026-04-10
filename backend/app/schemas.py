@@ -166,6 +166,7 @@ class EstimateRow(BaseModel):
     quantity:    float | None
     unit_price:  float | None
     total_price: float | None
+    materials:   list[dict] = Field(default_factory=list)
     enir_code:   str | None
     fer_table_id: int | None
     fer_work_type: str | None

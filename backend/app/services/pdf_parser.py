@@ -37,6 +37,7 @@ class ParsedRow:
     quantity:     Optional[float] = None
     unit_price:   Optional[float] = None
     total_price:  Optional[float] = None
+    materials:    list[dict]      = field(default_factory=list)
     row_order:    int             = 0
     raw_data:     dict            = field(default_factory=dict)
     source_strategy: str          = "pdf"

@@ -80,6 +80,7 @@ const addD = (s: string, n: number) => {
   d.setDate(d.getDate() + n);
   return fd(d);
 };
+const finishD = (s: string, dur: number) => addD(s, Math.max(0, dur - 1));
 const diff = (a: string, b: string) => Math.round((pd(b).getTime() - pd(a).getTime()) / 86400000);
 const roundTo = (value: number, digits = 2) => Number(value.toFixed(digits));
 const normalizeWorkersCount = (value: number | null | undefined) => Math.max(1, Number(value) || 1);
@@ -661,6 +662,7 @@ export default function App() {
   const drg = useRef(false);
   const ssync = useRef(false);
   const inpRef = useRef<HTMLInputElement | null>(null);
+  const dateInpRef = useRef<HTMLInputElement | null>(null);
   const dayWidthRef = useRef(DEFAULT_DAY_W);
   const pinchRef = useRef<{ startDistance: number; startDayWidth: number } | null>(null);
 
@@ -1001,6 +1003,15 @@ export default function App() {
     setEditing({ id, field });
     setEditVal(String(value ?? ""));
     setTimeout(() => {
+      if (field === "start") {
+        const dateInput = dateInpRef.current;
+        if (!dateInput) return;
+        dateInput.focus();
+        try {
+          (dateInput as HTMLInputElement & { showPicker?: () => void }).showPicker?.();
+        } catch {}
+        return;
+      }
       inpRef.current?.focus();
       inpRef.current?.select();
     }, 10);
@@ -1098,6 +1109,17 @@ export default function App() {
       setTimeout(() => addAfter(saved.id), 20);
     }
   }, [addAfter, applyAndClose, commit, editVal, editing]);
+
+  const onStartDateKeyDown = useCallback((e: KeyboardEvent<HTMLInputElement>, taskId: string) => {
+    if (e.key === "Escape") {
+      setEditing(null);
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      applyAndClose(taskId, "start", e.currentTarget.value);
+    }
+  }, [applyAndClose]);
 
   const addSubtask = () => {
     if (!sel) return;
@@ -1376,25 +1398,6 @@ export default function App() {
           )}
         </div>
 
-        {batches.length > 0 && (
-          <div className="batch-bar">
-            {batches.map((batch) => (
-              <button
-                key={batch.id}
-                className={`batch-chip${activeBatchId === batch.id ? " active" : ""}`}
-                onClick={() => selectBatch(batch.id)}
-              >
-                {batch.name}
-              </button>
-            ))}
-            {activeBatchId && (
-              <span className="batch-chip-meta">
-                Отдельный гант по выбранной смете
-              </span>
-            )}
-          </div>
-        )}
-
         {batchError && (
           <div style={{ padding: "10px 12px", background: "rgba(239,68,68,.06)", borderBottom: "1px solid rgba(239,68,68,.18)", color: "var(--red)", fontSize: 12 }}>
             {batchError}
@@ -1439,7 +1442,7 @@ export default function App() {
               {rows.map((row,i)=>{
                 const isSel=row.id===sel;
                 const isEd=editing?.id===row.id;
-                const end=addD(row.start,row.dur);
+                const end=finishD(row.start,row.dur);
                 const depNums = parseDeps(row.depends_on)
                   .map(depId => numMap[depId] ?? '?')
                   .filter(Boolean);
@@ -1506,9 +1509,31 @@ export default function App() {
                     <div className={`td mn c${isEd&&editing.field==='start'?' ed':''}`}
                       style={{width:64,fontSize:11}} onDoubleClick={()=>startEdit(row.id,'start',row.start)}>
                       {isEd&&editing.field==='start'
-                        ? <input ref={inpRef} style={{width:58,textAlign:'center',fontSize:10}}
-                            value={editVal} onChange={e=>setEditVal(e.target.value)}
-                            onBlur={commit} onKeyDown={onKD}/>
+                        ? <div style={{position:'relative',width:'100%',display:'flex',justifyContent:'center',alignItems:'center'}}>
+                            <span style={{fontSize:11,fontFamily:'var(--mono)',color:'var(--text)'}}>{dispD(editVal || row.start)}</span>
+                            <input
+                              ref={dateInpRef}
+                              type="date"
+                              value={editVal}
+                              aria-label="Дата начала"
+                              onChange={(e) => {
+                                setEditVal(e.target.value);
+                                applyAndClose(row.id, "start", e.target.value);
+                              }}
+                              onBlur={() => setEditing((current) => (
+                                current?.id === row.id && current.field === "start" ? null : current
+                              ))}
+                              onKeyDown={(e) => onStartDateKeyDown(e, row.id)}
+                              style={{
+                                position:'absolute',
+                                inset:0,
+                                opacity:0,
+                                width:'100%',
+                                height:'100%',
+                                cursor:'pointer',
+                              }}
+                            />
+                          </div>
                         : dispD(row.start)
                       }
                     </div>
@@ -1611,7 +1636,7 @@ export default function App() {
                             border:`1.5px solid ${row.clr}`,
                             opacity: isP ? .85 : 1,
                           }}
-                          title={`${row.name} · ${dispD(row.start)}–${dispD(addD(row.start,row.dur))} · ${row.dur}д · ${row.prog}%`}>
+                          title={`${row.name} · ${dispD(row.start)}–${dispD(finishD(row.start,row.dur))} · ${row.dur}д · ${row.prog}%`}>
                           {/* color fill = progress % */}
                           {row.prog>0&&<div className="bp" style={{width:row.prog+'%',background:row.clr,opacity:.82}}/>}
                           {bw>44&&<div className="bl" style={{
@@ -1740,7 +1765,7 @@ export default function App() {
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Конец</div>
-                      <div className="pfield-val mono">{dispD(addD(panelTask.start,computedPanelDuration))}</div>
+                      <div className="pfield-val mono">{dispD(finishD(panelTask.start,computedPanelDuration))}</div>
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Длительность</div>
