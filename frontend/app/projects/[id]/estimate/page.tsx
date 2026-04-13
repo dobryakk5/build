@@ -730,8 +730,9 @@ function FerWordsReviewModal({
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                         <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--blue-dark)", fontWeight: 700 }}>{candidate.fer_code}</span>
-                        <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>совпало {candidate.matched_tokens}</span>
-                        <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>точных {candidate.exact_matches}</span>
+                        <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>
+                          {`совпало ${candidate.matched_tokens} — ${candidate.matched_words.join(", ")}`}
+                        </span>
                       </div>
                       <div style={{ marginTop: 5, fontSize: 12, lineHeight: 1.45 }}>{candidate.display_name}</div>
                       <div style={{ marginTop: 6, display: "flex", gap: 10, flexWrap: "wrap", fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>

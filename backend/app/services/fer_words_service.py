@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -63,6 +63,7 @@ class FerWordsCandidate:
     numeric_matches: int
     average_ratio: float
     score: float
+    matched_words: list[str] = field(default_factory=list)
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -76,6 +77,7 @@ class FerWordsCandidate:
             "numeric_matches": self.numeric_matches,
             "average_ratio": round(self.average_ratio, 4),
             "score": round(self.score, 4),
+            "matched_words": self.matched_words,
         }
 
 
@@ -135,15 +137,16 @@ def _is_numeric_token(token: str) -> bool:
 def score_fer_words_candidate(
     estimate_tokens: Sequence[str],
     candidate_tokens: Sequence[str],
-) -> tuple[int, int, int, float, float]:
+) -> tuple[int, int, int, float, float, list[str]]:
     if not estimate_tokens or not candidate_tokens:
-        return 0, 0, 0, 0.0, 0.0
+        return 0, 0, 0, 0.0, 0.0, []
 
     matched_tokens = 0
     exact_matches = 0
     numeric_matches = 0
     ratio_sum = 0.0
     used_indexes: set[int] = set()
+    matched_words: list[str] = []
 
     for estimate_token in estimate_tokens:
         best_ratio = 0
@@ -165,17 +168,21 @@ def score_fer_words_candidate(
         used_indexes.add(best_index)
         matched_tokens += 1
         ratio_sum += best_ratio
+        candidate_token = candidate_tokens[best_index]
         if best_ratio == 100:
             exact_matches += 1
+            matched_words.append(estimate_token)
+        else:
+            matched_words.append(f"{estimate_token}/{candidate_token}")
         if _is_numeric_token(estimate_token) and estimate_token == candidate_tokens[best_index]:
             numeric_matches += 1
 
     if matched_tokens == 0:
-        return 0, 0, 0, 0.0, 0.0
+        return 0, 0, 0, 0.0, 0.0, []
 
     average_ratio = ratio_sum / matched_tokens / 100.0
     score = matched_tokens + exact_matches * 0.01 + numeric_matches * 0.005 + average_ratio * 0.001
-    return matched_tokens, exact_matches, numeric_matches, average_ratio, score
+    return matched_tokens, exact_matches, numeric_matches, average_ratio, score, matched_words
 
 
 def build_fer_words_candidates(
@@ -188,7 +195,7 @@ def build_fer_words_candidates(
 
     for entry in entries:
         candidate_tokens = list(entry.search_tokens or [])
-        matched_tokens, exact_matches, numeric_matches, average_ratio, score = score_fer_words_candidate(
+        matched_tokens, exact_matches, numeric_matches, average_ratio, score, matched_words = score_fer_words_candidate(
             estimate_tokens,
             candidate_tokens,
         )
@@ -206,6 +213,7 @@ def build_fer_words_candidates(
                 numeric_matches=numeric_matches,
                 average_ratio=average_ratio,
                 score=score,
+                matched_words=matched_words,
             )
         )
 

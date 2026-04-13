@@ -445,4 +445,5 @@ export interface FerWordsCandidate {
   numeric_matches: number;
   average_ratio: number;
   score: number;
+  matched_words: string[];
 }

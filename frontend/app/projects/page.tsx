@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import EmailVerificationBanner from "@/components/EmailVerificationBanner";
 import { auth, projects } from "@/lib/api";
 import { fmtMoney } from "@/lib/dateUtils";
-import type { CurrentUser, Project } from "@/lib/types";
+import type { Project } from "@/lib/types";
+import { useUser } from "@/lib/UserContext";
 
 const STATUS_CFG = {
   green:  { label: "По графику",     dot: "#22c55e", bg: "rgba(34,197,94,.1)",   border: "rgba(34,197,94,.3)"   },
@@ -19,18 +20,26 @@ export default function ProjectsPage() {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [newName,  setNewName]  = useState("");
-  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [resendingVerification, setResendingVerification] = useState(false);
+  const { user: currentUser, loading: userLoading } = useUser();
 
   useEffect(() => {
-    Promise.all([auth.me(), projects.list()])
-      .then(([user, projectList]) => {
-        setCurrentUser(user);
+    if (userLoading) {
+      return;
+    }
+    if (!currentUser) {
+      router.push("/auth/login");
+      return;
+    }
+
+    setLoading(true);
+    projects.list()
+      .then((projectList) => {
         setList(projectList);
       })
       .catch(() => router.push("/auth/login"))
       .finally(() => setLoading(false));
-  }, []);
+  }, [currentUser, router, userLoading]);
 
   async function handleCreate(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();

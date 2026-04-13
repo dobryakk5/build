@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { auth } from "@/lib/api";
+import { ApiError, auth } from "@/lib/api";
 import type { CurrentUser } from "@/lib/types";
 
 type UserState =
@@ -76,9 +76,21 @@ export function UserProvider({ children }: { children: ReactNode }) {
       const user = await auth.meQuiet();
       writeCache(user);
       setState({ status: "authenticated", user });
-    } catch {
-      clearCache();
-      setState({ status: "unauthenticated" });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        clearCache();
+        setState({ status: "unauthenticated" });
+        return;
+      }
+
+      const cached = readCache();
+      if (cached) {
+        setState({ status: "authenticated", user: cached });
+      } else {
+        setState((current) =>
+          current.status === "authenticated" ? current : { status: "loading" },
+        );
+      }
     }
   }, []);
 

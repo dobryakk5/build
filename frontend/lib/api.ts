@@ -35,6 +35,16 @@ const AUTH_REFRESH_SKIP = new Set([
   "/auth/verify-email",
 ]);
 
+export class ApiError extends Error {
+  status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 type RequestBehavior = {
   retry?: boolean;
   redirectOnUnauthorized?: boolean;
@@ -71,7 +81,10 @@ async function requestInternal<T>(
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail ?? (res.status === 401 ? "Unauthorized" : `HTTP ${res.status}`));
+    throw new ApiError(
+      err?.detail ?? (res.status === 401 ? "Unauthorized" : `HTTP ${res.status}`),
+      res.status,
+    );
   }
   if (res.status === 204) return null as T;
   return res.json();
@@ -232,8 +245,11 @@ export const reports = {
 
 export const notifications = {
   list:       (unreadOnly = false)  => request<any[]>(`/notifications?unread_only=${unreadOnly}`),
+  listQuiet:  (unreadOnly = false)  => requestQuiet<any[]>(`/notifications?unread_only=${unreadOnly}`),
   markRead:   (id: string)          => request<void>(`/notifications/${id}/read`, { method: "POST" }),
+  markReadQuiet: (id: string)       => requestQuiet<void>(`/notifications/${id}/read`, { method: "POST" }),
   markAllRead: ()                   => request<void>("/notifications/read-all", { method: "POST" }),
+  markAllReadQuiet: ()              => requestQuiet<void>("/notifications/read-all", { method: "POST" }),
 };
 
 export const dashboard = {

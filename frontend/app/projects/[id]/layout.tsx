@@ -26,15 +26,15 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   }, [currentUser, router, userLoading]);
 
   useEffect(() => {
-    notifApi.list(true).then((items) => setUnread(items.length)).catch(() => {});
+    notifApi.listQuiet(true).then((items) => setUnread(items.length)).catch(() => {});
   }, [pathname]);
 
   async function openNotifs() {
-    const items = await notifApi.list(false).catch(() => []);
+    const items = await notifApi.listQuiet(false).catch(() => []);
     setNotifs(items);
     setShowNotif(true);
     setUnread(0);
-    await notifApi.markAllRead().catch(() => {});
+    await notifApi.markAllReadQuiet().catch(() => {});
   }
 
   async function handleLogout() {
