@@ -12,6 +12,8 @@ export interface JobResult {
   estimate_kind?: string;
   matched_rows_count?: number;
   low_confidence_count?: number;
+  review_rows_count?: number;
+  review_estimate_ids?: string[];
   complex_mode?: boolean;
   strategy?:          string;
   confidence?:        number;

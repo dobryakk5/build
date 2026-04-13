@@ -172,7 +172,16 @@ async def _find_best_vector_match(
                     ) AS similarity
                 FROM fer.vector_index vi
                 LEFT JOIN fer.fer_tables t ON t.id = vi.table_id
+                LEFT JOIN fer.collections c ON c.id = t.collection_id
+                LEFT JOIN fer.sections s ON s.id = t.section_id
+                LEFT JOIN fer.subsections ss ON ss.id = t.subsection_id
                 WHERE vi.entity_kind = 'row'
+                  AND NOT (
+                      COALESCE(c.ignored, FALSE)
+                      OR COALESCE(s.ignored, FALSE)
+                      OR COALESCE(ss.ignored, FALSE)
+                      OR COALESCE(t.ignored, FALSE)
+                  )
                 ORDER BY vi.embedding OPERATOR(fer.<=>) CAST(:embedding AS fer.vector), vi.id
                 LIMIT 1
                 """

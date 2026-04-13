@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.date_utils import task_end_date, working_days_between
+from app.core.date_utils import next_task_start_date, task_end_date, working_days_between
 from app.models import GanttTask, ScheduleBaseline, ScheduleBaselineTask, TaskDependency, TaskHistory
 from app.services.gantt_calculations import calculate_labor_hours
 
@@ -131,8 +131,8 @@ async def resolve_project_dates(
     for dep in deps:
         if dep.task_id in by_id and dep.depends_on in by_id:
             pred     = by_id[dep.depends_on]
-            pred_end = task_end_date(pred.start_date, pred.working_days, holidays)
-            predecessor_ends[dep.task_id].append(pred_end)
+            pred_next_start = next_task_start_date(pred.start_date, pred.working_days, holidays)
+            predecessor_ends[dep.task_id].append(pred_next_start)
 
     changed: list[dict] = []
 
@@ -147,8 +147,8 @@ async def resolve_project_dates(
             changed.append({"id": tid, "start_date": str(earliest)})
             db.add(task)
 
-        # Передаём дату конца этой задачи дальше по цепочке
-        my_end = task_end_date(task.start_date, task.working_days, holidays)
+        # Передаём старт следующей зависимой задачи дальше по цепочке
+        my_end = next_task_start_date(task.start_date, task.working_days, holidays)
         for succ_id in successors[tid]:
             predecessor_ends[succ_id].append(my_end)
 

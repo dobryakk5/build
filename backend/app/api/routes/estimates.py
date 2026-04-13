@@ -2,19 +2,26 @@
 """
 Fix 4: Асинхронный upload → 202 + job_id
 """
-from datetime import date
+from datetime import date, datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps         import require_action, get_db, get_current_user
 from app.core.permissions import Action
-from app.models           import Estimate, EstimateBatch, GanttTask, ProjectMember
+from app.models           import Estimate, EstimateBatch, FerWordsEntry, GanttTask, ProjectMember
 from app.schemas          import EstimateBatchResponse, EstimateRow, EstimateSummary, JobStartResponse, UploadStartResponse, JobResponse
 from app.services.estimate_fer_matcher import start_fer_match_job
+from app.services.fer_words_service import (
+    apply_fer_words_choice,
+    build_estimate_fer_words_text,
+    build_fer_words_candidate_for_entry,
+    get_fer_words_candidates_for_estimate,
+    start_fer_words_match_job,
+)
 from app.services.upload_service import start_upload_job, start_upload_job_with_mapping
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
@@ -103,7 +110,7 @@ async def list_estimates(
     q = (
         select(Estimate)
         .where(Estimate.project_id == str(project_id))
-        .where(Estimate.deleted_at == None)
+        .where(Estimate.deleted_at.is_(None))
         .order_by(Estimate.row_order)
     )
     if estimate_batch_id:
@@ -129,7 +136,7 @@ async def estimate_summary(
             func.count().label("items"),
         )
         .where(Estimate.project_id == str(project_id))
-        .where(Estimate.deleted_at == None)
+        .where(Estimate.deleted_at.is_(None))
     )
     if estimate_batch_id:
         q = q.where(Estimate.estimate_batch_id == str(estimate_batch_id))
@@ -154,7 +161,7 @@ async def list_estimate_batches(
         await db.scalars(
             select(EstimateBatch)
             .where(EstimateBatch.project_id == str(project_id))
-            .where(EstimateBatch.deleted_at == None)
+            .where(EstimateBatch.deleted_at.is_(None))
             .order_by(EstimateBatch.created_at)
         )
     )
@@ -165,25 +172,32 @@ async def list_estimate_batches(
             select(func.count())
             .select_from(Estimate)
             .where(Estimate.estimate_batch_id == batch.id)
-            .where(Estimate.deleted_at == None)
+            .where(Estimate.deleted_at.is_(None))
         )
         gantt_tasks_count = await db.scalar(
             select(func.count())
             .select_from(GanttTask)
             .where(GanttTask.estimate_batch_id == batch.id)
-            .where(GanttTask.deleted_at == None)
+            .where(GanttTask.deleted_at.is_(None))
         )
         total_price = await db.scalar(
             select(func.sum(Estimate.total_price))
             .where(Estimate.estimate_batch_id == batch.id)
-            .where(Estimate.deleted_at == None)
+            .where(Estimate.deleted_at.is_(None))
         )
         fer_matched_count = await db.scalar(
             select(func.count())
             .select_from(Estimate)
             .where(Estimate.estimate_batch_id == batch.id)
-            .where(Estimate.deleted_at == None)
+            .where(Estimate.deleted_at.is_(None))
             .where(Estimate.fer_table_id.is_not(None))
+        )
+        fer_words_matched_count = await db.scalar(
+            select(func.count())
+            .select_from(Estimate)
+            .where(Estimate.estimate_batch_id == batch.id)
+            .where(Estimate.deleted_at.is_(None))
+            .where(Estimate.fer_words_entry_id.is_not(None))
         )
         result.append(
             EstimateBatchResponse(
@@ -195,6 +209,7 @@ async def list_estimate_batches(
                 estimates_count=estimates_count or 0,
                 gantt_tasks_count=gantt_tasks_count or 0,
                 fer_matched_count=fer_matched_count or 0,
+                fer_words_matched_count=fer_words_matched_count or 0,
                 total_price=float(total_price or 0),
                 created_at=batch.created_at,
             )
@@ -219,6 +234,26 @@ async def match_estimate_batch_with_fer(
     return JobStartResponse(
         job_id=job.id,
         message="Сопоставление сметы с ФЕР запущено.",
+    )
+
+
+@router.post("/estimate-batches/{estimate_batch_id}/match-fer-words", response_model=JobStartResponse, status_code=202)
+async def match_estimate_batch_with_fer_words(
+    project_id: UUID,
+    estimate_batch_id: UUID,
+    current_user = Depends(get_current_user),
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    job = await start_fer_words_match_job(
+        project_id=str(project_id),
+        estimate_batch_id=str(estimate_batch_id),
+        user_id=current_user.id,
+        db=db,
+    )
+    return JobStartResponse(
+        job_id=job.id,
+        message="Сопоставление сметы с ФЕР слова запущено.",
     )
 
 
@@ -253,6 +288,137 @@ async def update_estimate_acts(
         "req_hidden_work_act": est.req_hidden_work_act,
         "req_intermediate_act": est.req_intermediate_act,
         "req_ks2_ks3": est.req_ks2_ks3,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ручной маппинг ФЕР
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FerMappingUpdate(BaseModel):
+    fer_table_id: int | None = None
+
+
+@router.patch("/estimates/{estimate_id}/fer")
+async def update_estimate_fer(
+    project_id: UUID,
+    estimate_id: UUID,
+    body: FerMappingUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    if body.fer_table_id is None:
+        est.fer_table_id = None
+        est.fer_work_type = None
+        est.fer_match_score = None
+        est.fer_matched_at = None
+    else:
+        table_row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT
+                        t.id,
+                        t.table_title,
+                        t.common_work_name,
+                        (
+                            COALESCE(c.ignored, FALSE)
+                            OR COALESCE(s.ignored, FALSE)
+                            OR COALESCE(ss.ignored, FALSE)
+                            OR COALESCE(t.ignored, FALSE)
+                        ) AS effective_ignored
+                    FROM fer.fer_tables
+                    t
+                    JOIN fer.collections c ON c.id = t.collection_id
+                    LEFT JOIN fer.sections s ON s.id = t.section_id
+                    LEFT JOIN fer.subsections ss ON ss.id = t.subsection_id
+                    WHERE t.id = :table_id
+                    """
+                ),
+                {"table_id": body.fer_table_id},
+            )
+        ).mappings().first()
+        if table_row is None:
+            raise HTTPException(404, "FER table not found")
+        if table_row.get("effective_ignored"):
+            raise HTTPException(400, "FER table is ignored")
+
+        work_type = (table_row["common_work_name"] or "").strip() or str(table_row["table_title"]).strip()
+
+        est.fer_table_id = int(table_row["id"])
+        est.fer_work_type = work_type
+        est.fer_match_score = 1.0
+        est.fer_matched_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    return {
+        "id": est.id,
+        "fer_table_id": est.fer_table_id,
+        "fer_work_type": est.fer_work_type,
+        "fer_match_score": float(est.fer_match_score) if est.fer_match_score is not None else None,
+        "fer_matched_at": est.fer_matched_at.isoformat() if est.fer_matched_at else None,
+    }
+
+
+class FerWordsMappingUpdate(BaseModel):
+    entry_id: int | None = None
+
+
+@router.get("/estimates/{estimate_id}/fer-words-candidates")
+async def get_estimate_fer_words_candidates(
+    project_id: UUID,
+    estimate_id: UUID,
+    limit: int = Query(default=5, ge=1, le=10),
+    member: ProjectMember = Depends(require_action(Action.VIEW)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    candidates = await get_fer_words_candidates_for_estimate(db, est, limit=limit)
+    return [candidate.to_payload() for candidate in candidates]
+
+
+@router.patch("/estimates/{estimate_id}/fer-words")
+async def update_estimate_fer_words(
+    project_id: UUID,
+    estimate_id: UUID,
+    body: FerWordsMappingUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    if body.entry_id is None:
+        apply_fer_words_choice(est, None, None)
+    else:
+        entry = await db.get(FerWordsEntry, body.entry_id)
+        if entry is None:
+            raise HTTPException(404, "Строка 'ФЕР слова' не найдена")
+
+        candidate = build_fer_words_candidate_for_entry(build_estimate_fer_words_text(est), entry)
+        if candidate is None:
+            raise HTTPException(400, "Не удалось сопоставить строку сметы с выбранной строкой 'ФЕР слова'")
+        apply_fer_words_choice(est, entry, candidate)
+
+    await db.commit()
+    return {
+        "id": est.id,
+        "fer_words_entry_id": est.fer_words_entry_id,
+        "fer_words_code": est.fer_words_code,
+        "fer_words_name": est.fer_words_name,
+        "fer_words_human_hours": float(est.fer_words_human_hours) if est.fer_words_human_hours is not None else None,
+        "fer_words_machine_hours": float(est.fer_words_machine_hours) if est.fer_words_machine_hours is not None else None,
+        "fer_words_match_score": float(est.fer_words_match_score) if est.fer_words_match_score is not None else None,
+        "fer_words_match_count": est.fer_words_match_count,
+        "fer_words_matched_at": est.fer_words_matched_at.isoformat() if est.fer_words_matched_at else None,
     }
 
 

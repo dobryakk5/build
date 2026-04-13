@@ -10,6 +10,7 @@ import type {
   FerCollectionSummary,
   FerSearchResult,
   FerTableDetail,
+  FerWordsCandidate,
   EstimateBatch,
   EstimateRow,
   EstimateSummary,
@@ -34,7 +35,17 @@ const AUTH_REFRESH_SKIP = new Set([
   "/auth/verify-email",
 ]);
 
-async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
+type RequestBehavior = {
+  retry?: boolean;
+  redirectOnUnauthorized?: boolean;
+};
+
+async function requestInternal<T>(
+  path: string,
+  options: RequestInit = {},
+  behavior: RequestBehavior = {},
+): Promise<T> {
+  const { retry = true, redirectOnUnauthorized = true } = behavior;
   const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
 
   const res = await fetch(`${BASE}${path}`, {
@@ -48,15 +59,30 @@ async function request<T>(path: string, options: RequestInit = {}, retry = true)
 
   if (res.status === 401 && retry && !AUTH_REFRESH_SKIP.has(path)) {
     const ok = await tryRefresh();
-    if (!ok) { window.location.href = "/auth/login"; throw new Error("Unauthorized"); }
-    return request<T>(path, options, false);
+    if (ok) {
+      return requestInternal<T>(path, options, { retry: false, redirectOnUnauthorized });
+    }
   }
+
+  if (res.status === 401 && redirectOnUnauthorized) {
+    window.location.href = "/auth/login";
+    throw new Error("Unauthorized");
+  }
+
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
-    throw new Error(err?.detail ?? `HTTP ${res.status}`);
+    throw new Error(err?.detail ?? (res.status === 401 ? "Unauthorized" : `HTTP ${res.status}`));
   }
   if (res.status === 204) return null as T;
   return res.json();
+}
+
+export async function request<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
+  return requestInternal<T>(path, options, { retry, redirectOnUnauthorized: true });
+}
+
+export async function requestQuiet<T>(path: string, options: RequestInit = {}, retry = true): Promise<T> {
+  return requestInternal<T>(path, options, { retry, redirectOnUnauthorized: false });
 }
 
 async function tryRefresh(): Promise<boolean> {
@@ -76,6 +102,7 @@ export const auth = {
   register: (body: any) =>
     request<AuthPayload>("/auth/register", { method: "POST", body: JSON.stringify(body) }),
   me:       () => request<CurrentUser>("/auth/me"),
+  meQuiet:  () => requestQuiet<CurrentUser>("/auth/me"),
   verifyEmail: (token: string) =>
     request<{ verified: boolean }>("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) }),
   resendVerification: () =>
@@ -136,8 +163,22 @@ export const estimates = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  updateFer: (pid: string, eid: string, body: { fer_table_id: number | null }) =>
+    request<any>(`/projects/${pid}/estimates/${eid}/fer`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  updateFerWords: (pid: string, eid: string, body: { entry_id: number | null }) =>
+    request<any>(`/projects/${pid}/estimates/${eid}/fer-words`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  ferWordsCandidates: (pid: string, eid: string, limit = 5) =>
+    request<FerWordsCandidate[]>(`/projects/${pid}/estimates/${eid}/fer-words-candidates?limit=${limit}`),
   matchFer: (pid: string, batchId: string) =>
     request<{ job_id: string; message: string }>(`/projects/${pid}/estimate-batches/${batchId}/match-fer`, { method: "POST" }),
+  matchFerWords: (pid: string, batchId: string) =>
+    request<{ job_id: string; message: string }>(`/projects/${pid}/estimate-batches/${batchId}/match-fer-words`, { method: "POST" }),
   upload:  (
     pid: string,
     file: File,
@@ -258,4 +299,51 @@ export const fer = {
 
   table: (tableId: number) =>
     request<FerTableDetail>(`/fer/table/${tableId}`),
+};
+
+export const users = {
+  search: (email: string, projectId?: string) => {
+    const params = new URLSearchParams({ email, limit: "8" });
+    if (projectId) {
+      params.set("project_id", projectId);
+    }
+    return request<Array<{ id: string; name: string; email: string; avatar_url?: string | null }>>(
+      `/users/search?${params.toString()}`
+    );
+  },
+  me: () => request<any>("/users/me"),
+};
+
+export const admin = {
+  stats: () => request<any>("/admin/stats"),
+  listOrgs: (q = "", offset = 0, limit = 100) =>
+    request<any>(`/admin/organizations?q=${encodeURIComponent(q)}&offset=${offset}&limit=${limit}`),
+  updateOrgPlan: (orgId: string, plan: string) =>
+    request<any>(`/admin/organizations/${orgId}/plan`, {
+      method: "PATCH",
+      body: JSON.stringify({ plan }),
+    }),
+  deleteOrg: (orgId: string) =>
+    request<void>(`/admin/organizations/${orgId}`, { method: "DELETE" }),
+  listUsers: (q = "", offset = 0, limit = 100) =>
+    request<any>(`/admin/users?q=${encodeURIComponent(q)}&offset=${offset}&limit=${limit}`),
+  updateUser: (
+    userId: string,
+    body: { is_active?: boolean; is_superadmin?: boolean; name?: string },
+  ) =>
+    request<any>(`/admin/users/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  updateFerIgnored: (
+    entityKind: "collection" | "section" | "subsection" | "table",
+    entityId: number,
+    ignored: boolean,
+  ) =>
+    request<any>(`/admin/fer/${entityKind}/${entityId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ ignored }),
+    }),
+  deleteUser: (userId: string) =>
+    request<void>(`/admin/users/${userId}`, { method: "DELETE" }),
 };

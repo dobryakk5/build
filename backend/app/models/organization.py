@@ -19,4 +19,4 @@ class Organization(Base):
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=text("NOW()"))
 
     projects: Mapped[list["Project"]] = relationship(back_populates="organization", cascade="all, delete")
-    users:    Mapped[list["User"]]    = relationship(back_populates="organization")
+    users:    Mapped[list["User"]]    = relationship(back_populates="organization", cascade="all, delete-orphan")

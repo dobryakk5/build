@@ -172,6 +172,13 @@ class EstimateRow(BaseModel):
     fer_table_id: int | None
     fer_work_type: str | None
     fer_match_score: float | None
+    fer_words_entry_id: int | None = None
+    fer_words_code: str | None = None
+    fer_words_name: str | None = None
+    fer_words_human_hours: float | None = None
+    fer_words_machine_hours: float | None = None
+    fer_words_match_score: float | None = None
+    fer_words_match_count: int | None = None
     req_hidden_work_act: bool = False
     req_intermediate_act: bool = False
     req_ks2_ks3: bool = False
@@ -197,6 +204,7 @@ class EstimateBatchResponse(BaseModel):
     estimates_count: int = 0
     gantt_tasks_count: int = 0
     fer_matched_count: int = 0
+    fer_words_matched_count: int = 0
     total_price: float = 0
     created_at: datetime
 

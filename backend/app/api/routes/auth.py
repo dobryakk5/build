@@ -43,6 +43,7 @@ class AuthUserResponse(BaseModel):
     avatar_url: str | None = None
     role: str | None = None
     email_verified: bool
+    is_superadmin: bool = False
 
 
 class AuthResponse(BaseModel):
@@ -98,6 +99,7 @@ def user_dict(user: User, role: str | None = None) -> AuthUserResponse:
         avatar_url=user.avatar_url,
         role=role,
         email_verified=is_effectively_email_verified(user),
+        is_superadmin=getattr(user, "is_superadmin", False),
     )
 
 

@@ -9,6 +9,17 @@ celery_app = Celery(
     include = ["app.tasks.report_tasks"],
 )
 
+celery_app.conf.update(
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    task_serializer="json",
+    result_serializer="json",
+    accept_content=["json"],
+    result_expires=60 * 60 * 24,
+    timezone="Europe/Moscow",
+    enable_utc=True,
+)
+
 celery_app.conf.beat_schedule = {
     # 22:00 — напоминание прорабам заполнить отчёт
     "remind-foremen-daily": {
@@ -26,5 +37,3 @@ celery_app.conf.beat_schedule = {
         "schedule": crontab(minute=0),
     },
 }
-
-celery_app.conf.timezone = "Europe/Moscow"

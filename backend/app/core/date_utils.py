@@ -1,13 +1,15 @@
 # backend/app/core/date_utils.py
 """
-Единственное место где считаются рабочие дни.
-Используется и в бэке, и логика дублируется на фронте.
+Единственное место, где считаются календарные даты задач.
 
-Правило: рабочие дни = пн–пт минус праздники из таблицы holidays.
-Calendar days нигде не используются для расчёта длительности задач.
+Правило:
+- duration = календарные дни
+- dur=1 -> старт и финиш в один день
+- следующая зависимая задача стартует на следующий календарный день
+
+Параметр holidays сохранён в сигнатурах для совместимости вызовов, но не используется.
 """
 from datetime import date, timedelta
-from functools import lru_cache
 
 
 def add_working_days(
@@ -16,21 +18,10 @@ def add_working_days(
     holidays: set[date] | None = None,
 ) -> date:
     """
-    Прибавляет рабочие дни к дате.
-    start=2026-03-13 (пт), working_days=1 → 2026-03-16 (пн)
+    Историческое имя: фактически прибавляет календарные дни к дате.
+    start=2026-03-13, working_days=1 -> 2026-03-14
     """
-    if working_days <= 0:
-        return start
-    if holidays is None:
-        holidays = set()
-
-    current = start
-    added = 0
-    while added < working_days:
-        current += timedelta(days=1)
-        if current.weekday() < 5 and current not in holidays:  # пн=0 … пт=4
-            added += 1
-    return current
+    return start + timedelta(days=max(0, working_days))
 
 
 def working_days_between(
@@ -39,22 +30,17 @@ def working_days_between(
     holidays: set[date] | None = None,
 ) -> int:
     """
-    Считает рабочие дни между двумя датами (не включая start, включая end).
+    Историческое имя: фактически считает календарные дни между двумя датами
+    (не включая start, включая end).
     """
-    if holidays is None:
-        holidays = set()
-    if end <= start:
-        return 0
-
-    count = 0
-    current = start
-    while current < end:
-        current += timedelta(days=1)
-        if current.weekday() < 5 and current not in holidays:
-            count += 1
-    return count
+    return max(0, (end - start).days)
 
 
 def task_end_date(start: date, working_days: int, holidays: set[date] | None = None) -> date:
     """Дата окончания задачи (включительно)."""
-    return add_working_days(start, working_days, holidays)
+    return start + timedelta(days=max(0, working_days - 1))
+
+
+def next_task_start_date(start: date, working_days: int, holidays: set[date] | None = None) -> date:
+    """Дата старта следующей зависимой задачи после текущей."""
+    return add_working_days(start, max(1, working_days), holidays)

@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from datetime import date
 from uuid import uuid4
 
-from app.core.date_utils import add_working_days
 from app.services.gantt_calculations import (
     DEFAULT_HOURS_PER_DAY,
     calculate_labor_hours,
@@ -122,11 +121,10 @@ class GanttBuilder:
         1. Группируем строки сметы по разделам (section)
         2. Сортируем разделы по технологической последовательности
         3. Каждый раздел = родительская задача (project), его строки = дочерние
-        4. Раздел начинается после окончания предыдущего
-        5. Внутри раздела задачи идут последовательно
+        4. После импорта все группы и задачи стартуют с одной даты
+        5. Зависимости оператор проставляет вручную
         """
         tasks: list[GanttTaskDTO] = []
-        self._dep_pairs: list[tuple[str, str]] = []
 
         # Группируем по разделам
         sections: dict[str, list] = {}
@@ -137,32 +135,29 @@ class GanttBuilder:
         # Сортируем разделы
         sorted_sections = self._sort_sections(list(sections.keys()))
 
-        current_start = start_date
-        prev_section_id: str | None = None
         row_order = 1000.0
 
         for section_name in sorted_sections:
             section_estimates = sections[section_name]
             section_id = str(uuid4())
             color = self._section_color(section_name)
-
-            # Дочерние задачи
-            section_end = current_start
-            task_start  = current_start
+            section_tasks: list[GanttTaskDTO] = []
+            max_duration = 1
 
             for est in section_estimates:
                 labor_hours = self._calc_labor_hours(est, workers)
                 dur = calculate_working_days(labor_hours, workers, self.HOURS_PER_DAY) or 1
                 task_id = str(uuid4())
                 row_order += 10.0
+                max_duration = max(max_duration, dur)
 
-                tasks.append(GanttTaskDTO(
+                section_tasks.append(GanttTaskDTO(
                     id           = task_id,
                     project_id   = project_id,
                     estimate_id  = est.id,
                     parent_id    = section_id,
                     name         = est.work_name,
-                    start_date   = task_start,
+                    start_date   = start_date,
                     working_days = dur,
                     workers_count = workers,
                     labor_hours  = labor_hours,
@@ -172,17 +167,6 @@ class GanttBuilder:
                     color        = color,
                     row_order    = row_order,
                 ))
-
-                task_end = add_working_days(task_start, dur)
-                if task_end > section_end:
-                    section_end = task_end
-                task_start = task_end
-
-            # Родительская задача
-            total_days = max(1, sum(
-                calculate_working_days(self._calc_labor_hours(e, workers), workers, self.HOURS_PER_DAY) or 1
-                for e in section_estimates
-            ))
             row_order += 10.0
             section_task = GanttTaskDTO(
                 id           = section_id,
@@ -190,34 +174,24 @@ class GanttBuilder:
                 estimate_id  = None,
                 parent_id    = None,
                 name         = section_name,
-                start_date   = current_start,
-                working_days = total_days,
+                start_date   = start_date,
+                working_days = max_duration,
                 workers_count = None,
                 labor_hours  = None,
                 hours_per_day = self.HOURS_PER_DAY,
                 is_group     = True,
                 type         = "project",
                 color        = color,
-                row_order    = row_order - total_days * 10.0 - 5.0,
+                row_order    = row_order - len(section_estimates) * 10.0 - 5.0,
             )
-
-            # Зависимость: этот раздел идёт после предыдущего
-            if prev_section_id:
-                self._dep_pairs.append((section_id, prev_section_id))
-
-            tasks.insert(
-                next((i for i, t in enumerate(tasks) if t.parent_id == section_id), len(tasks)) - len(section_estimates),
-                section_task,
-            )
-
-            prev_section_id = section_id
-            current_start   = section_end
+            tasks.append(section_task)
+            tasks.extend(section_tasks)
 
         return tasks
 
     def get_dependencies(self, tasks: list[GanttTaskDTO]) -> list[tuple[str, str]]:
-        """Возвращает пары (task_id, depends_on_id) для сохранения в task_dependencies."""
-        return self._dep_pairs
+        """Автозависимости после импорта отключены."""
+        return []
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

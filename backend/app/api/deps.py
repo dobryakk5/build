@@ -9,7 +9,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.core.config import settings
-from app.core.security import decode_token
+from app.core.security import decode_access_token
 from app.services.auth_service import is_effectively_email_verified
 
 from app.core.database    import get_db
@@ -41,7 +41,7 @@ async def get_current_user(
         )
 
     try:
-        payload = decode_token(token)
+        payload = decode_access_token(token)
         user_id: str = payload.get("sub")
         if not user_id:
             raise ValueError("no sub")
@@ -133,7 +133,7 @@ def require_task_in_project(action: Action | None = None):
             select(GanttTask)
             .where(GanttTask.id         == str(task_id))
             .where(GanttTask.project_id == str(project_id))
-            .where(GanttTask.deleted_at == None)
+            .where(GanttTask.deleted_at.is_(None))
         )
         if not task:
             raise HTTPException(status_code=404, detail="Задача не найдена")

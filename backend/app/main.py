@@ -17,6 +17,8 @@ from app.api.routes.materials     import router as materials_router
 from app.api.routes.notifications import router as notifications_router
 from app.api.routes.enir          import router as enir_router
 from app.api.routes.fer           import router as fer_router
+from app.api.routes.users         import router as users_router
+from app.api.routes.admin         import router as admin_router
 
 
 @asynccontextmanager
@@ -56,6 +58,8 @@ app.include_router(materials_router)
 app.include_router(notifications_router)
 app.include_router(enir_router)
 app.include_router(fer_router)
+app.include_router(users_router)
+app.include_router(admin_router)
 
 
 @app.get("/health")

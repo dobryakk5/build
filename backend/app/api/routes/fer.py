@@ -36,7 +36,12 @@ async def _get_collection(db: AsyncSession, collection_id: int) -> dict[str, Any
     collection = await _fetch_one(
         db,
         """
-        SELECT c.id, c.num, c.name
+        SELECT
+            c.id,
+            c.num,
+            c.name,
+            COALESCE(c.ignored, FALSE) AS ignored,
+            COALESCE(c.ignored, FALSE) AS effective_ignored
         FROM fer.collections c
         WHERE c.id = :collection_id
         """,
@@ -51,8 +56,14 @@ async def _get_section(db: AsyncSession, collection_id: int, section_id: int) ->
     section = await _fetch_one(
         db,
         """
-        SELECT s.id, s.collection_id, s.title
+        SELECT
+            s.id,
+            s.collection_id,
+            s.title,
+            COALESCE(s.ignored, FALSE) AS ignored,
+            (COALESCE(c.ignored, FALSE) OR COALESCE(s.ignored, FALSE)) AS effective_ignored
         FROM fer.sections s
+        JOIN fer.collections c ON c.id = s.collection_id
         WHERE s.id = :section_id AND s.collection_id = :collection_id
         """,
         {"collection_id": collection_id, "section_id": section_id},
@@ -71,9 +82,19 @@ async def _get_subsection(
     subsection = await _fetch_one(
         db,
         """
-        SELECT ss.id, ss.section_id, ss.title
+        SELECT
+            ss.id,
+            ss.section_id,
+            ss.title,
+            COALESCE(ss.ignored, FALSE) AS ignored,
+            (
+                COALESCE(c.ignored, FALSE)
+                OR COALESCE(s.ignored, FALSE)
+                OR COALESCE(ss.ignored, FALSE)
+            ) AS effective_ignored
         FROM fer.subsections ss
         JOIN fer.sections s ON s.id = ss.section_id
+        JOIN fer.collections c ON c.id = s.collection_id
         WHERE ss.id = :subsection_id
           AND ss.section_id = :section_id
           AND s.collection_id = :collection_id
@@ -98,6 +119,8 @@ async def fer_collections(db: AsyncSession = Depends(get_db)):
             c.id,
             c.num,
             c.name,
+            COALESCE(c.ignored, FALSE) AS ignored,
+            COALESCE(c.ignored, FALSE) AS effective_ignored,
             COUNT(DISTINCT s.id)::int AS sections_count,
             COUNT(DISTINCT ss.id)::int AS subsections_count,
             COUNT(DISTINCT t.id)::int AS total_tables_count,
@@ -106,7 +129,7 @@ async def fer_collections(db: AsyncSession = Depends(get_db)):
         LEFT JOIN fer.sections s ON s.collection_id = c.id
         LEFT JOIN fer.subsections ss ON ss.section_id = s.id
         LEFT JOIN fer.fer_tables t ON t.collection_id = c.id
-        GROUP BY c.id, c.num, c.name
+        GROUP BY c.id, c.num, c.name, c.ignored
         ORDER BY c.num
         """,
         {},
@@ -137,6 +160,8 @@ async def fer_browse(
             "id": collection["id"],
             "label": _collection_label(collection),
             "num": collection["num"],
+            "ignored": collection["ignored"],
+            "effective_ignored": collection["effective_ignored"],
         }
     ]
     if section is not None:
@@ -145,6 +170,8 @@ async def fer_browse(
                 "kind": "section",
                 "id": section["id"],
                 "label": _section_label(section),
+                "ignored": section["ignored"],
+                "effective_ignored": section["effective_ignored"],
             }
         )
     if subsection is not None:
@@ -153,6 +180,8 @@ async def fer_browse(
                 "kind": "subsection",
                 "id": subsection["id"],
                 "label": _subsection_label(subsection),
+                "ignored": subsection["ignored"],
+                "effective_ignored": subsection["effective_ignored"],
             }
         )
 
@@ -166,8 +195,18 @@ async def fer_browse(
                 t.table_title AS title,
                 t.row_count::int AS row_count,
                 t.table_url,
-                t.common_work_name
+                t.common_work_name,
+                COALESCE(t.ignored, FALSE) AS ignored,
+                (
+                    COALESCE(c.ignored, FALSE)
+                    OR COALESCE(s.ignored, FALSE)
+                    OR COALESCE(ss.ignored, FALSE)
+                    OR COALESCE(t.ignored, FALSE)
+                ) AS effective_ignored
             FROM fer.fer_tables t
+            JOIN fer.collections c ON c.id = t.collection_id
+            LEFT JOIN fer.sections s ON s.id = t.section_id
+            LEFT JOIN fer.subsections ss ON ss.id = t.subsection_id
             WHERE t.collection_id = :collection_id
               AND t.section_id = :section_id
               AND t.subsection_id = :subsection_id
@@ -188,11 +227,19 @@ async def fer_browse(
                 'subsection' AS kind,
                 ss.id,
                 ss.title,
+                COALESCE(ss.ignored, FALSE) AS ignored,
+                (
+                    COALESCE(c.ignored, FALSE)
+                    OR COALESCE(s.ignored, FALSE)
+                    OR COALESCE(ss.ignored, FALSE)
+                ) AS effective_ignored,
                 COUNT(t.id)::int AS table_count
             FROM fer.subsections ss
+            JOIN fer.sections s ON s.id = ss.section_id
+            JOIN fer.collections c ON c.id = s.collection_id
             LEFT JOIN fer.fer_tables t ON t.subsection_id = ss.id
             WHERE ss.section_id = :section_id
-            GROUP BY ss.id, ss.title
+            GROUP BY ss.id, ss.title, ss.ignored, s.ignored, c.ignored
             ORDER BY ss.id
             """,
             {"section_id": section_id},
@@ -206,8 +253,16 @@ async def fer_browse(
                 t.table_title AS title,
                 t.row_count::int AS row_count,
                 t.table_url,
-                t.common_work_name
+                t.common_work_name,
+                COALESCE(t.ignored, FALSE) AS ignored,
+                (
+                    COALESCE(c.ignored, FALSE)
+                    OR COALESCE(s.ignored, FALSE)
+                    OR COALESCE(t.ignored, FALSE)
+                ) AS effective_ignored
             FROM fer.fer_tables t
+            JOIN fer.collections c ON c.id = t.collection_id
+            JOIN fer.sections s ON s.id = t.section_id
             WHERE t.collection_id = :collection_id
               AND t.section_id = :section_id
               AND t.subsection_id IS NULL
@@ -225,13 +280,16 @@ async def fer_browse(
                 'section' AS kind,
                 s.id,
                 s.title,
+                COALESCE(s.ignored, FALSE) AS ignored,
+                (COALESCE(c.ignored, FALSE) OR COALESCE(s.ignored, FALSE)) AS effective_ignored,
                 COUNT(DISTINCT ss.id)::int AS subsection_count,
                 COUNT(DISTINCT t.id) FILTER (WHERE t.subsection_id IS NULL)::int AS table_count
             FROM fer.sections s
+            JOIN fer.collections c ON c.id = s.collection_id
             LEFT JOIN fer.subsections ss ON ss.section_id = s.id
             LEFT JOIN fer.fer_tables t ON t.section_id = s.id
             WHERE s.collection_id = :collection_id
-            GROUP BY s.id, s.title
+            GROUP BY s.id, s.title, s.ignored, c.ignored
             ORDER BY s.id
             """,
             {"collection_id": collection_id},
@@ -245,8 +303,14 @@ async def fer_browse(
                 t.table_title AS title,
                 t.row_count::int AS row_count,
                 t.table_url,
-                t.common_work_name
+                t.common_work_name,
+                COALESCE(t.ignored, FALSE) AS ignored,
+                (
+                    COALESCE(c.ignored, FALSE)
+                    OR COALESCE(t.ignored, FALSE)
+                ) AS effective_ignored
             FROM fer.fer_tables t
+            JOIN fer.collections c ON c.id = t.collection_id
             WHERE t.collection_id = :collection_id
               AND t.section_id IS NULL
               AND t.subsection_id IS NULL
@@ -290,10 +354,20 @@ async def fer_search(
                 c.id AS collection_id,
                 c.num AS collection_num,
                 c.name AS collection_name,
+                COALESCE(c.ignored, FALSE) AS collection_ignored,
                 s.id AS section_id,
                 s.title AS section_title,
+                COALESCE(s.ignored, FALSE) AS section_ignored,
                 ss.id AS subsection_id,
                 ss.title AS subsection_title,
+                COALESCE(ss.ignored, FALSE) AS subsection_ignored,
+                COALESCE(t.ignored, FALSE) AS ignored,
+                (
+                    COALESCE(c.ignored, FALSE)
+                    OR COALESCE(s.ignored, FALSE)
+                    OR COALESCE(ss.ignored, FALSE)
+                    OR COALESCE(t.ignored, FALSE)
+                ) AS effective_ignored,
                 CASE
                     WHEN t.table_title ILIKE :pattern THEN 7
                     WHEN COALESCE(t.common_work_name, '') ILIKE :pattern THEN 6
@@ -344,10 +418,15 @@ async def fer_search(
             collection_id,
             collection_num,
             collection_name,
+            collection_ignored,
             section_id,
             section_title,
+            section_ignored,
             subsection_id,
             subsection_title,
+            subsection_ignored,
+            ignored,
+            effective_ignored,
             MAX(match_rank)::int AS match_rank,
             COUNT(*) FILTER (WHERE match_scope IN ('row_slug', 'clarification'))::int AS matching_rows_count,
             (ARRAY_AGG(match_scope ORDER BY match_rank DESC, matched_text NULLS LAST))[1] AS match_scope,
@@ -362,10 +441,15 @@ async def fer_search(
             collection_id,
             collection_num,
             collection_name,
+            collection_ignored,
             section_id,
             section_title,
+            section_ignored,
             subsection_id,
-            subsection_title
+            subsection_title,
+            subsection_ignored,
+            ignored,
+            effective_ignored
         ORDER BY
             MAX(match_rank) DESC,
             collection_num,
@@ -389,11 +473,15 @@ async def fer_search(
                 "id": row["collection_id"],
                 "num": row["collection_num"],
                 "name": row["collection_name"],
+                "ignored": row["collection_ignored"],
+                "effective_ignored": row["collection_ignored"],
             },
             "section": (
                 {
                     "id": row["section_id"],
                     "title": row["section_title"],
+                    "ignored": row["section_ignored"],
+                    "effective_ignored": row["collection_ignored"] or row["section_ignored"],
                 }
                 if row["section_id"] is not None
                 else None
@@ -402,10 +490,18 @@ async def fer_search(
                 {
                     "id": row["subsection_id"],
                     "title": row["subsection_title"],
+                    "ignored": row["subsection_ignored"],
+                    "effective_ignored": (
+                        row["collection_ignored"]
+                        or row["section_ignored"]
+                        or row["subsection_ignored"]
+                    ),
                 }
                 if row["subsection_id"] is not None
                 else None
             ),
+            "ignored": row["ignored"],
+            "effective_ignored": row["effective_ignored"],
             "match_scope": row["match_scope"],
             "matched_text": row["matched_text"],
             "matching_rows_count": row["matching_rows_count"],
@@ -428,10 +524,20 @@ async def fer_table(table_id: int, db: AsyncSession = Depends(get_db)):
             c.id AS collection_id,
             c.num AS collection_num,
             c.name AS collection_name,
+            COALESCE(c.ignored, FALSE) AS collection_ignored,
             s.id AS section_id,
             s.title AS section_title,
+            COALESCE(s.ignored, FALSE) AS section_ignored,
             ss.id AS subsection_id,
-            ss.title AS subsection_title
+            ss.title AS subsection_title,
+            COALESCE(ss.ignored, FALSE) AS subsection_ignored,
+            COALESCE(t.ignored, FALSE) AS ignored,
+            (
+                COALESCE(c.ignored, FALSE)
+                OR COALESCE(s.ignored, FALSE)
+                OR COALESCE(ss.ignored, FALSE)
+                OR COALESCE(t.ignored, FALSE)
+            ) AS effective_ignored
         FROM fer.fer_tables t
         JOIN fer.collections c ON c.id = t.collection_id
         LEFT JOIN fer.sections s ON s.id = t.section_id
@@ -465,26 +571,50 @@ async def fer_table(table_id: int, db: AsyncSession = Depends(get_db)):
             "id": table["collection_id"],
             "label": f"Сборник {table['collection_num']}. {table['collection_name']}",
             "num": table["collection_num"],
+            "ignored": table["collection_ignored"],
+            "effective_ignored": table["collection_ignored"],
         }
     ]
     section = None
     subsection = None
     if table["section_id"] is not None:
-        section = {"id": table["section_id"], "title": table["section_title"]}
+        section = {
+            "id": table["section_id"],
+            "title": table["section_title"],
+            "ignored": table["section_ignored"],
+            "effective_ignored": table["collection_ignored"] or table["section_ignored"],
+        }
         breadcrumb.append(
             {
                 "kind": "section",
                 "id": table["section_id"],
                 "label": table["section_title"],
+                "ignored": table["section_ignored"],
+                "effective_ignored": table["collection_ignored"] or table["section_ignored"],
             }
         )
     if table["subsection_id"] is not None:
-        subsection = {"id": table["subsection_id"], "title": table["subsection_title"]}
+        subsection = {
+            "id": table["subsection_id"],
+            "title": table["subsection_title"],
+            "ignored": table["subsection_ignored"],
+            "effective_ignored": (
+                table["collection_ignored"]
+                or table["section_ignored"]
+                or table["subsection_ignored"]
+            ),
+        }
         breadcrumb.append(
             {
                 "kind": "subsection",
                 "id": table["subsection_id"],
                 "label": table["subsection_title"],
+                "ignored": table["subsection_ignored"],
+                "effective_ignored": (
+                    table["collection_ignored"]
+                    or table["section_ignored"]
+                    or table["subsection_ignored"]
+                ),
             }
         )
     breadcrumb.append(
@@ -492,6 +622,8 @@ async def fer_table(table_id: int, db: AsyncSession = Depends(get_db)):
             "kind": "table",
             "id": table["id"],
             "label": table["table_title"],
+            "ignored": table["ignored"],
+            "effective_ignored": table["effective_ignored"],
         }
     )
 
@@ -505,9 +637,13 @@ async def fer_table(table_id: int, db: AsyncSession = Depends(get_db)):
             "id": table["collection_id"],
             "num": table["collection_num"],
             "name": table["collection_name"],
+            "ignored": table["collection_ignored"],
+            "effective_ignored": table["collection_ignored"],
         },
         "section": section,
         "subsection": subsection,
+        "ignored": table["ignored"],
+        "effective_ignored": table["effective_ignored"],
         "breadcrumb": breadcrumb,
         "rows": rows,
     }

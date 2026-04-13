@@ -309,17 +309,6 @@ async def _process_upload(job_id: str) -> None:
 
             await db.flush()
 
-            # ── 5. Зависимости между разделами ───────────────────────────────
-            for task_id, depends_on_id in builder.get_dependencies(task_dtos):
-                db.add(TaskDependency(
-                    task_id    = task_id,
-                    depends_on = depends_on_id,
-                ))
-
-            # ── 6. Пересчёт дат ──────────────────────────────────────────────
-            from app.services.gantt_service import resolve_project_dates
-            await resolve_project_dates(job.project_id, db)
-
             job.status = "done"
             job.result = {
                 "estimates_count":   len(estimates),
@@ -469,7 +458,7 @@ def _wrap_batch_tasks(
     root_id = str(uuid4())
     min_order = min(float(dto.row_order) for dto in task_dtos)
     max_end = max(task_end_date(dto.start_date, dto.working_days) for dto in task_dtos)
-    batch_days = max(1, working_days_between(start_date, max_end))
+    batch_days = max(1, working_days_between(start_date, max_end) + 1)
 
     wrapped: list[GanttTaskDTO] = [
         GanttTaskDTO(

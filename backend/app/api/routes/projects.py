@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -50,37 +50,51 @@ async def list_projects(
     db:           AsyncSession = Depends(get_db),
 ):
     """Проекты, в которых состоит текущий пользователь."""
-    members = await db.scalars(
+    memberships = list(await db.scalars(
         select(ProjectMember).where(ProjectMember.user_id == current_user.id)
-    )
-    project_ids = [m.project_id for m in members]
-    member_roles = {m.project_id: m.role for m in await db.scalars(
-        select(ProjectMember).where(ProjectMember.user_id == current_user.id)
-    )}
+    ))
+    if not memberships:
+        return []
 
-    projects = await db.scalars(
+    project_ids = [m.project_id for m in memberships]
+    member_roles = {m.project_id: m.role for m in memberships}
+
+    projects = list(await db.scalars(
         select(Project)
         .where(Project.id.in_(project_ids))
-        .where(Project.deleted_at == None)
+        .where(Project.deleted_at.is_(None))
         .order_by(Project.created_at.desc())
+    ))
+    if not projects:
+        return []
+
+    fetched_ids = [project.id for project in projects]
+
+    members_agg = await db.execute(
+        select(ProjectMember.project_id, func.count().label("cnt"))
+        .where(ProjectMember.project_id.in_(fetched_ids))
+        .group_by(ProjectMember.project_id)
     )
+    members_count = {row.project_id: row.cnt for row in members_agg}
+
+    tasks_agg = await db.execute(
+        select(GanttTask.project_id, func.count().label("cnt"))
+        .where(GanttTask.project_id.in_(fetched_ids))
+        .where(GanttTask.deleted_at.is_(None))
+        .group_by(GanttTask.project_id)
+    )
+    tasks_count = {row.project_id: row.cnt for row in tasks_agg}
+
+    budget_agg = await db.execute(
+        select(Estimate.project_id, func.sum(Estimate.total_price).label("total"))
+        .where(Estimate.project_id.in_(fetched_ids))
+        .where(Estimate.deleted_at.is_(None))
+        .group_by(Estimate.project_id)
+    )
+    budgets = {row.project_id: float(row.total or 0) for row in budget_agg}
 
     result = []
     for p in projects:
-        members_count = await db.scalar(
-            select(func.count()).select_from(ProjectMember)
-            .where(ProjectMember.project_id == p.id)
-        )
-        tasks_count = await db.scalar(
-            select(func.count()).select_from(GanttTask)
-            .where(GanttTask.project_id == p.id)
-            .where(GanttTask.deleted_at == None)
-        )
-        budget = await db.scalar(
-            select(func.sum(Estimate.total_price))
-            .where(Estimate.project_id == p.id)
-            .where(Estimate.deleted_at == None)
-        )
         result.append({
             "id":               p.id,
             "name":             p.name,
@@ -91,9 +105,9 @@ async def list_projects(
             "start_date":       str(p.start_date) if p.start_date else None,
             "end_date":         str(p.end_date)   if p.end_date   else None,
             "my_role":          member_roles.get(p.id),
-            "members_count":    members_count or 0,
-            "tasks_count":      tasks_count   or 0,
-            "budget":           float(budget) if budget else 0,
+            "members_count":    members_count.get(p.id, 0),
+            "tasks_count":      tasks_count.get(p.id, 0),
+            "budget":           budgets.get(p.id, 0.0),
             "created_at":       p.created_at.isoformat(),
         })
     return result
@@ -147,7 +161,7 @@ async def get_project(
     budget = await db.scalar(
         select(func.sum(Estimate.total_price))
         .where(Estimate.project_id == project_id)
-        .where(Estimate.deleted_at == None)
+        .where(Estimate.deleted_at.is_(None))
     )
 
     return {
@@ -192,11 +206,10 @@ async def delete_project(
     member:     ProjectMember = Depends(require_action(Action.DELETE)),
     db:         AsyncSession  = Depends(get_db),
 ):
-    from datetime import datetime
     project = await db.get(Project, project_id)
     if not project or project.deleted_at:
         raise HTTPException(404)
-    project.deleted_at = datetime.utcnow()
+    project.deleted_at = datetime.now(timezone.utc)
     await db.commit()
 
 
@@ -208,12 +221,19 @@ async def list_members(
     member:     ProjectMember = Depends(require_action(Action.VIEW)),
     db:         AsyncSession  = Depends(get_db),
 ):
-    members = await db.scalars(
+    members = list(await db.scalars(
         select(ProjectMember).where(ProjectMember.project_id == project_id)
-    )
+    ))
+    if not members:
+        return []
+
+    user_ids = [m.user_id for m in members]
+    users = list(await db.scalars(select(User).where(User.id.in_(user_ids))))
+    users_by_id = {user.id: user for user in users}
+
     result = []
     for m in members:
-        user = await db.get(User, m.user_id)
+        user = users_by_id.get(m.user_id)
         result.append({
             "id":         m.id,
             "role":       m.role,
@@ -249,6 +269,8 @@ async def add_member(
     user = await db.get(User, body.user_id)
     if not user:
         raise HTTPException(404, "Пользователь не найден")
+    if current_user.organization_id is not None and user.organization_id != current_user.organization_id:
+        raise HTTPException(403, "Нельзя добавить пользователя из другой организации")
 
     new_member = ProjectMember(
         id         = str(uuid4()),

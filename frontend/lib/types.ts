@@ -26,11 +26,16 @@ export interface Project {
   id: string;
   name: string;
   address?: string | null;
+  status?: string;
   dashboard_status: DashboardStatus;
   budget?: number | null;
+  color?: string | null;
+  start_date?: string | null;
+  end_date?: string | null;
   tasks_count?: number;
   members_count?: number;
   my_role?: string | null;
+  created_at?: string;
 }
 
 export interface EstimateBatch {
@@ -42,6 +47,7 @@ export interface EstimateBatch {
   estimates_count: number;
   gantt_tasks_count: number;
   fer_matched_count: number;
+  fer_words_matched_count: number;
   total_price: number;
   created_at: string;
 }
@@ -68,6 +74,13 @@ export interface EstimateRow {
   fer_table_id?: number | null;
   fer_work_type?: string | null;
   fer_match_score?: number | null;
+  fer_words_entry_id?: number | null;
+  fer_words_code?: string | null;
+  fer_words_name?: string | null;
+  fer_words_human_hours?: number | null;
+  fer_words_machine_hours?: number | null;
+  fer_words_match_score?: number | null;
+  fer_words_match_count?: number | null;
   req_hidden_work_act?: boolean;
   req_intermediate_act?: boolean;
   req_ks2_ks3?: boolean;
@@ -158,6 +171,7 @@ export interface User {
   avatar_url?: string | null;
   role?: string | null;
   email_verified: boolean;
+  is_superadmin?: boolean;
 }
 
 export interface CurrentUser extends User {
@@ -327,6 +341,8 @@ export interface FerCollectionSummary {
   id: number;
   num: string;
   name: string;
+  ignored: boolean;
+  effective_ignored: boolean;
   sections_count: number;
   subsections_count: number;
   total_tables_count: number;
@@ -338,23 +354,31 @@ export interface FerBreadcrumbItem {
   id: number;
   label: string;
   num?: string;
+  ignored?: boolean;
+  effective_ignored?: boolean;
 }
 
 export interface FerCollectionRef {
   id: number;
   num: string;
   name: string;
+  ignored?: boolean;
+  effective_ignored?: boolean;
 }
 
 export interface FerSectionRef {
   id: number;
   title: string;
+  ignored?: boolean;
+  effective_ignored?: boolean;
 }
 
 export interface FerBrowseItem {
   kind: "section" | "subsection" | "table";
   id: number;
   title: string;
+  ignored: boolean;
+  effective_ignored: boolean;
   subsection_count?: number;
   table_count?: number;
   row_count?: number;
@@ -377,6 +401,8 @@ export interface FerSearchResult {
   row_count: number;
   table_url: string;
   common_work_name: string | null;
+  ignored: boolean;
+  effective_ignored: boolean;
   collection: FerCollectionRef;
   section: FerSectionRef | null;
   subsection: FerSectionRef | null;
@@ -399,9 +425,24 @@ export interface FerTableDetail {
   table_url: string;
   row_count: number;
   common_work_name: string | null;
+  ignored: boolean;
+  effective_ignored: boolean;
   collection: FerCollectionRef;
   section: FerSectionRef | null;
   subsection: FerSectionRef | null;
   breadcrumb: FerBreadcrumbItem[];
   rows: FerTableRow[];
+}
+
+export interface FerWordsCandidate {
+  entry_id: number;
+  fer_code: string;
+  display_name: string;
+  human_hours: number | null;
+  machine_hours: number | null;
+  matched_tokens: number;
+  exact_matches: number;
+  numeric_matches: number;
+  average_ratio: number;
+  score: number;
 }

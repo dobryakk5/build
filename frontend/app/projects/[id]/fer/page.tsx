@@ -70,6 +70,10 @@ function itemMarker(item: FerBrowseItem) {
   return "Таблица";
 }
 
+function tableIdentifier(item: FerBrowseItem) {
+  return `#${item.id}`;
+}
+
 function searchScopeLabel(scope: FerSearchResult["match_scope"]) {
   if (scope === "collection") return "Совпадение в сборнике";
   if (scope === "section") return "Совпадение в разделе";
@@ -78,6 +82,34 @@ function searchScopeLabel(scope: FerSearchResult["match_scope"]) {
   if (scope === "common_work_name") return "Совпадение в общем наименовании";
   if (scope === "row_slug") return "Совпадение в коде строки";
   return "Совпадение в тексте строки";
+}
+
+function IgnoreBadge({
+  ignored,
+  effectiveIgnored,
+}: {
+  ignored?: boolean;
+  effectiveIgnored?: boolean;
+}) {
+  if (!effectiveIgnored) {
+    return null;
+  }
+
+  return (
+    <span
+      style={{
+        fontSize: 10,
+        color: ignored ? "#991b1b" : "#b45309",
+        background: ignored ? "#ef444416" : "#f59e0b16",
+        border: `1px solid ${ignored ? "#ef444435" : "#f59e0b35"}`,
+        borderRadius: 999,
+        padding: "2px 7px",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {ignored ? "Игнор" : "Игнор по родителю"}
+    </span>
+  );
 }
 
 export default function FerPage() {
@@ -375,11 +407,15 @@ export default function FerPage() {
                     borderBottom: "1px solid var(--border)",
                     background: "transparent",
                     cursor: "pointer",
+                    opacity: item.effective_ignored ? 0.5 : 1,
                   }}
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 12, lineHeight: 1.45, color: "var(--text)" }}>{item.table_title}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 12, lineHeight: 1.45, color: "var(--text)" }}>{item.table_title}</div>
+                        <IgnoreBadge ignored={item.ignored} effectiveIgnored={item.effective_ignored} />
+                      </div>
                       <div style={{ marginTop: 5, fontSize: 11, color: "var(--muted)", lineHeight: 1.45 }}>
                         ФЕР {item.collection.num}
                         {item.section ? ` • ${item.section.title}` : ""}
@@ -449,6 +485,7 @@ export default function FerPage() {
                       borderBottom: "1px solid var(--border)",
                       background: "transparent",
                       cursor: "pointer",
+                      opacity: collection.effective_ignored ? 0.5 : 1,
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -466,6 +503,7 @@ export default function FerPage() {
                         {collection.num}
                       </span>
                       <span style={{ fontSize: 12, color: "var(--text)", flex: 1 }}>{collection.name}</span>
+                      <IgnoreBadge ignored={collection.ignored} effectiveIgnored={collection.effective_ignored} />
                     </div>
                     <div style={{ marginTop: 5, fontSize: 11, color: "var(--muted)" }}>
                       {collection.sections_count} разделов • {collection.subsections_count} подразделов • {collection.total_tables_count} таблиц
@@ -491,16 +529,37 @@ export default function FerPage() {
                     borderBottom: "1px solid var(--border)",
                     background: "transparent",
                     cursor: "pointer",
+                    opacity: item.effective_ignored ? 0.5 : 1,
                   }}
                 >
                   {item.kind === "table" ? (
                     <div
                       style={{
                         display: "flex",
-                        alignItems: "baseline",
+                        alignItems: "flex-start",
                         gap: 12,
                       }}
                     >
+                      {browse.level === "subsection" && (
+                        <span
+                          style={{
+                            flexShrink: 0,
+                            marginTop: 1,
+                            minWidth: 56,
+                            fontSize: 10,
+                            fontFamily: "var(--mono)",
+                            color: "var(--blue-dark)",
+                            background: "rgba(59,130,246,.08)",
+                            border: "1px solid rgba(59,130,246,.18)",
+                            borderRadius: 4,
+                            padding: "3px 7px",
+                            textAlign: "center",
+                            whiteSpace: "nowrap",
+                          }}
+                        >
+                          {tableIdentifier(item)}
+                        </span>
+                      )}
                       <div
                         style={{
                           flex: 1,
@@ -508,9 +567,14 @@ export default function FerPage() {
                           fontSize: 12,
                           lineHeight: 1.4,
                           color: "var(--text)",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          flexWrap: "wrap",
                         }}
                       >
-                        {item.title}
+                        <span>{item.title}</span>
+                        <IgnoreBadge ignored={item.ignored} effectiveIgnored={item.effective_ignored} />
                       </div>
                       <div
                         style={{
@@ -542,7 +606,10 @@ export default function FerPage() {
                         {itemMarker(item)}
                       </span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 12, lineHeight: 1.45, color: "var(--text)" }}>{item.title}</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <div style={{ fontSize: 12, lineHeight: 1.45, color: "var(--text)" }}>{item.title}</div>
+                          <IgnoreBadge ignored={item.ignored} effectiveIgnored={item.effective_ignored} />
+                        </div>
                         <div style={{ marginTop: 4, fontSize: 11, color: "var(--muted)" }}>{itemMeta(item)}</div>
                       </div>
                     </div>
@@ -581,6 +648,7 @@ function Breadcrumbs({
               fontSize: 11,
               color: "var(--text)",
               cursor: clickable ? "pointer" : "default",
+              opacity: item.effective_ignored ? 0.5 : 1,
             }}
           >
             {item.label}
@@ -616,7 +684,7 @@ function FerDetail({
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 1200 }}>
-      <div style={{ ...PANEL, padding: "14px 16px" }}>
+      <div style={{ ...PANEL, padding: "14px 16px", opacity: detail.effective_ignored ? 0.6 : 1 }}>
         <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
           <span
             style={{
@@ -629,6 +697,7 @@ function FerDetail({
             ФЕР {detail.collection.num}
           </span>
           <span style={{ fontSize: 15, fontWeight: 700 }}>{detail.table_title}</span>
+          <IgnoreBadge ignored={detail.ignored} effectiveIgnored={detail.effective_ignored} />
         </div>
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginTop: 8, fontSize: 12, color: "var(--muted)" }}>
           <span>Строк: <strong style={{ color: "var(--text)" }}>{detail.row_count}</strong></span>
@@ -638,7 +707,7 @@ function FerDetail({
         </div>
       </div>
 
-      <div style={PANEL}>
+      <div style={{ ...PANEL, opacity: detail.effective_ignored ? 0.6 : 1 }}>
         <div style={{ padding: "12px 16px 0", fontSize: 13, fontWeight: 600 }}>Строки таблицы</div>
         {detail.rows.length === 0 ? (
           <EmptyState label="В этой таблице нет строк" />
