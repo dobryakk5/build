@@ -6,7 +6,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { estimates, fer as ferApi } from "@/lib/api";
 import { fmtMoney } from "@/lib/dateUtils";
-import type { EstimateBatch, EstimateMaterial, EstimateRow, EstimateSummary, FerSearchResult, FerTableDetail, FerWordsCandidate } from "@/lib/types";
+import type { EstimateBatch, EstimateMaterial, EstimateRow, EstimateSummary, FerSearchResult, FerTableDetail } from "@/lib/types";
 import { useJobPoller } from "@/lib/useJobPoller";
 
 type ActFlagsPatch = {
@@ -41,7 +41,7 @@ const tableHeaders = [
   "Материалы",
   "Акты",
   "Тип работ ФЕР",
-  "ФЕР слова",
+  "ИИ",
   "Ед.",
   "Кол-во",
   "Цена за ед., ₽",
@@ -562,233 +562,43 @@ function FerCell({
   );
 }
 
-function FerWordsCell({
+function AIVectorCell({
   row,
-  onOpenModal,
+  running,
+  onRun,
 }: {
   row: EstimateRow;
-  onOpenModal: (row: EstimateRow) => void;
+  running: boolean;
+  onRun: (row: EstimateRow) => Promise<void>;
 }) {
-  const matchedCount = row.fer_words_match_count ?? 0;
-
   return (
     <td
-      onClick={() => onOpenModal(row)}
       style={{
         padding: "8px 12px",
         borderBottom: "1px solid var(--border)",
-        cursor: "pointer",
-        background: row.fer_words_entry_id ? "rgba(16,185,129,.05)" : "rgba(245,158,11,.05)",
+        textAlign: "left",
       }}
     >
-      {row.fer_words_entry_id ? (
-        <>
-          <div style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--blue-dark)", fontWeight: 700 }}>{row.fer_words_code}</div>
-          <div style={{ marginTop: 3, fontSize: 12, lineHeight: 1.35, maxWidth: 240 }}>{row.fer_words_name}</div>
-          <div style={{ marginTop: 4, display: "flex", gap: 8, flexWrap: "wrap", fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>
-            <span>совпало {matchedCount}</span>
-            <span>чел {fmtQuantity(row.fer_words_human_hours)}</span>
-            <span>маш {fmtQuantity(row.fer_words_machine_hours)}</span>
-          </div>
-        </>
-      ) : (
-        <span style={{ fontSize: 11, color: "#b45309", fontStyle: "italic", display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={{ fontSize: 13 }}>＋</span> Выбрать ФЕР слова
-        </span>
-      )}
-    </td>
-  );
-}
-
-function FerWordsReviewModal({
-  projectId,
-  row,
-  reviewIndex,
-  reviewTotal,
-  onClose,
-  onApply,
-  onSkip,
-}: {
-  projectId: string;
-  row: EstimateRow;
-  reviewIndex?: number;
-  reviewTotal?: number;
-  onClose: () => void;
-  onApply: (row: EstimateRow, candidate: FerWordsCandidate | null) => Promise<void>;
-  onSkip?: () => void;
-}) {
-  const [candidates, setCandidates] = useState<FerWordsCandidate[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [selectedId, setSelectedId] = useState<number | null>(row.fer_words_entry_id ?? null);
-
-  useEffect(() => {
-    setSelectedId(row.fer_words_entry_id ?? null);
-    setLoading(true);
-    estimates.ferWordsCandidates(projectId, row.id, 5)
-      .then((data) => setCandidates(data))
-      .catch(() => setCandidates([]))
-      .finally(() => setLoading(false));
-  }, [projectId, row.id, row.fer_words_entry_id]);
-
-  useEffect(() => {
-    const onEsc = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !saving) {
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", onEsc);
-    return () => document.removeEventListener("keydown", onEsc);
-  }, [onClose, saving]);
-
-  async function submit(candidate: FerWordsCandidate | null) {
-    setSaving(true);
-    try {
-      await onApply(row, candidate);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        background: "rgba(0,0,0,.55)",
-        zIndex: 120,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-      onClick={(event) => {
-        if (event.target === event.currentTarget && !saving) {
-          onClose();
-        }
-      }}
-    >
-      <div
+      <button
+        type="button"
+        onClick={() => onRun(row)}
+        disabled={running}
         style={{
-          width: 760,
-          maxHeight: "86vh",
-          background: "var(--surface)",
-          borderRadius: 12,
-          display: "flex",
-          flexDirection: "column",
-          boxShadow: "0 24px 64px rgba(0,0,0,.28)",
-          overflow: "hidden",
+          border: "none",
+          background: "transparent",
+          padding: 0,
+          margin: 0,
+          color: running ? "var(--muted)" : "var(--blue-dark)",
+          cursor: running ? "default" : "pointer",
+          fontSize: 12,
+          fontWeight: 700,
+          textDecoration: "underline",
+          opacity: running ? 0.7 : 1,
         }}
       >
-        <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: 16 }}>
-          <div>
-            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>ФЕР слова</div>
-            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.45 }}>
-              Строка сметы: <strong style={{ color: "var(--text)" }}>{row.work_name}</strong>
-            </div>
-            {reviewTotal != null && reviewTotal > 0 && (
-              <div style={{ marginTop: 6, fontSize: 11, color: "#b45309" }}>
-                Требуется подтверждение: {reviewIndex ?? 1} из {reviewTotal}
-              </div>
-            )}
-          </div>
-          <button onClick={onClose} disabled={saving} style={{ background: "none", border: "none", cursor: saving ? "default" : "pointer", color: "var(--muted)", fontSize: 18, lineHeight: 1 }}>
-            ✕
-          </button>
-        </div>
-
-        <div style={{ padding: "12px 20px", borderBottom: "1px solid var(--border)", fontSize: 11, color: "var(--muted)" }}>
-          Выберите строку из загруженной таблицы `ФЕР слова`. Совпадение считается по словам и похожим формулировкам.
-        </div>
-
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          {loading ? (
-            <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Подбираю варианты...</div>
-          ) : candidates.length === 0 ? (
-            <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Подходящих строк в таблице не найдено</div>
-          ) : (
-            candidates.map((candidate) => {
-              const active = selectedId === candidate.entry_id;
-              return (
-                <label
-                  key={candidate.entry_id}
-                  style={{
-                    display: "block",
-                    padding: "12px 20px",
-                    borderBottom: "1px solid var(--border)",
-                    cursor: "pointer",
-                    background: active ? "rgba(16,185,129,.06)" : "transparent",
-                  }}
-                >
-                  <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
-                    <input
-                      type="radio"
-                      name="fer-words-candidate"
-                      checked={active}
-                      onChange={() => setSelectedId(candidate.entry_id)}
-                      style={{ marginTop: 3 }}
-                    />
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 11, fontFamily: "var(--mono)", color: "var(--blue-dark)", fontWeight: 700 }}>{candidate.fer_code}</span>
-                        <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>
-                          {`совпало ${candidate.matched_tokens} — ${candidate.matched_words.join(", ")}`}
-                        </span>
-                      </div>
-                      <div style={{ marginTop: 5, fontSize: 12, lineHeight: 1.45 }}>{candidate.display_name}</div>
-                      <div style={{ marginTop: 6, display: "flex", gap: 10, flexWrap: "wrap", fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>
-                        <span>чел {fmtQuantity(candidate.human_hours)}</span>
-                        <span>маш {fmtQuantity(candidate.machine_hours)}</span>
-                        <span>score {(candidate.average_ratio * 100).toFixed(0)}%</span>
-                      </div>
-                    </div>
-                  </div>
-                </label>
-              );
-            })
-          )}
-        </div>
-
-        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {onSkip && (
-              <button
-                onClick={onSkip}
-                disabled={saving}
-                style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", cursor: saving ? "default" : "pointer", fontSize: 12 }}
-              >
-                Пропустить
-              </button>
-            )}
-            {row.fer_words_entry_id && (
-              <button
-                onClick={() => submit(null)}
-                disabled={saving}
-                style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #ef444430", background: "#fef2f2", color: "#b91c1c", cursor: saving ? "default" : "pointer", fontSize: 12, fontWeight: 600 }}
-              >
-                Сбросить
-              </button>
-            )}
-          </div>
-          <button
-            onClick={() => submit(candidates.find((candidate) => candidate.entry_id === selectedId) ?? null)}
-            disabled={saving || (!selectedId && !row.fer_words_entry_id)}
-            style={{
-              padding: "8px 14px",
-              borderRadius: 8,
-              border: "1px solid rgba(16,185,129,.22)",
-              background: "rgba(16,185,129,.08)",
-              color: "#047857",
-              cursor: saving ? "default" : "pointer",
-              fontSize: 12,
-              fontWeight: 700,
-              opacity: saving ? 0.7 : 1,
-            }}
-          >
-            {saving ? "Сохраняем..." : "Применить"}
-          </button>
-        </div>
-      </div>
-    </div>
+        {running ? "ИИ..." : "ИИ"}
+      </button>
+    </td>
   );
 }
 
@@ -805,19 +615,14 @@ export default function EstimatePage() {
   const [loading, setLoading] = useState(true);
   const [matchJobId, setMatchJobId] = useState<string | null>(null);
   const [runningBatchId, setRunningBatchId] = useState<string | null>(null);
-  const [matchWordsJobId, setMatchWordsJobId] = useState<string | null>(null);
-  const [runningWordsBatchId, setRunningWordsBatchId] = useState<string | null>(null);
   const [batchError, setBatchError] = useState<string | null>(null);
   const [estimateError, setEstimateError] = useState<string | null>(null);
   const [popup, setPopup] = useState<PopupState | null>(null);
   const [savingActsId, setSavingActsId] = useState<string | null>(null);
   const [ferModalRow, setFerModalRow] = useState<EstimateRow | null>(null);
-  const [ferWordsModalRow, setFerWordsModalRow] = useState<EstimateRow | null>(null);
-  const [ferWordsReviewQueue, setFerWordsReviewQueue] = useState<string[]>([]);
-  const [ferWordsReviewIndex, setFerWordsReviewIndex] = useState(0);
+  const [runningAiRowId, setRunningAiRowId] = useState<string | null>(null);
 
   const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
-  const { job: matchWordsJob, loading: matchingWords } = useJobPoller(matchWordsJobId);
 
   const loadBatches = useCallback(async () => {
     setBatchError(null);
@@ -875,47 +680,9 @@ export default function EstimatePage() {
     }
   }, [activeBatchId, loadBatches, loadEstimateData, matchJob?.status]);
 
-  useEffect(() => {
-    if (matchWordsJob?.status === "done" && activeBatchId) {
-      loadBatches().catch(() => {});
-      loadEstimateData(activeBatchId).catch(() => {});
-      setRunningWordsBatchId(null);
-      const reviewIds = matchWordsJob.result?.review_estimate_ids ?? [];
-      if (reviewIds.length) {
-        setFerWordsReviewQueue(reviewIds);
-        setFerWordsReviewIndex(0);
-      } else {
-        setFerWordsReviewQueue([]);
-        setFerWordsReviewIndex(0);
-      }
-    }
-    if (matchWordsJob?.status === "failed") {
-      setRunningWordsBatchId(null);
-    }
-  }, [activeBatchId, loadBatches, loadEstimateData, matchWordsJob?.result?.review_estimate_ids, matchWordsJob?.status]);
-
-  useEffect(() => {
-    if (!ferWordsReviewQueue.length) {
-      return;
-    }
-    const currentRowId = ferWordsReviewQueue[ferWordsReviewIndex];
-    if (!currentRowId) {
-      setFerWordsReviewQueue([]);
-      setFerWordsReviewIndex(0);
-      return;
-    }
-    const nextRow = rows.find((row) => row.id === currentRowId) ?? null;
-    if (nextRow) {
-      setFerWordsModalRow(nextRow);
-    }
-  }, [ferWordsReviewIndex, ferWordsReviewQueue, rows]);
-
   const selectBatch = (batchId: string) => {
     setActiveBatchId(batchId);
     setPopup(null);
-    setFerWordsModalRow(null);
-    setFerWordsReviewQueue([]);
-    setFerWordsReviewIndex(0);
     router.replace(`/projects/${id}/estimate?batch=${batchId}`);
   };
 
@@ -928,19 +695,6 @@ export default function EstimatePage() {
       setMatchJobId(result.job_id);
     } catch (error: any) {
       setRunningBatchId(null);
-      alert(error.message);
-    }
-  };
-
-  const handleMatchFerWords = async (batchId: string) => {
-    try {
-      setRunningWordsBatchId(batchId);
-      setFerWordsReviewQueue([]);
-      setFerWordsReviewIndex(0);
-      const result = await estimates.matchFerWords(id, batchId);
-      setMatchWordsJobId(result.job_id);
-    } catch (error: any) {
-      setRunningWordsBatchId(null);
       alert(error.message);
     }
   };
@@ -988,53 +742,28 @@ export default function EstimatePage() {
     }
   };
 
-  const handleFerWordsSelect = async (selectedRow: EstimateRow, candidate: FerWordsCandidate | null) => {
-    const patch = candidate ? { entry_id: candidate.entry_id } : { entry_id: null };
-
+  const handleAIVectorMatch = async (selectedRow: EstimateRow) => {
     try {
-      const result = await estimates.updateFerWords(id, selectedRow.id, patch);
+      setRunningAiRowId(selectedRow.id);
+      const result = await estimates.matchFerVectorRow(id, selectedRow.id);
       setRows((current) =>
         current.map((row) =>
           row.id === selectedRow.id
             ? {
                 ...row,
-                fer_words_entry_id: result.fer_words_entry_id,
-                fer_words_code: result.fer_words_code,
-                fer_words_name: result.fer_words_name,
-                fer_words_human_hours: result.fer_words_human_hours,
-                fer_words_machine_hours: result.fer_words_machine_hours,
-                fer_words_match_score: result.fer_words_match_score,
-                fer_words_match_count: result.fer_words_match_count,
+                fer_table_id: result.fer_table_id,
+                fer_work_type: result.fer_work_type,
+                fer_match_score: result.fer_match_score,
               }
             : row,
         ),
       );
       loadBatches().catch(() => {});
-
-      if (ferWordsReviewQueue.length) {
-        if (ferWordsReviewIndex + 1 < ferWordsReviewQueue.length) {
-          setFerWordsReviewIndex((current) => current + 1);
-        } else {
-          setFerWordsReviewQueue([]);
-          setFerWordsReviewIndex(0);
-          setFerWordsModalRow(null);
-        }
-      } else {
-        setFerWordsModalRow(null);
-      }
     } catch (error: any) {
       alert(error.message);
+    } finally {
+      setRunningAiRowId(null);
     }
-  };
-
-  const handleSkipFerWordsReview = () => {
-    if (ferWordsReviewIndex + 1 < ferWordsReviewQueue.length) {
-      setFerWordsReviewIndex((current) => current + 1);
-      return;
-    }
-    setFerWordsReviewQueue([]);
-    setFerWordsReviewIndex(0);
-    setFerWordsModalRow(null);
   };
 
   if (loading) {
@@ -1118,51 +847,30 @@ export default function EstimatePage() {
           ))}
         </div>
         {activeBatch && (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              onClick={() => handleMatchFer(activeBatch.id)}
-              disabled={matching}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: "1px solid var(--border2)",
-                background: matching && runningBatchId === activeBatch.id ? "rgba(59,130,246,.08)" : "var(--surface)",
-                cursor: matching ? "default" : "pointer",
-                fontSize: 12,
-                fontWeight: 600,
-                opacity: matching ? 0.7 : 1,
-                whiteSpace: "nowrap",
-              }}
-            >
-              {matching && runningBatchId === activeBatch.id ? "Векторно сопоставляем с ФЕР..." : "Векторно сопоставить с ФЕР"}
-            </button>
-            <button
-              onClick={() => handleMatchFerWords(activeBatch.id)}
-              disabled={matchingWords}
-              style={{
-                padding: "8px 14px",
-                borderRadius: 8,
-                border: "1px solid rgba(16,185,129,.24)",
-                background: matchingWords && runningWordsBatchId === activeBatch.id ? "rgba(16,185,129,.08)" : "rgba(16,185,129,.04)",
-                cursor: matchingWords ? "default" : "pointer",
-                fontSize: 12,
-                fontWeight: 700,
-                opacity: matchingWords ? 0.7 : 1,
-                whiteSpace: "nowrap",
-                color: "#047857",
-              }}
-            >
-              {matchingWords && runningWordsBatchId === activeBatch.id ? "Сопоставляем по ФЕР слова..." : "ФЕР слова"}
-            </button>
-          </div>
+          <button
+            onClick={() => handleMatchFer(activeBatch.id)}
+            disabled={matching}
+            style={{
+              padding: "8px 14px",
+              borderRadius: 8,
+              border: "1px solid var(--border2)",
+              background: matching && runningBatchId === activeBatch.id ? "rgba(59,130,246,.08)" : "var(--surface)",
+              cursor: matching ? "default" : "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              opacity: matching ? 0.7 : 1,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {matching && runningBatchId === activeBatch.id ? "Векторно сопоставляем с ФЕР..." : "Векторно сопоставить с ФЕР"}
+          </button>
         )}
       </div>
 
       {activeBatch && (
         <div style={{ marginBottom: 12, fontSize: 12, color: "var(--muted)" }}>
           ФЕР размечено: <b style={{ color: "var(--text)" }}>{activeBatch.fer_matched_count}</b> из <b style={{ color: "var(--text)" }}>{activeBatch.estimates_count}</b>
-          <span style={{ marginLeft: 10, color: "var(--muted)" }}>· ФЕР слова: <b style={{ color: "var(--text)" }}>{activeBatch.fer_words_matched_count}</b></span>
-          <span style={{ marginLeft: 10, color: "var(--muted)" }}>· кликните на ячейку ФЕР или ФЕР слова для ручного выбора</span>
+          <span style={{ marginLeft: 10, color: "var(--muted)" }}>· кнопка ИИ в строке запускает векторную сверку по этой работе</span>
         </div>
       )}
 
@@ -1175,30 +883,16 @@ export default function EstimatePage() {
         <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.18)", fontSize: 12, color: "#166534" }}>
           Сопоставление завершено: найден тип ФЕР для {matchJob.result.matched_rows_count ?? 0} строк
           {typeof matchJob.result.low_confidence_count === "number" ? `, из них ${matchJob.result.low_confidence_count} с низкой уверенностью.` : "."}
+          {matchJob.result.strategy ? ` Стратегия: ${matchJob.result.strategy}.` : ""}
+          {typeof matchJob.result.normalized_rows_count === "number" ? ` Нормализовано: ${matchJob.result.normalized_rows_count}.` : ""}
+          {typeof matchJob.result.reranked_rows_count === "number" ? ` Rerank: ${matchJob.result.reranked_rows_count}.` : ""}
+          {typeof matchJob.result.rerank_corrected_count === "number" ? ` Исправлено rerank: ${matchJob.result.rerank_corrected_count}.` : ""}
+          {typeof matchJob.result.fallback_rows_count === "number" ? ` Fallback: ${matchJob.result.fallback_rows_count}.` : ""}
         </div>
       )}
       {matchStatus === "failed" && (
         <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.18)", fontSize: 12, color: "var(--red)" }}>
           Не удалось выполнить сопоставление с ФЕР: {matchJob?.result?.error ?? "неизвестная ошибка"}.
-        </div>
-      )}
-
-      {matchWordsJob?.status === "processing" && (
-        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(16,185,129,.06)", border: "1px solid rgba(16,185,129,.18)", fontSize: 12, color: "#047857" }}>
-          Идёт сопоставление по таблице ФЕР слова.
-        </div>
-      )}
-      {matchWordsJob?.status === "done" && matchWordsJob.result && (
-        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(16,185,129,.06)", border: "1px solid rgba(16,185,129,.18)", fontSize: 12, color: "#047857" }}>
-          ФЕР слова: автоматически сопоставлено {matchWordsJob.result.matched_rows_count ?? 0} строк
-          {typeof matchWordsJob.result.review_rows_count === "number" && matchWordsJob.result.review_rows_count > 0
-            ? `, ещё ${matchWordsJob.result.review_rows_count} требуют ручного выбора.`
-            : "."}
-        </div>
-      )}
-      {matchWordsJob?.status === "failed" && (
-        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.18)", fontSize: 12, color: "var(--red)" }}>
-          Не удалось выполнить сопоставление по ФЕР слова: {matchWordsJob?.result?.error ?? "неизвестная ошибка"}.
         </div>
       )}
 
@@ -1227,7 +921,7 @@ export default function EstimatePage() {
                   key={header}
                   style={{
                     padding: "9px 12px",
-                    textAlign: ["Наименование работ", "Материалы", "Тип работ ФЕР", "ФЕР слова"].includes(header) ? "left" : "right",
+                    textAlign: ["Наименование работ", "Материалы", "Тип работ ФЕР", "ИИ"].includes(header) ? "left" : "right",
                     fontSize: 10,
                     color: "#94a3b8",
                     textTransform: "uppercase",
@@ -1274,7 +968,7 @@ export default function EstimatePage() {
                     <ActsCell row={row} onOpen={handleOpenActs} />
                   </td>
                   <FerCell row={row} onOpenModal={setFerModalRow} />
-                  <FerWordsCell row={row} onOpenModal={setFerWordsModalRow} />
+                  <AIVectorCell row={row} running={runningAiRowId === row.id} onRun={handleAIVectorMatch} />
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtQuantity(row.quantity)}</td>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtMoney(row.unit_price ?? 0)}</td>
@@ -1306,21 +1000,6 @@ export default function EstimatePage() {
       </div>
 
       {ferModalRow && <FerSearchModal row={ferModalRow} onClose={() => setFerModalRow(null)} onSelect={(result) => handleFerSelect(ferModalRow, result)} />}
-      {ferWordsModalRow && (
-        <FerWordsReviewModal
-          projectId={id}
-          row={ferWordsModalRow}
-          reviewIndex={ferWordsReviewQueue.length ? ferWordsReviewIndex + 1 : undefined}
-          reviewTotal={ferWordsReviewQueue.length || undefined}
-          onClose={() => {
-            setFerWordsModalRow(null);
-            setFerWordsReviewQueue([]);
-            setFerWordsReviewIndex(0);
-          }}
-          onApply={handleFerWordsSelect}
-          onSkip={ferWordsReviewQueue.length ? handleSkipFerWordsReview : undefined}
-        />
-      )}
     </div>
   );
 }

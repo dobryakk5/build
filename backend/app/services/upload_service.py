@@ -59,7 +59,7 @@ async def start_upload_job(
     user_id:          str,
     start_date:       date,
     workers:          int,
-    estimate_kind:    str,
+    estimate_kind:    int,
     complex_mode:     bool,
     db:               AsyncSession,
 ) -> Job:
@@ -118,7 +118,7 @@ async def start_upload_job_with_mapping(
     user_id:    str,
     start_date: date,
     workers:    int,
-    estimate_kind: str,
+    estimate_kind: int,
     complex_mode: bool,
     db:         AsyncSession,
 ) -> Job:
@@ -155,7 +155,7 @@ async def _create_and_run_job(
     user_id:     str,
     start_date:  date,
     workers:     int,
-    estimate_kind: str,
+    estimate_kind: int,
     complex_mode: bool,
     db:          AsyncSession,
     col_mapping: dict[int, str] | None = None,
@@ -206,7 +206,7 @@ async def _process_upload(job_id: str) -> None:
         try:
             start_date  = date.fromisoformat(job.input["start_date"])
             workers     = int(job.input["workers"])
-            estimate_kind = str(job.input["estimate_kind"])
+            estimate_kind = int(job.input["estimate_kind"])
             complex_mode = bool(job.input.get("complex_mode"))
             col_mapping = job.input.get("col_mapping")   # None → авто
             sheet       = job.input.get("sheet")

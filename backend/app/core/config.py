@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     EMBEDDING_BASE_URL: str = "https://openrouter.ai/api/v1"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIM: int = 1536
+    NORMALIZATION_MODEL: str = "openai/gpt-4o-mini"
+    RERANK_MODEL: str = "openai/gpt-4o"
+    HYBRID_VECTOR_WEIGHT: float = 0.65
+    HYBRID_FTS_WEIGHT: float = 0.35
+    RERANK_ENABLED: bool = False
+    RERANK_SCORE_THRESHOLD: float = 0.72
+    RERANK_GAP_THRESHOLD: float = 0.05
+    RERANK_CANDIDATE_COUNT: int = 20
 
     # Token lifetimes
     EMAIL_VERIFICATION_EXPIRE_HOURS: int = 24

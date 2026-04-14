@@ -8,19 +8,39 @@ import { fmtMoney } from "@/lib/dateUtils";
 import type { EstimateBatch } from "@/lib/types";
 import { useJobPoller } from "@/lib/useJobPoller";
 
-type EstimateKind = "country_house" | "apartment" | "non_residential";
+const KIND_OPTIONS = [
+  { id: 1, title: "Земляные грунтовые работы" },
+  { id: 2, title: "Строительство жилого помещения" },
+  { id: 3, title: "Строительство нежилого помещения" },
+  { id: 4, title: "Реконструкция нежилого помещения" },
+  { id: 5, title: "Отделка жилого помещения" },
+  { id: 6, title: "Отделка нежилого помещения" },
+  { id: 7, title: "Инженерные работы внутренние" },
+  { id: 8, title: "Инженерные работы наружные" },
+  { id: 9, title: "Ландшафтные работы" },
+] as const;
 
-const KIND_OPTIONS: Array<{ id: EstimateKind; title: string; desc: string }> = [
-  { id: "country_house", title: "Загородный дом", desc: "Коттеджи, таунхаусы, частные дома" },
-  { id: "apartment", title: "Квартира", desc: "Отделка и инженерия внутри квартиры" },
-  { id: "non_residential", title: "Нежилой объект", desc: "Офисы, ТЦ, склады, коммерческие помещения" },
-];
+type EstimateKind = (typeof KIND_OPTIONS)[number]["id"];
 
-const KIND_LABEL: Record<EstimateKind, string> = {
-  country_house: "Загородный дом",
-  apartment: "Квартира",
-  non_residential: "Нежилой объект",
+const KIND_LABEL = Object.fromEntries(
+  KIND_OPTIONS.map((option) => [option.id, `${option.id}. ${option.title}`]),
+) as Record<EstimateKind, string>;
+
+const LEGACY_KIND_LABEL: Record<string, string> = {
+  country_house: KIND_LABEL[2],
+  apartment: KIND_LABEL[2],
+  non_residential: KIND_LABEL[3],
 };
+
+function formatEstimateKind(kind: number | string | null | undefined) {
+  if (typeof kind === "number" && kind in KIND_LABEL) {
+    return KIND_LABEL[kind as EstimateKind];
+  }
+  if (typeof kind === "string" && kind in LEGACY_KIND_LABEL) {
+    return LEGACY_KIND_LABEL[kind];
+  }
+  return "—";
+}
 
 export default function UploadPage() {
   const { id } = useParams<{ id: string }>();
@@ -31,7 +51,7 @@ export default function UploadPage() {
   const [drag, setDrag] = useState(false);
   const [startDate, setStartDate] = useState(new Date().toISOString().split("T")[0]);
   const [workers, setWorkers] = useState(3);
-  const [estimateKind, setEstimateKind] = useState<EstimateKind>("country_house");
+  const [estimateKind, setEstimateKind] = useState<EstimateKind | null>(null);
   const [complexMode, setComplexMode] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -42,6 +62,7 @@ export default function UploadPage() {
 
   const { job, loading: polling } = useJobPoller(jobId);
   const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
+  const canUpload = estimateKind !== null;
 
   const loadBatches = useCallback(async () => {
     if (!id) return;
@@ -77,15 +98,18 @@ export default function UploadPage() {
   }, [loadBatches, matchJob?.status]);
 
   const handleDrop = useCallback((files: FileList | null) => {
-    const f = files?.[0];
-    if (f && (f.name.endsWith(".xlsx") || f.name.endsWith(".xls") || f.name.endsWith(".pdf"))) {
-      setFile(f);
+    if (!canUpload) return;
+
+    const nextFile = files?.[0];
+    if (nextFile && (nextFile.name.endsWith(".xlsx") || nextFile.name.endsWith(".xls") || nextFile.name.endsWith(".pdf"))) {
+      setFile(nextFile);
       setJobId(null);
     }
-  }, []);
+  }, [canUpload]);
 
   async function handleUpload() {
-    if (!file) return;
+    if (!file || !estimateKind) return;
+
     setUploading(true);
     try {
       const res = await estimates.upload(id, file, startDate, workers, estimateKind, complexMode);
@@ -97,10 +121,6 @@ export default function UploadPage() {
     }
   }
 
-  const status = job?.status;
-  const result = job?.result;
-  const matchStatus = matchJob?.status;
-
   async function handleMatchFer(batchId: string) {
     try {
       setRunningBatchId(batchId);
@@ -111,6 +131,10 @@ export default function UploadPage() {
       alert(e.message);
     }
   }
+
+  const status = job?.status;
+  const result = job?.result;
+  const matchStatus = matchJob?.status;
 
   return (
     <div
@@ -126,7 +150,7 @@ export default function UploadPage() {
         <div>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>Загрузка сметы</h2>
           <div style={{ fontSize: 12, color: "var(--muted)", maxWidth: 620 }}>
-            Сначала определите тип сметы, затем загрузите файл. В режиме <b style={{ color: "var(--text)" }}>Комплекс</b> новая смета добавится как отдельный блок работ внутри этого объекта.
+            Сначала выберите тип объекта, затем загрузите файл. В режиме <b style={{ color: "var(--text)" }}>Комплекс</b> новая смета добавится как отдельный блок работ внутри этого объекта.
           </div>
         </div>
         <label
@@ -151,28 +175,50 @@ export default function UploadPage() {
         </label>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 12, marginBottom: 16 }}>
-        {KIND_OPTIONS.map((option) => {
-          const active = estimateKind === option.id;
-          return (
-            <button
-              key={option.id}
-              type="button"
-              onClick={() => setEstimateKind(option.id)}
-              style={{
-                textAlign: "left",
-                padding: "16px 16px 14px",
-                borderRadius: 10,
-                border: active ? "1px solid var(--blue)" : "1px solid var(--border)",
-                background: active ? "rgba(59,130,246,.06)" : "var(--surface)",
-                cursor: "pointer",
-              }}
-            >
-              <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{option.title}</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.45 }}>{option.desc}</div>
-            </button>
-          );
-        })}
+      <div style={{ display: "grid", gap: 18, marginBottom: 20 }}>
+        <div>
+          <label
+            htmlFor="estimate-kind"
+            style={{
+              display: "block",
+              marginBottom: 8,
+              fontSize: 14,
+              fontWeight: 600,
+            }}
+          >
+            1. Выберите тип объекта
+          </label>
+          <select
+            id="estimate-kind"
+            value={estimateKind ?? ""}
+            onChange={(e) => setEstimateKind(e.target.value ? Number(e.target.value) as EstimateKind : null)}
+            style={{
+              width: "100%",
+              padding: "11px 12px",
+              border: "1px solid var(--border2)",
+              borderRadius: 8,
+              background: "var(--surface)",
+              fontSize: 14,
+              outline: "none",
+            }}
+          >
+            <option value="">Выберите тип объекта</option>
+            {KIND_OPTIONS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {KIND_LABEL[option.id]}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <div style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
+            2. Загрузите смету
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>
+            До выбора типа объекта загрузка файла неактивна.
+          </div>
+        </div>
       </div>
 
       <div
@@ -194,18 +240,18 @@ export default function UploadPage() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
         {[
           { label: "Дата начала работ", type: "date", value: startDate, set: setStartDate },
-          { label: "Рабочих в бригаде", type: "number", value: workers, set: (v: any) => setWorkers(+v) },
-        ].map((f) => (
-          <div key={f.label}>
+          { label: "Рабочих в бригаде", type: "number", value: workers, set: (value: string) => setWorkers(+value) },
+        ].map((field) => (
+          <div key={field.label}>
             <label style={{ fontSize: 11, color: "var(--muted)", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: ".06em" }}>
-              {f.label}
+              {field.label}
             </label>
             <input
-              type={f.type}
-              value={f.value}
-              onChange={(e) => f.set(e.target.value)}
-              min={f.type === "number" ? 1 : undefined}
-              max={f.type === "number" ? 20 : undefined}
+              type={field.type}
+              value={field.value}
+              onChange={(e) => field.set(e.target.value)}
+              min={field.type === "number" ? 1 : undefined}
+              max={field.type === "number" ? 20 : undefined}
               style={{ width: "100%", padding: "8px 12px", border: "1px solid var(--border2)", borderRadius: 5, fontSize: 13, outline: "none" }}
             />
           </div>
@@ -214,47 +260,57 @@ export default function UploadPage() {
 
       {!status && (
         <div
-          onClick={() => fileRef.current?.click()}
+          onClick={() => {
+            if (canUpload) {
+              fileRef.current?.click();
+            }
+          }}
           onDragOver={(e) => {
+            if (!canUpload) return;
             e.preventDefault();
             setDrag(true);
           }}
           onDragLeave={() => setDrag(false)}
           onDrop={(e) => {
+            if (!canUpload) return;
             e.preventDefault();
             setDrag(false);
             handleDrop(e.dataTransfer.files);
           }}
           style={{
-            border: `2px dashed ${drag ? "var(--blue)" : file ? "#22c55e" : "var(--border2)"}`,
+            border: `2px dashed ${!canUpload ? "var(--border)" : drag ? "var(--blue)" : file ? "#22c55e" : "var(--border2)"}`,
             borderRadius: 8,
             padding: "40px 24px",
             textAlign: "center",
-            cursor: "pointer",
-            background: drag ? "rgba(59,130,246,.04)" : file ? "rgba(34,197,94,.04)" : "var(--surface)",
+            cursor: canUpload ? "pointer" : "not-allowed",
+            background: !canUpload ? "rgba(148,163,184,.08)" : drag ? "rgba(59,130,246,.04)" : file ? "rgba(34,197,94,.04)" : "var(--surface)",
             transition: "all .15s",
+            opacity: canUpload ? 1 : 0.7,
           }}
         >
           <input
             ref={fileRef}
             type="file"
             accept=".xlsx,.xls,.pdf"
+            disabled={!canUpload}
             style={{ display: "none" }}
             onChange={(e) => handleDrop(e.target.files)}
           />
-          <div style={{ fontSize: 36, marginBottom: 10 }}>{file ? "📊" : "⬆"}</div>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>{file ? "📊" : canUpload ? "⬆" : "🔒"}</div>
           <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
-            {file ? file.name : "Перетащите смету сюда"}
+            {file ? file.name : canUpload ? "Перетащите смету сюда" : "Сначала выберите тип объекта"}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
             {file
               ? `${(file.size / 1024).toFixed(1)} KB · нажмите для замены`
-              : "Поддерживаются .xlsx, .xls, .pdf · ГрандСмета, CourtDoc, PDF-сметы"}
+              : canUpload
+                ? "Поддерживаются .xlsx, .xls, .pdf · ГрандСмета, CourtDoc, PDF-сметы"
+                : "После выбора типа объекта поле загрузки станет активным"}
           </div>
         </div>
       )}
 
-      {file && !status && (
+      {file && !status && canUpload && (
         <button
           onClick={handleUpload}
           disabled={uploading || polling}
@@ -291,13 +347,13 @@ export default function UploadPage() {
           <div style={{ display: "flex", gap: 20, fontSize: 12, color: "var(--muted)", flexWrap: "wrap" }}>
             {[
               ["Блок", result.estimate_batch_name],
-              ["Тип", KIND_LABEL[(result.estimate_kind as EstimateKind) ?? estimateKind] ?? "—"],
+              ["Тип", formatEstimateKind(result.estimate_kind ?? estimateKind)],
               ["Позиций сметы", result.estimates_count],
               ["Задач в графике", result.gantt_tasks_count],
               ["Сумма", result.total_price ? `${fmtMoney(result.total_price)} ₽` : "—"],
-            ].map(([l, v]) => (
-              <span key={l as string}>
-                {l}: <b style={{ color: "var(--text)", fontFamily: "var(--mono)" }}>{v}</b>
+            ].map(([label, value]) => (
+              <span key={label as string}>
+                {label}: <b style={{ color: "var(--text)", fontFamily: "var(--mono)" }}>{value}</b>
               </span>
             ))}
           </div>
@@ -355,6 +411,19 @@ export default function UploadPage() {
             {typeof matchJob.result.low_confidence_count === "number"
               ? ` · низкая уверенность: ${matchJob.result.low_confidence_count}`
               : ""}
+            {matchJob.result.strategy ? ` · стратегия: ${matchJob.result.strategy}` : ""}
+            {typeof matchJob.result.normalized_rows_count === "number"
+              ? ` · нормализовано: ${matchJob.result.normalized_rows_count}`
+              : ""}
+            {typeof matchJob.result.reranked_rows_count === "number"
+              ? ` · rerank: ${matchJob.result.reranked_rows_count}`
+              : ""}
+            {typeof matchJob.result.rerank_corrected_count === "number"
+              ? ` · исправлено rerank: ${matchJob.result.rerank_corrected_count}`
+              : ""}
+            {typeof matchJob.result.fallback_rows_count === "number"
+              ? ` · fallback: ${matchJob.result.fallback_rows_count}`
+              : ""}
           </div>
         </div>
       )}
@@ -395,7 +464,7 @@ export default function UploadPage() {
                 <div>
                   <div style={{ fontSize: 13, fontWeight: 600 }}>{batch.name}</div>
                   <div style={{ marginTop: 4, fontSize: 11, color: "var(--muted)" }}>
-                    {KIND_LABEL[(batch.estimate_kind as EstimateKind) ?? "non_residential"] ?? batch.estimate_kind}
+                    {formatEstimateKind(batch.estimate_kind)}
                     {batch.source_filename ? ` · ${batch.source_filename}` : ""}
                   </div>
                 </div>

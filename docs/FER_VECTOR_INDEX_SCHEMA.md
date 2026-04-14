@@ -40,6 +40,7 @@ Columns:
 - `source_field varchar(32) not null`
 - `source_text text not null`
 - `search_text text not null`
+- `fts_document tsvector null`
 - `embedding fer.vector(1536) not null`
 - `provider varchar(32) not null`
 - `model varchar(128) not null`
@@ -52,6 +53,7 @@ Columns:
 - Unique: `(entity_kind, entity_id, source_field, model)`
 - B-tree: `(entity_kind, entity_id)`
 - B-tree: `(collection_id, section_id, subsection_id, table_id, row_id)`
+- GIN: `(fts_document)`
 - Vector index: `hnsw (embedding fer.vector_cosine_ops)`
 
 Note:
@@ -76,3 +78,17 @@ For pilot row embeddings:
 5. `Уточнение: {clarification}`
 
 This keeps the exact clarification as the target text while preserving FER context for retrieval.
+
+## Hybrid Search
+
+`fts_document` stores a Russian full-text index built from the same enriched retrieval text used for embeddings.
+
+Hybrid matching combines:
+
+1. vector similarity over `embedding`
+2. full-text rank over `fts_document`
+
+Default score formula in the matcher:
+
+- `0.65 * vec_score`
+- `0.35 * fts_score`

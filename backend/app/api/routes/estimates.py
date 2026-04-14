@@ -14,7 +14,7 @@ from app.api.deps         import require_action, get_db, get_current_user
 from app.core.permissions import Action
 from app.models           import Estimate, EstimateBatch, FerWordsEntry, GanttTask, ProjectMember
 from app.schemas          import EstimateBatchResponse, EstimateRow, EstimateSummary, JobStartResponse, UploadStartResponse, JobResponse
-from app.services.estimate_fer_matcher import start_fer_match_job
+from app.services.estimate_fer_matcher import match_estimate_with_vector, start_fer_match_job
 from app.services.fer_words_service import (
     apply_fer_words_choice,
     build_estimate_fer_words_text,
@@ -33,7 +33,7 @@ async def upload_estimate(
     file:             UploadFile = File(...),
     start_date:       date       = Query(default_factory=date.today),
     workers:          int        = Query(default=3, ge=1, le=20),
-    estimate_kind:    str        = Query(pattern="^(country_house|apartment|non_residential)$"),
+    estimate_kind:    int        = Query(ge=1, le=9),
     complex_mode:     bool       = Query(default=False),
     current_user      = Depends(get_current_user),
     member: ProjectMember = Depends(require_action(Action.EDIT)),
@@ -68,7 +68,7 @@ class ConfirmMappingRequest(BaseModel):
     col_mapping: dict[int, str]   # {col_0based: "work_name"|"unit"|...|"skip"}
     start_date:  date
     workers:     int = 3
-    estimate_kind: str
+    estimate_kind: int
     complex_mode: bool = False
 
 
@@ -352,6 +352,39 @@ async def update_estimate_fer(
         est.fer_table_id = int(table_row["id"])
         est.fer_work_type = work_type
         est.fer_match_score = 1.0
+        est.fer_matched_at = datetime.now(timezone.utc)
+
+    await db.commit()
+    return {
+        "id": est.id,
+        "fer_table_id": est.fer_table_id,
+        "fer_work_type": est.fer_work_type,
+        "fer_match_score": float(est.fer_match_score) if est.fer_match_score is not None else None,
+        "fer_matched_at": est.fer_matched_at.isoformat() if est.fer_matched_at else None,
+    }
+
+
+@router.post("/estimates/{estimate_id}/match-fer-vector")
+async def match_estimate_fer_vector(
+    project_id: UUID,
+    estimate_id: UUID,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    match = await match_estimate_with_vector(db, est)
+    if match is None:
+        est.fer_table_id = None
+        est.fer_work_type = None
+        est.fer_match_score = None
+        est.fer_matched_at = None
+    else:
+        est.fer_table_id = match.table_id
+        est.fer_work_type = match.work_type
+        est.fer_match_score = round(match.score, 4)
         est.fer_matched_at = datetime.now(timezone.utc)
 
     await db.commit()

@@ -42,7 +42,7 @@ export interface EstimateBatch {
   id: string;
   project_id: string;
   name: string;
-  estimate_kind: "country_house" | "apartment" | "non_residential" | string;
+  estimate_kind: number;
   source_filename?: string | null;
   estimates_count: number;
   gantt_tasks_count: number;

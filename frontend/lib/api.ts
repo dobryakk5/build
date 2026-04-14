@@ -181,6 +181,10 @@ export const estimates = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  matchFerVectorRow: (pid: string, eid: string) =>
+    request<any>(`/projects/${pid}/estimates/${eid}/match-fer-vector`, {
+      method: "POST",
+    }),
   updateFerWords: (pid: string, eid: string, body: { entry_id: number | null }) =>
     request<any>(`/projects/${pid}/estimates/${eid}/fer-words`, {
       method: "PATCH",
@@ -197,7 +201,7 @@ export const estimates = {
     file: File,
     startDate: string,
     workers: number,
-    estimateKind: string,
+    estimateKind: number,
     complexMode: boolean,
   ) => {
     const form  = new FormData();

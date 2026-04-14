@@ -9,9 +9,13 @@ export interface JobResult {
   gantt_tasks_count?: number;
   estimate_batch_id?: string;
   estimate_batch_name?: string;
-  estimate_kind?: string;
+  estimate_kind?: number;
   matched_rows_count?: number;
   low_confidence_count?: number;
+  normalized_rows_count?: number;
+  reranked_rows_count?: number;
+  rerank_corrected_count?: number;
+  fallback_rows_count?: number;
   review_rows_count?: number;
   review_estimate_ids?: string[];
   complex_mode?: boolean;

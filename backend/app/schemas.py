@@ -199,7 +199,7 @@ class EstimateBatchResponse(BaseModel):
     id: str
     project_id: str
     name: str
-    estimate_kind: str
+    estimate_kind: int
     source_filename: str | None = None
     estimates_count: int = 0
     gantt_tasks_count: int = 0

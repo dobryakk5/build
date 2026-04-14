@@ -18,6 +18,7 @@ os.chdir(BACKEND_DIR)
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.services.fer_hybrid_search_service import build_fts_document_text, resolve_fts_config
 from app.services.fer_vector_index_service import (
     PilotFerRow,
     VectorIndexRecord,
@@ -90,6 +91,7 @@ def build_collection_record(node: CollectionNode, embedding: Sequence[float]) ->
         source_field="name",
         source_text=source_text,
         search_text=f"Сборник {node.collection_num} {source_text}",
+        fts_document=build_fts_document_text(f"Сборник {node.collection_num} {source_text}", source_text),
         provider="openrouter",
         model=settings.EMBEDDING_MODEL,
         text_checksum=checksum_text(f"Сборник {node.collection_num} {source_text}"),
@@ -118,6 +120,7 @@ def build_section_record(node: SectionNode, embedding: Sequence[float]) -> Vecto
         source_field="title",
         source_text=source_text,
         search_text=search_text,
+        fts_document=build_fts_document_text(search_text, source_text),
         provider="openrouter",
         model=settings.EMBEDDING_MODEL,
         text_checksum=checksum_text(search_text),
@@ -147,6 +150,7 @@ def build_subsection_record(node: SubsectionNode, embedding: Sequence[float]) ->
         source_field="title",
         source_text=source_text,
         search_text=search_text,
+        fts_document=build_fts_document_text(search_text, source_text),
         provider="openrouter",
         model=settings.EMBEDDING_MODEL,
         text_checksum=checksum_text(search_text),
@@ -188,6 +192,7 @@ def build_table_record(node: TableNode, embedding: Sequence[float]) -> VectorInd
         source_field=source_field,
         source_text=table_label,
         search_text=search_text,
+        fts_document=build_fts_document_text(search_text, table_label),
         provider="openrouter",
         model=settings.EMBEDDING_MODEL,
         text_checksum=checksum_text(search_text),
@@ -358,6 +363,7 @@ async def process_batches[T](
     batch_size: int,
     fetch_batch: Callable[[int, int], asyncio.Future],
     build_record: Callable[[T, Sequence[float]], VectorIndexRecord],
+    fts_config: str,
 ) -> int:
     processed = 0
     for offset in range(0, total_count, batch_size):
@@ -370,7 +376,7 @@ async def process_batches[T](
         records = [build_record(item, embedding) for item, embedding in zip(batch, embeddings)]
 
         async with AsyncSessionLocal() as db:
-            await bulk_upsert_vector_index_records(db, records)
+            await bulk_upsert_vector_index_records(db, records, fts_config=fts_config)
 
         processed += len(records)
         print(f"{label}: {processed}/{total_count}")
@@ -388,6 +394,10 @@ async def main() -> None:
     print("Embedding model:", settings.EMBEDDING_MODEL)
     print("Embedding dim:", settings.EMBEDDING_DIM)
     print("Batch size:", args.batch_size)
+
+    async with AsyncSessionLocal() as db:
+        fts_config = await resolve_fts_config(db)
+    print("FTS config:", fts_config)
 
     if args.reset:
         await truncate_vector_index()
@@ -409,6 +419,7 @@ async def main() -> None:
         batch_size=args.batch_size,
         fetch_batch=fetch_collection_batch,
         build_record=build_collection_record,
+        fts_config=fts_config,
     )
     total_processed += await process_batches(
         label="sections",
@@ -416,6 +427,7 @@ async def main() -> None:
         batch_size=args.batch_size,
         fetch_batch=fetch_section_batch,
         build_record=build_section_record,
+        fts_config=fts_config,
     )
     total_processed += await process_batches(
         label="subsections",
@@ -423,6 +435,7 @@ async def main() -> None:
         batch_size=args.batch_size,
         fetch_batch=fetch_subsection_batch,
         build_record=build_subsection_record,
+        fts_config=fts_config,
     )
     total_processed += await process_batches(
         label="tables",
@@ -430,6 +443,7 @@ async def main() -> None:
         batch_size=args.batch_size,
         fetch_batch=fetch_table_batch,
         build_record=build_table_record,
+        fts_config=fts_config,
     )
     total_processed += await process_batches(
         label="rows",
@@ -437,6 +451,7 @@ async def main() -> None:
         batch_size=args.batch_size,
         fetch_batch=fetch_row_batch,
         build_record=build_row_record,
+        fts_config=fts_config,
     )
 
     async with AsyncSessionLocal() as db:

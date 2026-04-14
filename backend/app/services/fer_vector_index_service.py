@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.fer_hybrid_search_service import build_fts_document_text
 
 
 @dataclass(slots=True)
@@ -41,6 +42,7 @@ class VectorIndexRecord:
     source_field: str
     source_text: str
     search_text: str
+    fts_document: str
     provider: str
     model: str
     text_checksum: str
@@ -76,6 +78,7 @@ def build_row_record(row: PilotFerRow, embedding: list[float]) -> VectorIndexRec
         source_field="clarification",
         source_text=row.clarification.strip(),
         search_text=search_text,
+        fts_document=build_fts_document_text(search_text, row.clarification),
         provider="openrouter",
         model=settings.EMBEDDING_MODEL,
         text_checksum=checksum_text(search_text),
@@ -168,6 +171,8 @@ async def fetch_pilot_rows(
 async def upsert_vector_index_records(
     db: AsyncSession,
     records: Iterable[VectorIndexRecord],
+    *,
+    fts_config: str = "russian",
 ) -> list[int]:
     inserted_ids: list[int] = []
     stmt = text(
@@ -185,6 +190,7 @@ async def upsert_vector_index_records(
             source_field,
             source_text,
             search_text,
+            fts_document,
             embedding,
             provider,
             model,
@@ -204,6 +210,7 @@ async def upsert_vector_index_records(
             :source_field,
             :source_text,
             :search_text,
+            to_tsvector(CAST(:fts_config AS regconfig), :fts_document),
             CAST(:embedding AS fer.vector),
             :provider,
             :model,
@@ -222,6 +229,7 @@ async def upsert_vector_index_records(
             row_id = EXCLUDED.row_id,
             source_text = EXCLUDED.source_text,
             search_text = EXCLUDED.search_text,
+            fts_document = EXCLUDED.fts_document,
             embedding = EXCLUDED.embedding,
             provider = EXCLUDED.provider,
             text_checksum = EXCLUDED.text_checksum,
@@ -246,10 +254,12 @@ async def upsert_vector_index_records(
                 "source_field": record.source_field,
                 "source_text": record.source_text,
                 "search_text": record.search_text,
+                "fts_document": record.fts_document,
                 "embedding": format_vector(record.embedding),
                 "provider": record.provider,
                 "model": record.model,
                 "text_checksum": record.text_checksum,
+                "fts_config": fts_config,
             },
         )
         inserted_ids.append(result.scalar_one())
@@ -261,6 +271,8 @@ async def upsert_vector_index_records(
 async def bulk_upsert_vector_index_records(
     db: AsyncSession,
     records: Iterable[VectorIndexRecord],
+    *,
+    fts_config: str = "russian",
 ) -> int:
     params = [
         {
@@ -276,10 +288,12 @@ async def bulk_upsert_vector_index_records(
             "source_field": record.source_field,
             "source_text": record.source_text,
             "search_text": record.search_text,
+            "fts_document": record.fts_document,
             "embedding": format_vector(record.embedding),
             "provider": record.provider,
             "model": record.model,
             "text_checksum": record.text_checksum,
+            "fts_config": fts_config,
         }
         for record in records
     ]
@@ -301,6 +315,7 @@ async def bulk_upsert_vector_index_records(
             source_field,
             source_text,
             search_text,
+            fts_document,
             embedding,
             provider,
             model,
@@ -320,6 +335,7 @@ async def bulk_upsert_vector_index_records(
             :source_field,
             :source_text,
             :search_text,
+            to_tsvector(CAST(:fts_config AS regconfig), :fts_document),
             CAST(:embedding AS fer.vector),
             :provider,
             :model,
@@ -338,6 +354,7 @@ async def bulk_upsert_vector_index_records(
             row_id = EXCLUDED.row_id,
             source_text = EXCLUDED.source_text,
             search_text = EXCLUDED.search_text,
+            fts_document = EXCLUDED.fts_document,
             embedding = EXCLUDED.embedding,
             provider = EXCLUDED.provider,
             text_checksum = EXCLUDED.text_checksum,
