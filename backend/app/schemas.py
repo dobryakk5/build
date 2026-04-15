@@ -172,6 +172,15 @@ class EstimateRow(BaseModel):
     fer_table_id: int | None
     fer_work_type: str | None
     fer_match_score: float | None
+    fer_group_kind: str | None = None
+    fer_group_ref_id: int | None = None
+    fer_group_title: str | None = None
+    fer_group_collection_id: int | None = None
+    fer_group_collection_num: str | None = None
+    fer_group_collection_name: str | None = None
+    fer_group_match_score: float | None = None
+    fer_group_is_ambiguous: bool = False
+    fer_group_candidates: list[dict] | None = None
     fer_words_entry_id: int | None = None
     fer_words_code: str | None = None
     fer_words_name: str | None = None

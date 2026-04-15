@@ -74,6 +74,15 @@ export interface EstimateRow {
   fer_table_id?: number | null;
   fer_work_type?: string | null;
   fer_match_score?: number | null;
+  fer_group_kind?: "section" | "collection" | null;
+  fer_group_ref_id?: number | null;
+  fer_group_title?: string | null;
+  fer_group_collection_id?: number | null;
+  fer_group_collection_num?: string | null;
+  fer_group_collection_name?: string | null;
+  fer_group_match_score?: number | null;
+  fer_group_is_ambiguous?: boolean;
+  fer_group_candidates?: FerGroupCandidate[] | null;
   fer_words_entry_id?: number | null;
   fer_words_code?: string | null;
   fer_words_name?: string | null;
@@ -89,6 +98,16 @@ export interface EstimateRow {
 export interface UserRef {
   id: string;
   name: string;
+}
+
+export interface FerGroupCandidate {
+  kind: "section" | "collection";
+  ref_id: number;
+  title: string;
+  collection_id: number;
+  collection_num: string | null;
+  collection_name: string | null;
+  score: number;
 }
 
 export interface WorkJournalEntry {

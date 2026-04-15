@@ -565,39 +565,145 @@ function FerCell({
 function AIVectorCell({
   row,
   running,
+  runningGroup,
+  confirmingGroup,
   onRun,
+  onRunGroup,
+  onConfirmGroup,
 }: {
   row: EstimateRow;
   running: boolean;
+  runningGroup: boolean;
+  confirmingGroup: boolean;
   onRun: (row: EstimateRow) => Promise<void>;
+  onRunGroup: (row: EstimateRow) => Promise<void>;
+  onConfirmGroup: (row: EstimateRow, kind: "section" | "collection", refId: number) => Promise<void>;
 }) {
+  const [selectedCandidate, setSelectedCandidate] = useState<string>("");
+
+  useEffect(() => {
+    const firstCandidate = row.fer_group_candidates?.[0];
+    setSelectedCandidate(firstCandidate ? `${firstCandidate.kind}:${firstCandidate.ref_id}` : "");
+  }, [row.id, row.fer_group_candidates]);
+
+  const hasSection = Boolean(row.section?.trim());
+  const groupLabel = row.fer_group_kind === "section" ? "Раздел ФЕР" : row.fer_group_kind === "collection" ? "Сборник ФЕР" : null;
+
   return (
     <td
       style={{
         padding: "8px 12px",
         borderBottom: "1px solid var(--border)",
         textAlign: "left",
+        verticalAlign: "top",
       }}
     >
-      <button
-        type="button"
-        onClick={() => onRun(row)}
-        disabled={running}
-        style={{
-          border: "none",
-          background: "transparent",
-          padding: 0,
-          margin: 0,
-          color: running ? "var(--muted)" : "var(--blue-dark)",
-          cursor: running ? "default" : "pointer",
-          fontSize: 12,
-          fontWeight: 700,
-          textDecoration: "underline",
-          opacity: running ? 0.7 : 1,
-        }}
-      >
-        {running ? "ИИ..." : "ИИ"}
-      </button>
+      <div style={{ display: "grid", gap: 6 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => onRun(row)}
+            disabled={running}
+            style={{
+              border: "none",
+              background: "transparent",
+              padding: 0,
+              margin: 0,
+              color: running ? "var(--muted)" : "var(--blue-dark)",
+              cursor: running ? "default" : "pointer",
+              fontSize: 12,
+              fontWeight: 700,
+              textDecoration: "underline",
+              opacity: running ? 0.7 : 1,
+            }}
+          >
+            {running ? "ИИ..." : "ИИ"}
+          </button>
+          <button
+            type="button"
+            onClick={() => onRunGroup(row)}
+            disabled={runningGroup || !hasSection}
+            title={hasSection ? "Определить раздел или сборник ФЕР по группе работ" : "У строки нет названия группы работ"}
+            style={{
+              border: "none",
+              background: "transparent",
+              padding: 0,
+              margin: 0,
+              color: runningGroup ? "var(--muted)" : hasSection ? "var(--blue-dark)" : "var(--muted)",
+              cursor: runningGroup || !hasSection ? "default" : "pointer",
+              fontSize: 12,
+              fontWeight: 700,
+              textDecoration: "underline",
+              opacity: runningGroup || !hasSection ? 0.7 : 1,
+            }}
+          >
+            {runningGroup ? "ИИ раздел..." : "ИИ раздел"}
+          </button>
+        </div>
+
+        {groupLabel && row.fer_group_title && (
+          <div style={{ fontSize: 11, lineHeight: 1.35, color: row.fer_group_is_ambiguous ? "var(--muted)" : "var(--text)" }}>
+            <div>
+              {groupLabel}: {row.fer_group_title}
+            </div>
+            {row.fer_group_collection_num && row.fer_group_collection_name && (
+              <div style={{ marginTop: 2, fontSize: 10, color: "var(--muted)" }}>
+                Сборник {row.fer_group_collection_num}. {row.fer_group_collection_name}
+                {typeof row.fer_group_match_score === "number" ? ` · score ${row.fer_group_match_score.toFixed(2)}` : ""}
+              </div>
+            )}
+          </div>
+        )}
+
+        {row.fer_group_is_ambiguous && row.fer_group_candidates?.length ? (
+          <div style={{ display: "grid", gap: 6 }}>
+            <select
+              value={selectedCandidate}
+              onChange={(event) => setSelectedCandidate(event.target.value)}
+              style={{
+                width: "100%",
+                minWidth: 180,
+                padding: "6px 8px",
+                border: "1px solid var(--border2)",
+                borderRadius: 6,
+                fontSize: 11,
+                background: "var(--surface)",
+              }}
+            >
+              {row.fer_group_candidates.map((candidate) => (
+                <option key={`${candidate.kind}:${candidate.ref_id}`} value={`${candidate.kind}:${candidate.ref_id}`}>
+                  {candidate.title} ({candidate.score.toFixed(2)})
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              disabled={confirmingGroup || !selectedCandidate}
+              onClick={() => {
+                const [kind, refId] = selectedCandidate.split(":");
+                if (!kind || !refId) {
+                  return;
+                }
+                onConfirmGroup(row, kind as "section" | "collection", Number(refId));
+              }}
+              style={{
+                width: "fit-content",
+                padding: "6px 10px",
+                borderRadius: 6,
+                border: "1px solid var(--border2)",
+                background: "rgba(59,130,246,.08)",
+                color: "var(--blue-dark)",
+                cursor: confirmingGroup ? "default" : "pointer",
+                fontSize: 11,
+                fontWeight: 600,
+                opacity: confirmingGroup ? 0.7 : 1,
+              }}
+            >
+              {confirmingGroup ? "Подтверждаем..." : "Подтвердить"}
+            </button>
+          </div>
+        ) : null}
+      </div>
     </td>
   );
 }
@@ -621,6 +727,8 @@ export default function EstimatePage() {
   const [savingActsId, setSavingActsId] = useState<string | null>(null);
   const [ferModalRow, setFerModalRow] = useState<EstimateRow | null>(null);
   const [runningAiRowId, setRunningAiRowId] = useState<string | null>(null);
+  const [runningAiGroupRowId, setRunningAiGroupRowId] = useState<string | null>(null);
+  const [confirmingGroupRowId, setConfirmingGroupRowId] = useState<string | null>(null);
 
   const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
 
@@ -763,6 +871,55 @@ export default function EstimatePage() {
       alert(error.message);
     } finally {
       setRunningAiRowId(null);
+    }
+  };
+
+  const applyGroupMatchResult = (estimateId: string, result: any) => {
+    setRows((current) =>
+      current.map((row) =>
+        row.id === estimateId
+          ? {
+              ...row,
+              fer_group_kind: result.fer_group_kind,
+              fer_group_ref_id: result.fer_group_ref_id,
+              fer_group_title: result.fer_group_title,
+              fer_group_collection_id: result.fer_group_collection_id,
+              fer_group_collection_num: result.fer_group_collection_num,
+              fer_group_collection_name: result.fer_group_collection_name,
+              fer_group_match_score: result.fer_group_match_score,
+              fer_group_is_ambiguous: Boolean(result.fer_group_is_ambiguous),
+              fer_group_candidates: result.fer_group_candidates,
+            }
+          : row,
+      ),
+    );
+  };
+
+  const handleAIGroupMatch = async (selectedRow: EstimateRow) => {
+    try {
+      setRunningAiGroupRowId(selectedRow.id);
+      const result = await estimates.matchFerGroupVectorRow(id, selectedRow.id);
+      applyGroupMatchResult(selectedRow.id, result);
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setRunningAiGroupRowId(null);
+    }
+  };
+
+  const handleConfirmGroup = async (
+    selectedRow: EstimateRow,
+    kind: "section" | "collection",
+    refId: number,
+  ) => {
+    try {
+      setConfirmingGroupRowId(selectedRow.id);
+      const result = await estimates.confirmFerGroup(id, selectedRow.id, { kind, ref_id: refId });
+      applyGroupMatchResult(selectedRow.id, result);
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setConfirmingGroupRowId(null);
     }
   };
 
@@ -968,7 +1125,15 @@ export default function EstimatePage() {
                     <ActsCell row={row} onOpen={handleOpenActs} />
                   </td>
                   <FerCell row={row} onOpenModal={setFerModalRow} />
-                  <AIVectorCell row={row} running={runningAiRowId === row.id} onRun={handleAIVectorMatch} />
+                  <AIVectorCell
+                    row={row}
+                    running={runningAiRowId === row.id}
+                    runningGroup={runningAiGroupRowId === row.id}
+                    confirmingGroup={confirmingGroupRowId === row.id}
+                    onRun={handleAIVectorMatch}
+                    onRunGroup={handleAIGroupMatch}
+                    onConfirmGroup={handleConfirmGroup}
+                  />
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtQuantity(row.quantity)}</td>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtMoney(row.unit_price ?? 0)}</td>

@@ -144,17 +144,21 @@ async def hybrid_search_candidates(
     normalized_text: str,
     embedding_literal: str,
     allowed_section_ids: Sequence[int] | None = None,
+    filter_section_id: int | None = None,
+    filter_collection_id: int | None = None,
     top_k: int | None = None,
     vector_limit: int = 40,
     fts_limit: int = 40,
 ) -> list[HybridCandidate]:
+    if filter_section_id is not None and filter_collection_id is not None:
+        raise RuntimeError("Only one group filter can be applied at a time.")
     if allowed_section_ids is not None and len(allowed_section_ids) == 0:
         return []
 
     fts_config = await resolve_fts_config(db)
     top_k = top_k or settings.RERANK_CANDIDATE_COUNT
 
-    section_filter = ""
+    scope_filter = ""
     params: dict[str, object] = {
         "embedding": embedding_literal,
         "query_text": normalized_text,
@@ -164,8 +168,14 @@ async def hybrid_search_candidates(
         "vector_weight": float(settings.HYBRID_VECTOR_WEIGHT),
         "fts_weight": float(settings.HYBRID_FTS_WEIGHT),
     }
-    if allowed_section_ids:
-        section_filter = "AND t.section_id = ANY(:allowed_section_ids)"
+    if filter_section_id is not None:
+        scope_filter = "AND t.section_id = :filter_section_id"
+        params["filter_section_id"] = int(filter_section_id)
+    elif filter_collection_id is not None:
+        scope_filter = "AND t.collection_id = :filter_collection_id"
+        params["filter_collection_id"] = int(filter_collection_id)
+    elif allowed_section_ids:
+        scope_filter = "AND t.section_id = ANY(:allowed_section_ids)"
         params["allowed_section_ids"] = [int(section_id) for section_id in allowed_section_ids]
 
     stmt = text(
@@ -192,7 +202,7 @@ async def hybrid_search_candidates(
                   OR COALESCE(ss.ignored, FALSE)
                   OR COALESCE(t.ignored, FALSE)
               )
-              {section_filter}
+              {scope_filter}
             ORDER BY vi.embedding OPERATOR(fer.<=>) CAST(:embedding AS fer.vector), vi.id
             LIMIT :vector_limit
         ),
@@ -217,7 +227,7 @@ async def hybrid_search_candidates(
                   OR COALESCE(ss.ignored, FALSE)
                   OR COALESCE(t.ignored, FALSE)
               )
-              {section_filter}
+              {scope_filter}
             ORDER BY fts_score DESC, vi.id
             LIMIT :fts_limit
         ),
@@ -251,7 +261,7 @@ async def hybrid_search_candidates(
         LIMIT :top_k
         """
     )
-    if allowed_section_ids:
+    if allowed_section_ids and filter_section_id is None and filter_collection_id is None:
         stmt = stmt.bindparams(
             bindparam("allowed_section_ids", type_=postgresql.ARRAY(Integer)),
         )

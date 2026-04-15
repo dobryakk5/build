@@ -12,8 +12,12 @@ from app.services.estimate_fer_matcher import (
     _get_allowed_section_ids_for_batch,
     _match_estimate_hybrid,
     _normalize_estimates,
+    _resolve_row_match_scope,
+    confirm_group_candidate,
     has_fer_vector_index_rows,
+    match_estimate_group_with_vector,
 )
+from app.services.estimate_fer_matcher import FerGroupCandidate
 from app.services.fer_hybrid_search_service import HybridCandidate
 
 
@@ -217,3 +221,105 @@ async def test_match_estimate_hybrid_falls_back_when_rerank_fails(monkeypatch):
     assert decision.reranked is False
     assert decision.rerank_corrected is False
     assert decision.fallback_used is True
+
+
+def test_resolve_row_match_scope_uses_confirmed_section_group():
+    estimate = SimpleNamespace(
+        fer_group_ref_id=12,
+        fer_group_kind="section",
+        fer_group_collection_id=8,
+        fer_group_is_ambiguous=False,
+    )
+
+    allowed, filter_section_id, filter_collection_id = _resolve_row_match_scope(estimate, [1, 2, 3])
+
+    assert allowed is None
+    assert filter_section_id == 12
+    assert filter_collection_id is None
+
+
+def test_confirm_group_candidate_accepts_only_existing_payload():
+    estimate = SimpleNamespace(
+        fer_group_candidates=[
+            {
+                "kind": "collection",
+                "ref_id": 8,
+                "title": "Сборник 08. Конструкции из кирпича",
+                "collection_id": 8,
+                "collection_num": "08",
+                "collection_name": "Конструкции из кирпича",
+                "score": 0.54,
+            }
+        ]
+    )
+
+    match = confirm_group_candidate(estimate, kind="collection", ref_id=8)
+
+    assert match.kind == "collection"
+    assert match.ref_id == 8
+    assert match.is_ambiguous is False
+    assert match.candidates is None
+
+
+@pytest.mark.asyncio
+async def test_match_estimate_group_with_vector_falls_back_to_ambiguous_collection(monkeypatch):
+    estimate = SimpleNamespace(section="Кирпичные конструкции", estimate_batch_id="batch-1")
+
+    monkeypatch.setattr("app.services.estimate_fer_matcher.has_fer_vector_index_rows", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._get_allowed_section_ids_for_batch", AsyncMock(return_value=[8, 11]))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._normalize_group_title", AsyncMock(return_value="кирпичные конструкции"))
+    monkeypatch.setattr("app.services.estimate_fer_matcher.create_embeddings", AsyncMock(return_value=[[0.1, 0.2]]))
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher._search_section_group_candidates",
+        AsyncMock(
+            return_value=[
+                FerGroupCandidate("section", 80, "Каменные конструкции", 8, "08", "Конструкции из кирпича", 0.68),
+                FerGroupCandidate("section", 81, "Перегородки", 8, "08", "Конструкции из кирпича", 0.65),
+            ]
+        ),
+    )
+    monkeypatch.setattr("app.services.estimate_fer_matcher._get_allowed_collection_ids", AsyncMock(return_value=[8, 15]))
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher._search_collection_group_candidates",
+        AsyncMock(
+            return_value=[
+                FerGroupCandidate("collection", 8, "Сборник 08. Конструкции из кирпича", 8, "08", "Конструкции из кирпича", 0.54),
+                FerGroupCandidate("collection", 15, "Сборник 15. Отделочные работы", 15, "15", "Отделочные работы", 0.49),
+            ]
+        ),
+    )
+
+    match = await match_estimate_group_with_vector(AsyncMock(), estimate)
+
+    assert match.kind == "collection"
+    assert match.ref_id == 8
+    assert match.is_ambiguous is True
+    assert match.no_match is False
+    assert match.candidates is not None
+    assert len(match.candidates) == 2
+
+
+@pytest.mark.asyncio
+async def test_match_estimate_group_with_vector_returns_no_match_when_collection_too_weak(monkeypatch):
+    estimate = SimpleNamespace(section="Неизвестная группа", estimate_batch_id="batch-1")
+
+    monkeypatch.setattr("app.services.estimate_fer_matcher.has_fer_vector_index_rows", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._get_allowed_section_ids_for_batch", AsyncMock(return_value=[8, 11]))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._normalize_group_title", AsyncMock(return_value="неизвестная группа"))
+    monkeypatch.setattr("app.services.estimate_fer_matcher.create_embeddings", AsyncMock(return_value=[[0.1, 0.2]]))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._search_section_group_candidates", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._get_allowed_collection_ids", AsyncMock(return_value=[8, 15]))
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher._search_collection_group_candidates",
+        AsyncMock(
+            return_value=[
+                FerGroupCandidate("collection", 8, "Сборник 08. Конструкции из кирпича", 8, "08", "Конструкции из кирпича", 0.31),
+            ]
+        ),
+    )
+
+    match = await match_estimate_group_with_vector(AsyncMock(), estimate)
+
+    assert match.no_match is True
+    assert match.kind is None
+    assert match.ref_id is None

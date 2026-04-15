@@ -181,14 +181,23 @@ export const estimates = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  confirmFerGroup: (pid: string, eid: string, body: { kind: "section" | "collection"; ref_id: number }) =>
+    request<any>(`/projects/${pid}/estimates/${eid}/fer-group`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   matchFerVectorRow: (pid: string, eid: string) =>
     request<any>(`/projects/${pid}/estimates/${eid}/match-fer-vector`, {
+      method: "POST",
+    }),
+  matchFerGroupVectorRow: (pid: string, eid: string) =>
+    request<any>(`/projects/${pid}/estimates/${eid}/match-fer-group-vector`, {
       method: "POST",
     }),
   updateFerWords: (pid: string, eid: string, body: { entry_id: number | null }) =>
     request<any>(`/projects/${pid}/estimates/${eid}/fer-words`, {
       method: "PATCH",
-      body: JSON.stringify(body),
+    body: JSON.stringify(body),
     }),
   ferWordsCandidates: (pid: string, eid: string, limit = 5) =>
     request<FerWordsCandidate[]>(`/projects/${pid}/estimates/${eid}/fer-words-candidates?limit=${limit}`),

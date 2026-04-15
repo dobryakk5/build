@@ -14,7 +14,13 @@ from app.api.deps         import require_action, get_db, get_current_user
 from app.core.permissions import Action
 from app.models           import Estimate, EstimateBatch, FerWordsEntry, GanttTask, ProjectMember
 from app.schemas          import EstimateBatchResponse, EstimateRow, EstimateSummary, JobStartResponse, UploadStartResponse, JobResponse
-from app.services.estimate_fer_matcher import match_estimate_with_vector, start_fer_match_job
+from app.services.estimate_fer_matcher import (
+    _apply_group_match_result,
+    confirm_group_candidate,
+    match_estimate_group_with_vector,
+    match_estimate_with_vector,
+    start_fer_match_job,
+)
 from app.services.fer_words_service import (
     apply_fer_words_choice,
     build_estimate_fer_words_text,
@@ -299,6 +305,11 @@ class FerMappingUpdate(BaseModel):
     fer_table_id: int | None = None
 
 
+class FerGroupConfirmUpdate(BaseModel):
+    kind: str
+    ref_id: int
+
+
 @router.patch("/estimates/{estimate_id}/fer")
 async def update_estimate_fer(
     project_id: UUID,
@@ -395,6 +406,43 @@ async def match_estimate_fer_vector(
         "fer_match_score": float(est.fer_match_score) if est.fer_match_score is not None else None,
         "fer_matched_at": est.fer_matched_at.isoformat() if est.fer_matched_at else None,
     }
+
+
+@router.post("/estimates/{estimate_id}/match-fer-group-vector")
+async def match_estimate_fer_group_vector(
+    project_id: UUID,
+    estimate_id: UUID,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    matched_at = datetime.now(timezone.utc)
+    match = await match_estimate_group_with_vector(db, est)
+    _apply_group_match_result(est, match, None if match.no_match else matched_at)
+    await db.commit()
+    return match.to_payload(est.id, None if match.no_match else matched_at)
+
+
+@router.patch("/estimates/{estimate_id}/fer-group")
+async def confirm_estimate_fer_group(
+    project_id: UUID,
+    estimate_id: UUID,
+    body: FerGroupConfirmUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    match = confirm_group_candidate(est, kind=body.kind, ref_id=body.ref_id)
+    matched_at = datetime.now(timezone.utc)
+    _apply_group_match_result(est, match, matched_at)
+    await db.commit()
+    return match.to_payload(est.id, matched_at)
 
 
 class FerWordsMappingUpdate(BaseModel):

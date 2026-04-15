@@ -34,3 +34,99 @@ async def test_match_estimate_fer_vector_updates_row_from_match(monkeypatch):
     assert result["fer_table_id"] == 55
     assert result["fer_work_type"] == "Разработка грунта"
     assert result["fer_match_score"] == 0.81
+
+
+@pytest.mark.asyncio
+async def test_match_estimate_fer_group_vector_updates_row_from_match(monkeypatch):
+    from app.api.routes.estimates import match_estimate_fer_group_vector
+    from app.services.estimate_fer_matcher import GroupMatchResult, FerGroupCandidate
+
+    estimate = SimpleNamespace(
+        id="est-2",
+        project_id="project-1",
+        deleted_at=None,
+        fer_group_kind=None,
+        fer_group_ref_id=None,
+        fer_group_title=None,
+        fer_group_collection_id=None,
+        fer_group_collection_num=None,
+        fer_group_collection_name=None,
+        fer_group_match_score=None,
+        fer_group_matched_at=None,
+        fer_group_is_ambiguous=False,
+        fer_group_candidates=None,
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=estimate)
+    monkeypatch.setattr(
+        "app.api.routes.estimates.match_estimate_group_with_vector",
+        AsyncMock(
+            return_value=GroupMatchResult(
+                kind="collection",
+                ref_id=8,
+                title="Сборник 08. Конструкции из кирпича",
+                collection_id=8,
+                collection_num="08",
+                collection_name="Конструкции из кирпича",
+                score=0.54,
+                is_ambiguous=True,
+                candidates=[
+                    FerGroupCandidate("collection", 8, "Сборник 08. Конструкции из кирпича", 8, "08", "Конструкции из кирпича", 0.54),
+                ],
+                no_match=False,
+            )
+        ),
+    )
+
+    result = await match_estimate_fer_group_vector("project-1", "est-2", member=object(), db=db)
+
+    assert result["fer_group_kind"] == "collection"
+    assert result["fer_group_ref_id"] == 8
+    assert result["fer_group_is_ambiguous"] is True
+    assert result["no_match"] is False
+
+
+@pytest.mark.asyncio
+async def test_confirm_estimate_fer_group_confirms_existing_candidate():
+    from app.api.routes.estimates import FerGroupConfirmUpdate, confirm_estimate_fer_group
+
+    estimate = SimpleNamespace(
+        id="est-3",
+        project_id="project-1",
+        deleted_at=None,
+        fer_group_kind="collection",
+        fer_group_ref_id=8,
+        fer_group_title="Сборник 08. Конструкции из кирпича",
+        fer_group_collection_id=8,
+        fer_group_collection_num="08",
+        fer_group_collection_name="Конструкции из кирпича",
+        fer_group_match_score=0.54,
+        fer_group_matched_at=None,
+        fer_group_is_ambiguous=True,
+        fer_group_candidates=[
+            {
+                "kind": "collection",
+                "ref_id": 8,
+                "title": "Сборник 08. Конструкции из кирпича",
+                "collection_id": 8,
+                "collection_num": "08",
+                "collection_name": "Конструкции из кирпича",
+                "score": 0.54,
+            }
+        ],
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=estimate)
+
+    result = await confirm_estimate_fer_group(
+        "project-1",
+        "est-3",
+        FerGroupConfirmUpdate(kind="collection", ref_id=8),
+        member=object(),
+        db=db,
+    )
+
+    assert result["fer_group_kind"] == "collection"
+    assert result["fer_group_ref_id"] == 8
+    assert result["fer_group_is_ambiguous"] is False
+    assert result["fer_group_candidates"] is None
