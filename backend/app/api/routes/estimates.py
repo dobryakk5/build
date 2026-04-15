@@ -33,6 +33,22 @@ from app.services.upload_service import start_upload_job, start_upload_job_with_
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
 
 
+async def _load_group_estimates(db: AsyncSession, estimate: Estimate) -> list[Estimate]:
+    if not estimate.estimate_batch_id or not estimate.section or not str(estimate.section).strip():
+        return [estimate]
+
+    return list(
+        await db.scalars(
+            select(Estimate)
+            .where(Estimate.project_id == estimate.project_id)
+            .where(Estimate.estimate_batch_id == estimate.estimate_batch_id)
+            .where(Estimate.section == estimate.section)
+            .where(Estimate.deleted_at.is_(None))
+            .order_by(Estimate.row_order, Estimate.id)
+        )
+    )
+
+
 @router.post("/estimates/upload", response_model=UploadStartResponse, status_code=202)
 async def upload_estimate(
     project_id:       UUID,
@@ -419,11 +435,15 @@ async def match_estimate_fer_group_vector(
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
 
+    target_estimates = await _load_group_estimates(db, est)
     matched_at = datetime.now(timezone.utc)
     match = await match_estimate_group_with_vector(db, est)
-    _apply_group_match_result(est, match, None if match.no_match else matched_at)
+    for target in target_estimates:
+        _apply_group_match_result(target, match, None if match.no_match else matched_at)
     await db.commit()
-    return match.to_payload(est.id, None if match.no_match else matched_at)
+    payload = match.to_payload(est.id, None if match.no_match else matched_at)
+    payload["updated_rows_count"] = len(target_estimates)
+    return payload
 
 
 @router.patch("/estimates/{estimate_id}/fer-group")
@@ -438,11 +458,15 @@ async def confirm_estimate_fer_group(
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
 
+    target_estimates = await _load_group_estimates(db, est)
     match = confirm_group_candidate(est, kind=body.kind, ref_id=body.ref_id)
     matched_at = datetime.now(timezone.utc)
-    _apply_group_match_result(est, match, matched_at)
+    for target in target_estimates:
+        _apply_group_match_result(target, match, matched_at)
     await db.commit()
-    return match.to_payload(est.id, matched_at)
+    payload = match.to_payload(est.id, matched_at)
+    payload["updated_rows_count"] = len(target_estimates)
+    return payload
 
 
 class FerWordsMappingUpdate(BaseModel):
