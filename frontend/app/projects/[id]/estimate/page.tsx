@@ -598,14 +598,12 @@ function AIVectorCell({
 }
 
 function SectionGroupAiControls({
-  sectionName,
   representativeRow,
   running,
   confirming,
   onRun,
   onConfirm,
 }: {
-  sectionName: string;
   representativeRow: EstimateRow;
   running: boolean;
   confirming: boolean;
@@ -617,66 +615,41 @@ function SectionGroupAiControls({
   useEffect(() => {
     const firstCandidate = representativeRow.fer_group_candidates?.[0];
     setSelectedCandidate(firstCandidate ? `${firstCandidate.kind}:${firstCandidate.ref_id}` : "");
-  }, [sectionName, representativeRow.fer_group_candidates]);
+  }, [representativeRow.id, representativeRow.fer_group_candidates]);
 
   const hasSection = Boolean(representativeRow.section?.trim());
-  const groupLabel =
-    representativeRow.fer_group_kind === "section"
-      ? "Раздел ФЕР"
-      : representativeRow.fer_group_kind === "collection"
-        ? "Сборник ФЕР"
-        : null;
 
   return (
-    <div style={{ display: "grid", gap: 6 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <span>{sectionName}</span>
-        <button
-          type="button"
-          onClick={() => onRun(representativeRow)}
-          disabled={running || !hasSection}
-          title={hasSection ? "Определить раздел или сборник ФЕР по группе работ" : "У группы нет названия"}
-          style={{
-            border: "none",
-            background: "transparent",
-            padding: 0,
-            margin: 0,
-            color: running ? "var(--muted)" : hasSection ? "var(--blue-dark)" : "var(--muted)",
-            cursor: running || !hasSection ? "default" : "pointer",
-            fontSize: 11,
-            fontWeight: 700,
-            textDecoration: "underline",
-            opacity: running || !hasSection ? 0.7 : 1,
-          }}
-        >
-          {running ? "ИИ раздел..." : "ИИ раздел"}
-        </button>
-      </div>
-
-      {groupLabel && representativeRow.fer_group_title && (
-        <div style={{ fontSize: 11, lineHeight: 1.35, color: representativeRow.fer_group_is_ambiguous ? "var(--muted)" : "var(--text)" }}>
-          <div>
-            {groupLabel}: {representativeRow.fer_group_title}
-          </div>
-          {representativeRow.fer_group_collection_num && representativeRow.fer_group_collection_name && (
-            <div style={{ marginTop: 2, fontSize: 10, color: "var(--muted)" }}>
-              Сборник {representativeRow.fer_group_collection_num}. {representativeRow.fer_group_collection_name}
-              {typeof representativeRow.fer_group_match_score === "number"
-                ? ` · score ${representativeRow.fer_group_match_score.toFixed(2)}`
-                : ""}
-            </div>
-          )}
-        </div>
-      )}
+    <div style={{ display: "grid", gap: 8 }}>
+      <button
+        type="button"
+        onClick={() => onRun(representativeRow)}
+        disabled={running || !hasSection}
+        title={hasSection ? "Определить раздел или сборник ФЕР по группе работ" : "У группы нет названия"}
+        style={{
+          border: "none",
+          background: "transparent",
+          padding: 0,
+          margin: 0,
+          color: running ? "var(--muted)" : hasSection ? "var(--blue-dark)" : "var(--muted)",
+          cursor: running || !hasSection ? "default" : "pointer",
+          fontSize: 11,
+          fontWeight: 700,
+          textDecoration: "underline",
+          opacity: running || !hasSection ? 0.7 : 1,
+          width: "fit-content",
+        }}
+      >
+        {running ? "ИИ раздел..." : "ИИ раздел"}
+      </button>
 
       {representativeRow.fer_group_is_ambiguous && representativeRow.fer_group_candidates?.length ? (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <div style={{ display: "grid", gap: 8 }}>
           <select
             value={selectedCandidate}
             onChange={(event) => setSelectedCandidate(event.target.value)}
             style={{
-              minWidth: 280,
-              maxWidth: 520,
+              width: "100%",
               padding: "6px 8px",
               border: "1px solid var(--border2)",
               borderRadius: 6,
@@ -710,12 +683,40 @@ function SectionGroupAiControls({
               fontSize: 11,
               fontWeight: 600,
               opacity: confirming ? 0.7 : 1,
+              width: "fit-content",
             }}
           >
             {confirming ? "Подтверждаем..." : "Подтвердить"}
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function GroupFerCell({
+  row,
+}: {
+  row: EstimateRow;
+}) {
+  if (!row.fer_group_kind || !row.fer_group_title) {
+    return <span style={{ color: "var(--muted)" }}>—</span>;
+  }
+
+  const score = typeof row.fer_group_match_score === "number" ? row.fer_group_match_score.toFixed(2) : null;
+  const isSection = row.fer_group_kind === "section";
+
+  return (
+    <div style={{ display: "grid", gap: 3, color: row.fer_group_is_ambiguous ? "var(--muted)" : "var(--text)" }}>
+      <div style={{ fontSize: 11, lineHeight: 1.35 }}>
+        {isSection ? "ФЕР сборника / раздела" : "ФЕР сборника"}: {row.fer_group_title}
+      </div>
+      {row.fer_group_collection_num && row.fer_group_collection_name && (
+        <div style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1.35 }}>
+          Сборник {row.fer_group_collection_num}. {row.fer_group_collection_name}
+          {score ? ` · score ${score}` : ""}
+        </div>
+      )}
     </div>
   );
 }
@@ -1111,9 +1112,40 @@ export default function EstimatePage() {
           <tbody>
             {Object.entries(sections).map(([sectionName, sectionRows]) => [
               <tr key={`s-${sectionName}`}>
-                <td colSpan={8} style={{ padding: "8px 12px", fontWeight: 600, fontSize: 11, background: "rgba(59,130,246,.06)", color: "var(--blue-dark)", letterSpacing: ".03em" }}>
+                <td
+                  style={{
+                    padding: "8px 12px",
+                    fontWeight: 700,
+                    fontSize: 11,
+                    background: "rgba(59,130,246,.06)",
+                    color: "var(--blue-dark)",
+                    letterSpacing: ".03em",
+                    borderBottom: "1px solid var(--border)",
+                  }}
+                >
+                  {sectionName}
+                </td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", color: "var(--muted)" }}>—</td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)" }}>—</td>
+                <td
+                  style={{
+                    padding: "8px 12px",
+                    borderBottom: "1px solid var(--border)",
+                    background: "rgba(59,130,246,.06)",
+                    verticalAlign: "top",
+                  }}
+                >
+                  <GroupFerCell row={sectionRows[0]} />
+                </td>
+                <td
+                  style={{
+                    padding: "8px 12px",
+                    borderBottom: "1px solid var(--border)",
+                    background: "rgba(59,130,246,.06)",
+                    verticalAlign: "top",
+                  }}
+                >
                   <SectionGroupAiControls
-                    sectionName={sectionName}
                     representativeRow={sectionRows[0]}
                     running={runningGroupSectionKey === sectionName}
                     confirming={confirmingGroupSectionKey === sectionName}
@@ -1121,7 +1153,20 @@ export default function EstimatePage() {
                     onConfirm={handleConfirmGroup}
                   />
                 </td>
-                <td style={{ padding: "8px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 11, background: "rgba(59,130,246,.06)", fontWeight: 600 }}>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                <td
+                  style={{
+                    padding: "8px 12px",
+                    textAlign: "right",
+                    fontFamily: "var(--mono)",
+                    fontSize: 11,
+                    background: "rgba(59,130,246,.06)",
+                    fontWeight: 600,
+                    borderBottom: "1px solid var(--border)",
+                  }}
+                >
                   {fmtMoney(sectionRows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))}
                 </td>
               </tr>,
