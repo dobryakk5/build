@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
@@ -263,19 +263,30 @@ function FerSearchModal({
   const [searching, setSearching] = useState(false);
   const [saving, setSaving] = useState(false);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scope = !row.fer_group_is_ambiguous && row.fer_group_kind
-    ? row.fer_group_kind === "section" && row.fer_group_ref_id != null
-      ? {
-          sectionId: row.fer_group_ref_id,
-          label: `Поиск внутри раздела ФЕР: ${row.fer_group_title ?? "—"}`,
-        }
-      : row.fer_group_kind === "collection" && row.fer_group_collection_id != null
-        ? {
-            collectionId: row.fer_group_collection_id,
-            label: `Поиск внутри сборника ФЕР: Сборник ${row.fer_group_collection_num ?? ""}. ${row.fer_group_collection_name ?? row.fer_group_title ?? "—"}`.trim(),
-          }
-        : null
-    : null;
+  const scope = useMemo(() => {
+    if (row.fer_group_is_ambiguous || !row.fer_group_kind) return null;
+    if (row.fer_group_kind === "section" && row.fer_group_ref_id != null) {
+      return {
+        sectionId: row.fer_group_ref_id,
+        label: `Поиск внутри раздела ФЕР: ${row.fer_group_title ?? "—"}`,
+      };
+    }
+    if (row.fer_group_kind === "collection" && row.fer_group_collection_id != null) {
+      return {
+        collectionId: row.fer_group_collection_id,
+        label: `Поиск внутри сборника ФЕР: Сборник ${row.fer_group_collection_num ?? ""}. ${row.fer_group_collection_name ?? row.fer_group_title ?? "—"}`.trim(),
+      };
+    }
+    return null;
+  }, [
+    row.fer_group_is_ambiguous,
+    row.fer_group_kind,
+    row.fer_group_ref_id,
+    row.fer_group_collection_id,
+    row.fer_group_collection_num,
+    row.fer_group_collection_name,
+    row.fer_group_title,
+  ]);
 
   useEffect(() => {
     if (q.trim().length < 2) {

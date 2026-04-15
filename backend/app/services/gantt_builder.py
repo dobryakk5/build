@@ -118,27 +118,16 @@ class GanttBuilder:
     ) -> list[GanttTaskDTO]:
         """
         Алгоритм:
-        1. Группируем строки сметы по разделам (section)
-        2. Сортируем разделы по технологической последовательности
-        3. Каждый раздел = родительская задача (project), его строки = дочерние
+        1. Разбиваем строки сметы на последовательные блоки по section
+        2. Каждый блок = родительская задача (project), его строки = дочерние
         4. После импорта все группы и задачи стартуют с одной даты
         5. Зависимости оператор проставляет вручную
         """
         tasks: list[GanttTaskDTO] = []
 
-        # Группируем по разделам
-        sections: dict[str, list] = {}
-        for est in estimates:
-            sec = est.section or "Прочие работы"
-            sections.setdefault(sec, []).append(est)
-
-        # Сортируем разделы
-        sorted_sections = self._sort_sections(list(sections.keys()))
-
         row_order = 1000.0
 
-        for section_name in sorted_sections:
-            section_estimates = sections[section_name]
+        for section_name, section_estimates in self._group_estimates_by_section_run(estimates):
             section_id = str(uuid4())
             color = self._section_color(section_name)
             section_tasks: list[GanttTaskDTO] = []
@@ -215,14 +204,34 @@ class GanttBuilder:
 
         return calculate_labor_hours(3, workers, self.HOURS_PER_DAY)
 
-    def _sort_sections(self, sections: list[str]) -> list[str]:
-        def key(name: str) -> int:
-            lower = name.lower()
-            for i, kw in enumerate(SECTION_ORDER):
-                if kw in lower:
-                    return i
-            return len(SECTION_ORDER)
-        return sorted(sections, key=key)
+    def _group_estimates_by_section_run(self, estimates: list) -> list[tuple[str, list]]:
+        ordered_estimates = sorted(
+            estimates,
+            key=lambda est: (
+                getattr(est, "row_order", 0),
+                getattr(est, "created_at", None) or "",
+                getattr(est, "id", ""),
+            ),
+        )
+
+        groups: list[tuple[str, list]] = []
+        current_name: str | None = None
+        current_items: list = []
+
+        for est in ordered_estimates:
+            section_name = (str(getattr(est, "section", "") or "").strip() or "Прочие работы")
+            if current_name != section_name:
+                if current_items:
+                    groups.append((current_name or "Прочие работы", current_items))
+                current_name = section_name
+                current_items = [est]
+                continue
+            current_items.append(est)
+
+        if current_items:
+            groups.append((current_name or "Прочие работы", current_items))
+
+        return groups
 
     def _section_color(self, section: str) -> str:
         lower = section.lower()

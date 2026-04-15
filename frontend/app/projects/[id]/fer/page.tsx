@@ -132,6 +132,11 @@ export default function FerPage() {
   }, []);
 
   function openCollections() {
+    setSearchValue("");
+    setSearchResults([]);
+    setSearchActive(false);
+    setSearchLoad(false);
+    setSearchError(null);
     setBrowse(null);
     setDetail(null);
   }
@@ -143,6 +148,12 @@ export default function FerPage() {
     setSearchLoad(false);
     setSearchError(null);
   }
+
+  useEffect(() => {
+    const handleNavigateRoot = () => openCollections();
+    window.addEventListener("fer:navigate-root", handleNavigateRoot);
+    return () => window.removeEventListener("fer:navigate-root", handleNavigateRoot);
+  }, []);
 
   function openLevel(params: { collectionId: number; sectionId?: number; subsectionId?: number }) {
     setBrowseLoad(true);
@@ -246,12 +257,24 @@ export default function FerPage() {
           }}
         >
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-            <div>
+            <button
+              type="button"
+              onClick={openCollections}
+              style={{
+                border: "none",
+                background: "transparent",
+                padding: 0,
+                margin: 0,
+                textAlign: "left",
+                cursor: "pointer",
+              }}
+              title="Открыть список сборников"
+            >
               <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".08em" }}>
                 Справочник
               </div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>ФЕР</div>
-            </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>ФЕР</div>
+            </button>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
               <form onSubmit={submitSearch} style={{ display: "flex", alignItems: "center", gap: 0 }}>
                 <input

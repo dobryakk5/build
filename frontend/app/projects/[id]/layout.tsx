@@ -218,7 +218,13 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
         {tabs.map((tab) => (
           <button
             key={tab.id}
-            onClick={() => router.push(tab.path)}
+            onClick={() => {
+              if (tab.id === "fer" && pathname.startsWith(tab.path)) {
+                window.dispatchEvent(new Event("fer:navigate-root"));
+                return;
+              }
+              router.push(tab.path);
+            }}
             style={{
               padding: "10px 14px",
               border: "none",

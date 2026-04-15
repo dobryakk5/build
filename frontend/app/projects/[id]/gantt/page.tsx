@@ -37,6 +37,7 @@ type ApiTask = {
   is_group?: boolean;
   workers_count?: number | null;
   labor_hours?: number | null;
+  fer_labor_hours?: number | null;
   hours_per_day?: number | null;
   req_hidden_work_act?: boolean;
   req_intermediate_act?: boolean;
@@ -620,6 +621,7 @@ export default function App() {
     dur: t.working_days,
     workers_count: t.workers_count ?? null,
     labor_hours: t.labor_hours ?? null,
+    fer_labor_hours: t.fer_labor_hours ?? null,
     hours_per_day: t.hours_per_day ?? DEFAULT_HOURS_PER_DAY,
     req_hidden_work_act: t.req_hidden_work_act ?? false,
     req_intermediate_act: t.req_intermediate_act ?? false,
@@ -1781,7 +1783,7 @@ export default function App() {
                       <div className="pfield-val mono">{computedPanelDuration} дн.</div>
                     </div>
                     <div className="pfield">
-                      <div className="pfield-label">Трудоемкость</div>
+                      <div className="pfield-label">Трудозатраты</div>
                       {canEditPanelTask && panelForm && !panelTaskHasKids
                         ? <input
                             type="number"
@@ -1793,6 +1795,12 @@ export default function App() {
                           />
                         : <div className="pfield-val mono">{panelTaskHasKids ? "—" : `${formatHoursValue(panelTask.labor_hours)} ч`}</div>
                       }
+                    </div>
+                    <div className="pfield">
+                      <div className="pfield-label">Трудозатраты ФЕР</div>
+                      <div className="pfield-val mono">
+                        {panelTaskHasKids ? "—" : panelTask.fer_labor_hours != null ? `${formatHoursValue(panelTask.fer_labor_hours)} чел.-ч` : "—"}
+                      </div>
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Исполнители</div>

@@ -39,6 +39,16 @@ router = APIRouter(prefix="/projects/{project_id}/gantt", tags=["gantt"])
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _estimate_fer_labor_hours(estimate: Estimate | None) -> float | None:
+    if estimate is None or estimate.fer_words_human_hours is None:
+        return None
+
+    fer_human_hours = float(estimate.fer_words_human_hours)
+    if estimate.quantity is None:
+        return round(fer_human_hours, 2)
+
+    return round(fer_human_hours * float(estimate.quantity), 2)
+
 async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
     """Добавляет вычисляемые поля к задаче."""
 
@@ -84,6 +94,7 @@ async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
         working_days   = task.working_days,
         workers_count  = task.workers_count,
         labor_hours    = float(task.labor_hours) if task.labor_hours is not None else None,
+        fer_labor_hours = _estimate_fer_labor_hours(estimate),
         hours_per_day  = float(task.hours_per_day or DEFAULT_HOURS_PER_DAY),
         end_date       = end_date,
         progress       = progress,

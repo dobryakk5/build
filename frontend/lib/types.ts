@@ -11,6 +11,7 @@ export interface Task {
   is_group?: boolean;
   workers_count?: number | null;
   labor_hours?: number | null;
+  fer_labor_hours?: number | null;
   hours_per_day?: number | null;
   req_hidden_work_act?: boolean;
   req_intermediate_act?: boolean;

@@ -76,6 +76,7 @@ class TaskResponse(BaseModel):
     working_days: int
     workers_count: int | None
     labor_hours:  float | None
+    fer_labor_hours: float | None = None
     hours_per_day: float
     end_date:     date         # вычисляется в сервисе
     progress:     int          # для группы — вычисленный, для листа — stored
