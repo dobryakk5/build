@@ -36,6 +36,14 @@ def _build_message(*, to_email: str, subject: str, html: str) -> EmailMessage:
     return message
 
 
+def resolve_email_provider() -> str:
+    if settings.EMAIL_PROVIDER == "resend" and settings.RESEND_API_KEY:
+        return "resend"
+    if settings.EMAIL_PROVIDER == "smtp":
+        return "smtp"
+    return "log"
+
+
 def _send_via_smtp(*, to_email: str, subject: str, html: str) -> None:
     if not settings.SMTP_HOST:
         raise RuntimeError("SMTP_HOST is not configured")
@@ -60,8 +68,10 @@ def _send_via_smtp(*, to_email: str, subject: str, html: str) -> None:
         server.send_message(message, from_addr=_smtp_sender_email(), to_addrs=[to_email])
 
 
-async def _send_email(*, to_email: str, subject: str, html: str) -> None:
-    if settings.EMAIL_PROVIDER == "resend" and settings.RESEND_API_KEY:
+async def _send_email(*, to_email: str, subject: str, html: str) -> str:
+    provider = resolve_email_provider()
+
+    if provider == "resend":
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 "https://api.resend.com/emails",
@@ -77,23 +87,27 @@ async def _send_email(*, to_email: str, subject: str, html: str) -> None:
                 },
             )
             response.raise_for_status()
-        return
+        logger.info("email_sent", extra={"provider": "resend", "to": to_email, "subject": subject})
+        return "resend"
 
-    if settings.EMAIL_PROVIDER == "smtp":
+    if provider == "smtp":
         await asyncio.to_thread(
             _send_via_smtp,
             to_email=to_email,
             subject=subject,
             html=html,
         )
-        return
+        logger.info("email_sent", extra={"provider": "smtp", "to": to_email, "subject": subject})
+        return "smtp"
 
-    logger.info("Email provider fallback", extra={"provider": settings.EMAIL_PROVIDER, "to_email": to_email, "subject": subject, "html": html})
+    logger.info("email_dry_run", extra={"provider": "log", "to": to_email, "subject": subject})
+    logger.debug("email_dry_run_body", extra={"provider": "log", "to": to_email, "subject": subject, "html": html})
+    return "log"
 
 
-async def send_verification_email(*, to_email: str, token: str) -> None:
+async def send_verification_email(*, to_email: str, token: str) -> str:
     verify_url = _full_url("/auth/verify-email", token)
-    await _send_email(
+    return await _send_email(
         to_email=to_email,
         subject="Подтвердите email",
         html=(
@@ -104,9 +118,9 @@ async def send_verification_email(*, to_email: str, token: str) -> None:
     )
 
 
-async def send_password_reset_email(*, to_email: str, token: str) -> None:
+async def send_password_reset_email(*, to_email: str, token: str) -> str:
     reset_url = _full_url("/auth/reset-password", token)
-    await _send_email(
+    return await _send_email(
         to_email=to_email,
         subject="Сброс пароля",
         html=(

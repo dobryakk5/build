@@ -27,7 +27,7 @@ from app.services.auth_service import (
     set_auth_cookies,
     utcnow,
 )
-from app.services.email_service import send_password_reset_email, send_verification_email
+from app.services.email_service import resolve_email_provider, send_password_reset_email, send_verification_email
 from app.services.rate_limit_service import clear_rate_limit, enforce_rate_limit
 
 
@@ -103,18 +103,54 @@ def user_dict(user: User, role: str | None = None) -> AuthUserResponse:
     )
 
 
-async def _send_verification_email_safe(*, email: str, token: str) -> None:
+async def _log_email_delivery_event_safe(
+    *,
+    db: AsyncSession,
+    request: Request,
+    event_type: str,
+    email_kind: str,
+    provider: str,
+    user: User | None = None,
+    email: str | None = None,
+    error: str | None = None,
+) -> None:
+    details = {"email_type": email_kind, "provider": provider}
+    if error:
+        details["error"] = error
+
     try:
-        await send_verification_email(to_email=email, token=token)
+        await log_auth_event(
+            db,
+            event_type=event_type,
+            request=request,
+            user=user,
+            email=email,
+            details=details,
+        )
+        await db.commit()
     except Exception:
+        await db.rollback()
+        logger.exception("Failed to persist auth audit event %s for %s email", event_type, email_kind)
+
+
+async def _send_verification_email_safe(*, email: str, token: str) -> tuple[bool, str, str | None]:
+    provider = resolve_email_provider()
+    try:
+        provider = await send_verification_email(to_email=email, token=token)
+        return True, provider, None
+    except Exception as exc:
         logger.exception("Failed to send verification email to %s", email)
+        return False, provider, str(exc)
 
 
-async def _send_password_reset_email_safe(*, email: str, token: str) -> None:
+async def _send_password_reset_email_safe(*, email: str, token: str) -> tuple[bool, str, str | None]:
+    provider = resolve_email_provider()
     try:
-        await send_password_reset_email(to_email=email, token=token)
-    except Exception:
+        provider = await send_password_reset_email(to_email=email, token=token)
+        return True, provider, None
+    except Exception as exc:
         logger.exception("Failed to send password reset email to %s", email)
+        return False, provider, str(exc)
 
 
 def _login_failure_key(request: Request, email: str) -> str:
@@ -174,7 +210,16 @@ async def register(
     await db.commit()
 
     set_auth_cookies(response, access_token=access_token, refresh_token=raw_refresh_token)
-    await _send_verification_email_safe(email=user.email, token=verification_token)
+    sent, provider, error = await _send_verification_email_safe(email=user.email, token=verification_token)
+    await _log_email_delivery_event_safe(
+        db=db,
+        request=request,
+        event_type="email_sent" if sent else "email_failed",
+        email_kind="verification",
+        provider=provider,
+        user=user,
+        error=error,
+    )
 
     payload = user_dict(user)
     return AuthResponse(
@@ -318,7 +363,16 @@ async def resend_verification(
     verification_token = await issue_email_verification_token(db, user_id=current_user.id)
     await log_auth_event(db, event_type="resend_verification", request=request, user=current_user)
     await db.commit()
-    await _send_verification_email_safe(email=current_user.email, token=verification_token)
+    sent, provider, error = await _send_verification_email_safe(email=current_user.email, token=verification_token)
+    await _log_email_delivery_event_safe(
+        db=db,
+        request=request,
+        event_type="email_sent" if sent else "email_failed",
+        email_kind="verification",
+        provider=provider,
+        user=current_user,
+        error=error,
+    )
 
 
 @router.post("/forgot-password", status_code=204)
@@ -339,7 +393,16 @@ async def forgot_password(
         reset_token = await issue_password_reset_token(db, user_id=user.id)
         await log_auth_event(db, event_type="forgot_password", request=request, user=user)
         await db.commit()
-        await _send_password_reset_email_safe(email=user.email, token=reset_token)
+        sent, provider, error = await _send_password_reset_email_safe(email=user.email, token=reset_token)
+        await _log_email_delivery_event_safe(
+            db=db,
+            request=request,
+            event_type="email_sent" if sent else "email_failed",
+            email_kind="password_reset",
+            provider=provider,
+            user=user,
+            error=error,
+        )
         return
 
     await log_auth_event(db, event_type="forgot_password", request=request, email=body.email, details={"user_found": False})

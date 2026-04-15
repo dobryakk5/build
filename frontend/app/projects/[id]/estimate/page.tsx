@@ -636,37 +636,63 @@ function SectionGroupAiControls({
   running,
   onRun,
   onOpenCandidates,
+  onOpenManual,
 }: {
   representativeRow: EstimateRow;
   running: boolean;
   onRun: (row: EstimateRow) => Promise<void>;
   onOpenCandidates: (row: EstimateRow) => void;
+  onOpenManual: (row: EstimateRow) => void;
 }) {
   const hasSection = Boolean(representativeRow.section?.trim());
 
   return (
     <div style={{ display: "grid", gap: 6 }}>
-      <button
-        type="button"
-        onClick={() => onRun(representativeRow)}
-        disabled={running || !hasSection}
-        title={hasSection ? "Определить раздел или сборник ФЕР по группе работ" : "У группы нет названия"}
-        style={{
-          border: "none",
-          background: "transparent",
-          padding: 0,
-          margin: 0,
-          color: running ? "var(--muted)" : hasSection ? "var(--blue-dark)" : "var(--muted)",
-          cursor: running || !hasSection ? "default" : "pointer",
-          fontSize: 11,
-          fontWeight: 700,
-          textDecoration: "underline",
-          opacity: running || !hasSection ? 0.7 : 1,
-          width: "fit-content",
-        }}
-      >
-        {running ? "ИИ раздел..." : "ИИ раздел"}
-      </button>
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+        <button
+          type="button"
+          onClick={() => onRun(representativeRow)}
+          disabled={running || !hasSection}
+          title={hasSection ? "Определить раздел или сборник ФЕР по группе работ" : "У группы нет названия"}
+          style={{
+            border: "none",
+            background: "transparent",
+            padding: 0,
+            margin: 0,
+            color: running ? "var(--muted)" : hasSection ? "var(--blue-dark)" : "var(--muted)",
+            cursor: running || !hasSection ? "default" : "pointer",
+            fontSize: 11,
+            fontWeight: 700,
+            textDecoration: "underline",
+            opacity: running || !hasSection ? 0.7 : 1,
+            width: "fit-content",
+          }}
+        >
+          {running ? "ИИ раздел..." : "ИИ раздел"}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => onOpenManual(representativeRow)}
+          disabled={!hasSection}
+          title={hasSection ? "Выбрать сборник или раздел ФЕР вручную" : "У группы нет названия"}
+          style={{
+            border: "none",
+            background: "transparent",
+            padding: 0,
+            margin: 0,
+            color: hasSection ? "var(--blue-dark)" : "var(--muted)",
+            cursor: hasSection ? "pointer" : "default",
+            fontSize: 11,
+            fontWeight: 600,
+            textDecoration: "underline",
+            opacity: hasSection ? 1 : 0.7,
+            width: "fit-content",
+          }}
+        >
+          Выбрать вручную
+        </button>
+      </div>
 
       {representativeRow.fer_group_is_ambiguous && representativeRow.fer_group_candidates?.length ? (
         <button
@@ -1611,6 +1637,7 @@ export default function EstimatePage() {
                     running={runningGroupSectionKey === sectionName}
                     onRun={handleAIGroupMatch}
                     onOpenCandidates={(row) => setGroupCandidatesModal({ sectionKey: row.section ?? "Без раздела" })}
+                    onOpenManual={openManualGroupModal}
                   />
                 </td>
                 <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>

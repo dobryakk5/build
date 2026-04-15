@@ -1,9 +1,12 @@
 from pathlib import Path
+import logging
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi import HTTPException, Response
 import pytest
+from starlette.requests import Request
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -83,3 +86,117 @@ def test_effective_email_verification_allows_seed_test_account() -> None:
 
     assert is_effectively_email_verified(test_user) is True
     assert is_effectively_email_verified(regular_user) is False
+
+
+def _request() -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/auth/test",
+            "headers": [(b"user-agent", b"pytest-agent")],
+            "client": ("127.0.0.1", 12345),
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_log_email_delivery_event_safe_commits_audit_event(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api.routes import auth as auth_routes
+
+    captured: dict[str, object] = {}
+    db = AsyncMock()
+
+    async def fake_log_auth_event(db_arg, **kwargs):
+        captured["db"] = db_arg
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(auth_routes, "log_auth_event", fake_log_auth_event)
+
+    user = SimpleNamespace(id="user-1", email="user@example.com")
+    await auth_routes._log_email_delivery_event_safe(
+        db=db,
+        request=_request(),
+        event_type="email_failed",
+        email_kind="verification",
+        provider="smtp",
+        user=user,
+        error="smtp timeout",
+    )
+
+    assert captured["db"] is db
+    assert captured["kwargs"]["event_type"] == "email_failed"
+    assert captured["kwargs"]["user"] is user
+    assert captured["kwargs"]["details"] == {
+        "email_type": "verification",
+        "provider": "smtp",
+        "error": "smtp timeout",
+    }
+    db.commit.assert_awaited_once()
+    db.rollback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_log_email_delivery_event_safe_rolls_back_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.api.routes import auth as auth_routes
+
+    db = AsyncMock()
+
+    async def fake_log_auth_event(db_arg, **kwargs):
+        raise RuntimeError("db write failed")
+
+    monkeypatch.setattr(auth_routes, "log_auth_event", fake_log_auth_event)
+    caplog.set_level(logging.ERROR, logger=auth_routes.logger.name)
+
+    await auth_routes._log_email_delivery_event_safe(
+        db=db,
+        request=_request(),
+        event_type="email_sent",
+        email_kind="password_reset",
+        provider="resend",
+        email="user@example.com",
+    )
+
+    db.commit.assert_not_awaited()
+    db.rollback.assert_awaited_once()
+    assert "Failed to persist auth audit event email_sent for password_reset email" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_send_verification_email_safe_returns_provider_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api.routes import auth as auth_routes
+
+    async def fake_send_verification_email(*, to_email: str, token: str) -> str:
+        assert to_email == "user@example.com"
+        assert token == "token-123"
+        return "resend"
+
+    monkeypatch.setattr(auth_routes, "send_verification_email", fake_send_verification_email)
+
+    assert await auth_routes._send_verification_email_safe(email="user@example.com", token="token-123") == (
+        True,
+        "resend",
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_password_reset_email_safe_returns_error_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api.routes import auth as auth_routes
+
+    async def fake_send_password_reset_email(*, to_email: str, token: str) -> str:
+        raise RuntimeError("smtp unavailable")
+
+    monkeypatch.setattr(auth_routes, "send_password_reset_email", fake_send_password_reset_email)
+    monkeypatch.setattr(auth_routes, "resolve_email_provider", lambda: "smtp")
+
+    assert await auth_routes._send_password_reset_email_safe(email="user@example.com", token="token-123") == (
+        False,
+        "smtp",
+        "smtp unavailable",
+    )

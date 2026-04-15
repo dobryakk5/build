@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { auth } from "@/lib/api";
+import { useUser } from "@/lib/UserContext";
 
 type AuthLoginFormProps = {
   variant?: "page" | "modal";
@@ -34,6 +35,7 @@ export default function AuthLoginForm({
   onSuccess,
 }: AuthLoginFormProps) {
   const router = useRouter();
+  const { refresh } = useUser();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -53,6 +55,7 @@ export default function AuthLoginForm({
 
   async function completeLogin(loginEmail: string, loginPassword: string) {
     await auth.login(loginEmail, loginPassword);
+    await refresh();
     onSuccess?.();
     router.push("/projects");
   }

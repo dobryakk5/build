@@ -1,3 +1,5 @@
+redis-server /opt/homebrew/etc/redis.conf
+
 
 ## 🚀 Деплой без Docker
 
@@ -46,7 +48,7 @@ redis-cli ping  # должен ответить PONG
 
 ### 4. Бэкенд (FastAPI)
 
-cd app/backend
+cd backend
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 
