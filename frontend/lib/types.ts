@@ -110,6 +110,18 @@ export interface FerGroupCandidate {
   score: number;
 }
 
+export interface FerGroupOptionSection {
+  id: number;
+  title: string;
+}
+
+export interface FerGroupOptionCollection {
+  id: number;
+  num: string;
+  name: string;
+  sections: FerGroupOptionSection[];
+}
+
 export interface WorkJournalEntry {
   entry_type: "work";
   id: string;

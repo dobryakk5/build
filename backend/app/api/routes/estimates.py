@@ -17,8 +17,10 @@ from app.schemas          import EstimateBatchResponse, EstimateRow, EstimateSum
 from app.services.estimate_fer_matcher import (
     _apply_group_match_result,
     confirm_group_candidate,
+    get_manual_group_options,
     match_estimate_group_with_vector,
     match_estimate_with_vector,
+    resolve_manual_group_match,
     start_fer_match_job,
 )
 from app.services.fer_words_service import (
@@ -460,6 +462,45 @@ async def confirm_estimate_fer_group(
 
     target_estimates = await _load_group_estimates(db, est)
     match = confirm_group_candidate(est, kind=body.kind, ref_id=body.ref_id)
+    matched_at = datetime.now(timezone.utc)
+    for target in target_estimates:
+        _apply_group_match_result(target, match, matched_at)
+    await db.commit()
+    payload = match.to_payload(est.id, matched_at)
+    payload["updated_rows_count"] = len(target_estimates)
+    return payload
+
+
+@router.get("/estimates/{estimate_id}/fer-group-options")
+async def get_estimate_fer_group_options(
+    project_id: UUID,
+    estimate_id: UUID,
+    member: ProjectMember = Depends(require_action(Action.VIEW)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    return {
+        "collections": await get_manual_group_options(db, est),
+    }
+
+
+@router.patch("/estimates/{estimate_id}/fer-group-manual")
+async def update_estimate_fer_group_manual(
+    project_id: UUID,
+    estimate_id: UUID,
+    body: FerGroupConfirmUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    target_estimates = await _load_group_estimates(db, est)
+    match = await resolve_manual_group_match(db, est, kind=body.kind, ref_id=body.ref_id)
     matched_at = datetime.now(timezone.utc)
     for target in target_estimates:
         _apply_group_match_result(target, match, matched_at)

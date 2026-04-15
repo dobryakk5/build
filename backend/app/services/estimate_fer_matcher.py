@@ -231,6 +231,168 @@ def confirm_group_candidate(estimate: Estimate, *, kind: str, ref_id: int) -> Gr
     raise HTTPException(400, "Можно подтвердить только кандидата из текущего списка fer_group_candidates.")
 
 
+async def get_manual_group_options(
+    db: AsyncSession,
+    estimate: Estimate,
+) -> list[dict[str, Any]]:
+    if not estimate.estimate_batch_id:
+        raise HTTPException(400, "У строки сметы не указан блок сметы.")
+
+    allowed_section_ids = await _get_allowed_section_ids_for_batch(db, estimate.estimate_batch_id)
+    if not allowed_section_ids:
+        raise HTTPException(
+            400,
+            "Для типа этой сметы не настроены разрешённые разделы ФЕР в fer.work_type_sections.",
+        )
+
+    stmt = text(
+        """
+        SELECT
+            c.id AS collection_id,
+            c.num AS collection_num,
+            c.name AS collection_name,
+            s.id AS section_id,
+            s.title AS section_title
+        FROM fer.sections s
+        JOIN fer.collections c ON c.id = s.collection_id
+        WHERE s.id = ANY(:allowed_section_ids)
+          AND NOT (
+              COALESCE(c.ignored, FALSE)
+              OR COALESCE(s.ignored, FALSE)
+          )
+        ORDER BY c.num, s.id
+        """
+    ).bindparams(bindparam("allowed_section_ids", type_=postgresql.ARRAY(Integer)))
+
+    rows = (
+        await db.execute(stmt, {"allowed_section_ids": [int(section_id) for section_id in allowed_section_ids]})
+    ).mappings().all()
+
+    grouped: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        collection_id = int(row["collection_id"])
+        bucket = grouped.setdefault(
+            collection_id,
+            {
+                "id": collection_id,
+                "num": str(row["collection_num"]).strip(),
+                "name": str(row["collection_name"]).strip(),
+                "sections": [],
+            },
+        )
+        bucket["sections"].append(
+            {
+                "id": int(row["section_id"]),
+                "title": str(row["section_title"]).strip(),
+            }
+        )
+
+    return list(grouped.values())
+
+
+async def resolve_manual_group_match(
+    db: AsyncSession,
+    estimate: Estimate,
+    *,
+    kind: str,
+    ref_id: int,
+) -> GroupMatchResult:
+    if not estimate.estimate_batch_id:
+        raise HTTPException(400, "У строки сметы не указан блок сметы.")
+
+    allowed_section_ids = await _get_allowed_section_ids_for_batch(db, estimate.estimate_batch_id)
+    if not allowed_section_ids:
+        raise HTTPException(
+            400,
+            "Для типа этой сметы не настроены разрешённые разделы ФЕР в fer.work_type_sections.",
+        )
+
+    if kind == "section":
+        stmt = text(
+            """
+            SELECT
+                s.id AS ref_id,
+                s.title AS title,
+                c.id AS collection_id,
+                c.num AS collection_num,
+                c.name AS collection_name
+            FROM fer.sections s
+            JOIN fer.collections c ON c.id = s.collection_id
+            WHERE s.id = :ref_id
+              AND s.id = ANY(:allowed_section_ids)
+              AND NOT (
+                  COALESCE(c.ignored, FALSE)
+                  OR COALESCE(s.ignored, FALSE)
+              )
+            """
+        ).bindparams(bindparam("allowed_section_ids", type_=postgresql.ARRAY(Integer)))
+        row = (
+            await db.execute(
+                stmt,
+                {
+                    "ref_id": int(ref_id),
+                    "allowed_section_ids": [int(section_id) for section_id in allowed_section_ids],
+                },
+            )
+        ).mappings().first()
+        if row is None:
+            raise HTTPException(400, "Выбранный раздел ФЕР недоступен для этого типа сметы.")
+        return GroupMatchResult(
+            kind="section",
+            ref_id=int(row["ref_id"]),
+            title=str(row["title"]).strip(),
+            collection_id=int(row["collection_id"]),
+            collection_num=str(row["collection_num"]).strip() if row["collection_num"] else None,
+            collection_name=str(row["collection_name"]).strip() if row["collection_name"] else None,
+            score=1.0,
+            is_ambiguous=False,
+            candidates=None,
+            no_match=False,
+        )
+
+    if kind == "collection":
+        allowed_collection_ids = await _get_allowed_collection_ids(db, allowed_section_ids)
+        stmt = text(
+            """
+            SELECT
+                c.id AS ref_id,
+                concat('Сборник ', c.num, '. ', c.name) AS title,
+                c.id AS collection_id,
+                c.num AS collection_num,
+                c.name AS collection_name
+            FROM fer.collections c
+            WHERE c.id = :ref_id
+              AND c.id = ANY(:allowed_collection_ids)
+              AND NOT COALESCE(c.ignored, FALSE)
+            """
+        ).bindparams(bindparam("allowed_collection_ids", type_=postgresql.ARRAY(Integer)))
+        row = (
+            await db.execute(
+                stmt,
+                {
+                    "ref_id": int(ref_id),
+                    "allowed_collection_ids": [int(collection_id) for collection_id in allowed_collection_ids],
+                },
+            )
+        ).mappings().first()
+        if row is None:
+            raise HTTPException(400, "Выбранный сборник ФЕР недоступен для этого типа сметы.")
+        return GroupMatchResult(
+            kind="collection",
+            ref_id=int(row["ref_id"]),
+            title=str(row["title"]).strip(),
+            collection_id=int(row["collection_id"]),
+            collection_num=str(row["collection_num"]).strip() if row["collection_num"] else None,
+            collection_name=str(row["collection_name"]).strip() if row["collection_name"] else None,
+            score=1.0,
+            is_ambiguous=False,
+            candidates=None,
+            no_match=False,
+        )
+
+    raise HTTPException(400, "kind должен быть 'collection' или 'section'.")
+
+
 async def start_fer_match_job(
     project_id: str,
     estimate_batch_id: str,

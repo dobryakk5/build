@@ -8,6 +8,7 @@ import type {
   JournalEntry,
   FerBrowseResponse,
   FerCollectionSummary,
+  FerGroupOptionCollection,
   FerSearchResult,
   FerTableDetail,
   FerWordsCandidate,
@@ -186,6 +187,13 @@ export const estimates = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  ferGroupOptions: (pid: string, eid: string) =>
+    request<{ collections: FerGroupOptionCollection[] }>(`/projects/${pid}/estimates/${eid}/fer-group-options`),
+  updateFerGroupManual: (pid: string, eid: string, body: { kind: "section" | "collection"; ref_id: number }) =>
+    request<any>(`/projects/${pid}/estimates/${eid}/fer-group-manual`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   matchFerVectorRow: (pid: string, eid: string) =>
     request<any>(`/projects/${pid}/estimates/${eid}/match-fer-vector`, {
       method: "POST",
@@ -310,8 +318,23 @@ export const fer = {
   collections: () =>
     request<FerCollectionSummary[]>("/fer/collections"),
 
-  search: (q: string, limit = 50) =>
-    request<FerSearchResult[]>(`/fer/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+  search: (
+    q: string,
+    limit = 50,
+    scope?: { collectionId?: number | null; sectionId?: number | null },
+  ) => {
+    const params = new URLSearchParams({
+      q,
+      limit: String(limit),
+    });
+    if (scope?.collectionId != null) {
+      params.set("collection_id", String(scope.collectionId));
+    }
+    if (scope?.sectionId != null) {
+      params.set("section_id", String(scope.sectionId));
+    }
+    return request<FerSearchResult[]>(`/fer/search?${params.toString()}`);
+  },
 
   browse: (params: { collectionId: number; sectionId?: number; subsectionId?: number }) => {
     const search = new URLSearchParams({

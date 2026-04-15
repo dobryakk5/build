@@ -140,3 +140,91 @@ async def test_confirm_estimate_fer_group_confirms_existing_candidate(monkeypatc
     assert result["fer_group_is_ambiguous"] is False
     assert result["fer_group_candidates"] is None
     assert result["updated_rows_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_estimate_fer_group_options_returns_allowed_structure(monkeypatch):
+    from app.api.routes.estimates import get_estimate_fer_group_options
+
+    estimate = SimpleNamespace(
+        id="est-4",
+        project_id="project-1",
+        deleted_at=None,
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=estimate)
+    monkeypatch.setattr(
+        "app.api.routes.estimates.get_manual_group_options",
+        AsyncMock(
+            return_value=[
+                {
+                    "id": 1,
+                    "num": "01",
+                    "name": "Земляные работы",
+                    "sections": [{"id": 1, "title": "Раздел 1"}],
+                }
+            ]
+        ),
+    )
+
+    result = await get_estimate_fer_group_options("project-1", "est-4", member=object(), db=db)
+
+    assert result["collections"][0]["id"] == 1
+    assert result["collections"][0]["sections"][0]["id"] == 1
+
+
+@pytest.mark.asyncio
+async def test_update_estimate_fer_group_manual_applies_selection(monkeypatch):
+    from app.api.routes.estimates import FerGroupConfirmUpdate, update_estimate_fer_group_manual
+    from app.services.estimate_fer_matcher import GroupMatchResult
+
+    estimate = SimpleNamespace(
+        id="est-5",
+        project_id="project-1",
+        deleted_at=None,
+        fer_group_kind=None,
+        fer_group_ref_id=None,
+        fer_group_title=None,
+        fer_group_collection_id=None,
+        fer_group_collection_num=None,
+        fer_group_collection_name=None,
+        fer_group_match_score=None,
+        fer_group_matched_at=None,
+        fer_group_is_ambiguous=False,
+        fer_group_candidates=None,
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=estimate)
+    monkeypatch.setattr(
+        "app.api.routes.estimates._load_group_estimates",
+        AsyncMock(return_value=[estimate]),
+    )
+    monkeypatch.setattr(
+        "app.api.routes.estimates.resolve_manual_group_match",
+        AsyncMock(
+            return_value=GroupMatchResult(
+                kind="section",
+                ref_id=1,
+                title="Раздел 1. Земляные работы",
+                collection_id=1,
+                collection_num="01",
+                collection_name="Земляные работы",
+                score=1.0,
+                is_ambiguous=False,
+                candidates=None,
+                no_match=False,
+            )
+        ),
+    )
+
+    result = await update_estimate_fer_group_manual(
+        "project-1",
+        "est-5",
+        FerGroupConfirmUpdate(kind="section", ref_id=1),
+        member=object(),
+        db=db,
+    )
+
+    assert result["fer_group_kind"] == "section"
+    assert result["fer_group_ref_id"] == 1
+    assert result["updated_rows_count"] == 1

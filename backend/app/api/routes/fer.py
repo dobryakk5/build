@@ -335,8 +335,13 @@ async def fer_browse(
 async def fer_search(
     q: str = Query(..., min_length=1),
     limit: int = Query(50, ge=1, le=100),
+    collection_id: int | None = Query(None),
+    section_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
+    if collection_id is not None and section_id is not None:
+        raise HTTPException(status_code=400, detail="Use either collection_id or section_id, not both")
+
     query = q.strip()
     if not query:
         return []
@@ -400,14 +405,18 @@ async def fer_search(
             LEFT JOIN fer.sections s ON s.id = t.section_id
             LEFT JOIN fer.subsections ss ON ss.id = t.subsection_id
             LEFT JOIN fer.fer_rows fr ON fr.table_id = t.id
-            WHERE t.table_title ILIKE :pattern
-               OR COALESCE(t.common_work_name, '') ILIKE :pattern
-               OR c.num ILIKE :pattern
-               OR c.name ILIKE :pattern
-               OR COALESCE(s.title, '') ILIKE :pattern
-               OR COALESCE(ss.title, '') ILIKE :pattern
-               OR COALESCE(fr.row_slug, '') ILIKE :pattern
-               OR COALESCE(fr.clarification, '') ILIKE :pattern
+            WHERE (
+                   t.table_title ILIKE :pattern
+                OR COALESCE(t.common_work_name, '') ILIKE :pattern
+                OR c.num ILIKE :pattern
+                OR c.name ILIKE :pattern
+                OR COALESCE(s.title, '') ILIKE :pattern
+                OR COALESCE(ss.title, '') ILIKE :pattern
+                OR COALESCE(fr.row_slug, '') ILIKE :pattern
+                OR COALESCE(fr.clarification, '') ILIKE :pattern
+            )
+              AND (CAST(:collection_id AS integer) IS NULL OR t.collection_id = CAST(:collection_id AS integer))
+              AND (CAST(:section_id AS integer) IS NULL OR t.section_id = CAST(:section_id AS integer))
         )
         SELECT
             table_id,
@@ -459,6 +468,8 @@ async def fer_search(
         {
             "pattern": f"%{query}%",
             "limit": limit,
+            "collection_id": collection_id,
+            "section_id": section_id,
         },
     )
 

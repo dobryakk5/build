@@ -6,7 +6,15 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { estimates, fer as ferApi } from "@/lib/api";
 import { fmtMoney } from "@/lib/dateUtils";
-import type { EstimateBatch, EstimateMaterial, EstimateRow, EstimateSummary, FerSearchResult, FerTableDetail } from "@/lib/types";
+import type {
+  EstimateBatch,
+  EstimateMaterial,
+  EstimateRow,
+  EstimateSummary,
+  FerGroupOptionCollection,
+  FerSearchResult,
+  FerTableDetail,
+} from "@/lib/types";
 import { useJobPoller } from "@/lib/useJobPoller";
 
 type ActFlagsPatch = {
@@ -22,6 +30,10 @@ type PopupState = {
 };
 
 type GroupCandidatesModalState = {
+  sectionKey: string;
+};
+
+type GroupManualModalState = {
   sectionKey: string;
 };
 
@@ -251,6 +263,19 @@ function FerSearchModal({
   const [searching, setSearching] = useState(false);
   const [saving, setSaving] = useState(false);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scope = !row.fer_group_is_ambiguous && row.fer_group_kind
+    ? row.fer_group_kind === "section" && row.fer_group_ref_id != null
+      ? {
+          sectionId: row.fer_group_ref_id,
+          label: `Поиск внутри раздела ФЕР: ${row.fer_group_title ?? "—"}`,
+        }
+      : row.fer_group_kind === "collection" && row.fer_group_collection_id != null
+        ? {
+            collectionId: row.fer_group_collection_id,
+            label: `Поиск внутри сборника ФЕР: Сборник ${row.fer_group_collection_num ?? ""}. ${row.fer_group_collection_name ?? row.fer_group_title ?? "—"}`.trim(),
+          }
+        : null
+    : null;
 
   useEffect(() => {
     if (q.trim().length < 2) {
@@ -263,7 +288,7 @@ function FerSearchModal({
     debounce.current = setTimeout(async () => {
       setSearching(true);
       try {
-        const data = await ferApi.search(q.trim(), 40);
+        const data = await ferApi.search(q.trim(), 40, scope ?? undefined);
         setResults(data as FerSearchResult[]);
       } catch {
         setResults([]);
@@ -276,7 +301,7 @@ function FerSearchModal({
         clearTimeout(debounce.current);
       }
     };
-  }, [q]);
+  }, [q, scope]);
 
   useEffect(() => {
     const onEsc = (event: KeyboardEvent) => {
@@ -350,11 +375,16 @@ function FerSearchModal({
         </div>
 
         <div style={{ padding: "12px 20px", borderBottom: "1px solid var(--border)" }}>
+          {scope?.label && (
+            <div style={{ marginBottom: 8, fontSize: 11, color: "var(--blue-dark)" }}>
+              {scope.label}
+            </div>
+          )}
           <input
             autoFocus
             value={q}
             onChange={(event) => setQ(event.target.value)}
-            placeholder="Поиск по названию работы, разделу, сборнику ФЕР..."
+            placeholder={scope ? "Поиск внутри заданного раздела или сборника ФЕР..." : "Поиск по названию работы, разделу, сборнику ФЕР..."}
             style={{
               width: "100%",
               padding: "9px 14px",
@@ -664,8 +694,10 @@ function SectionGroupAiControls({
 
 function GroupFerCell({
   row,
+  onOpenManual,
 }: {
   row: EstimateRow;
+  onOpenManual: (row: EstimateRow) => void;
 }) {
   if (!row.fer_group_kind || !row.fer_group_title) {
     return <span style={{ color: "var(--muted)" }}>—</span>;
@@ -676,13 +708,30 @@ function GroupFerCell({
 
   return (
     <div style={{ display: "grid", gap: 3, color: row.fer_group_is_ambiguous ? "var(--muted)" : "var(--text)" }}>
-      <div style={{ fontSize: 11, lineHeight: 1.35 }}>
-        {isSection ? "ФЕР сборника / раздела" : "ФЕР сборника"}: {row.fer_group_title}
-      </div>
+      <button
+        type="button"
+        onClick={() => onOpenManual(row)}
+        style={{
+          border: "none",
+          background: "transparent",
+          padding: 0,
+          margin: 0,
+          textAlign: "left",
+          color: row.fer_group_is_ambiguous ? "var(--muted)" : "var(--text)",
+          cursor: "pointer",
+          fontSize: 11,
+          lineHeight: 1.35,
+          textDecoration: "underline",
+          width: "fit-content",
+        }}
+      >
+        {row.fer_group_title}
+      </button>
       {row.fer_group_collection_num && row.fer_group_collection_name && (
         <div style={{ fontSize: 10, color: "var(--muted)", lineHeight: 1.35 }}>
-          Сборник {row.fer_group_collection_num}. {row.fer_group_collection_name}
-          {score ? ` · score ${score}` : ""}
+          {isSection
+            ? `Сборник ${row.fer_group_collection_num}. ${row.fer_group_collection_name}${score ? ` · score ${score}` : ""}`
+            : score ? `score ${score}` : null}
         </div>
       )}
       {row.fer_group_is_ambiguous && (
@@ -690,6 +739,247 @@ function GroupFerCell({
           Требуется выбор оператора
         </div>
       )}
+    </div>
+  );
+}
+
+function GroupManualModal({
+  sectionName,
+  representativeRow,
+  collections,
+  loading,
+  saving,
+  error,
+  onClose,
+  onSave,
+}: {
+  sectionName: string;
+  representativeRow: EstimateRow;
+  collections: FerGroupOptionCollection[];
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  onClose: () => void;
+  onSave: (row: EstimateRow, kind: "section" | "collection", refId: number) => Promise<void>;
+}) {
+  const [activeCollectionId, setActiveCollectionId] = useState<number | null>(null);
+  const [selectedValue, setSelectedValue] = useState<string>("");
+
+  useEffect(() => {
+    const fallbackCollectionId = collections[0]?.id ?? null;
+    const currentCollectionId = representativeRow.fer_group_collection_id ?? fallbackCollectionId;
+    setActiveCollectionId(currentCollectionId);
+    if (representativeRow.fer_group_kind && representativeRow.fer_group_ref_id != null) {
+      setSelectedValue(`${representativeRow.fer_group_kind}:${representativeRow.fer_group_ref_id}`);
+    } else if (fallbackCollectionId != null) {
+      setSelectedValue(`collection:${fallbackCollectionId}`);
+    } else {
+      setSelectedValue("");
+    }
+  }, [collections, representativeRow.fer_group_collection_id, representativeRow.fer_group_kind, representativeRow.fer_group_ref_id]);
+
+  useEffect(() => {
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+    document.addEventListener("keydown", onEsc);
+    return () => document.removeEventListener("keydown", onEsc);
+  }, [onClose]);
+
+  const activeCollection =
+    collections.find((collection) => collection.id === activeCollectionId) ??
+    collections[0] ??
+    null;
+
+  useEffect(() => {
+    if (!activeCollection) {
+      return;
+    }
+    if (selectedValue === `collection:${activeCollection.id}`) {
+      return;
+    }
+    if (selectedValue.startsWith("section:")) {
+      const sectionId = Number(selectedValue.split(":")[1]);
+      if (activeCollection.sections.some((section) => section.id === sectionId)) {
+        return;
+      }
+    }
+    setSelectedValue(`collection:${activeCollection.id}`);
+  }, [activeCollection, selectedValue]);
+
+  return (
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,.55)",
+        zIndex: 110,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
+    >
+      <div
+        style={{
+          width: 860,
+          maxWidth: "calc(100vw - 32px)",
+          maxHeight: "80vh",
+          background: "var(--surface)",
+          borderRadius: 12,
+          boxShadow: "0 24px 64px rgba(0,0,0,.28)",
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
+        <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4 }}>Ручной выбор ФЕР группы</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.4 }}>
+              Группа работ: <strong style={{ color: "var(--text)" }}>{sectionName}</strong>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 18, lineHeight: 1 }}>
+            ✕
+          </button>
+        </div>
+
+        {loading ? (
+          <div style={{ padding: 24, color: "var(--muted)", fontSize: 13 }}>Загружаем доступные сборники и разделы ФЕР...</div>
+        ) : error ? (
+          <div style={{ padding: 24, color: "var(--red)", fontSize: 13 }}>{error}</div>
+        ) : (
+          <div style={{ display: "grid", gridTemplateColumns: "280px minmax(0, 1fr)", minHeight: 320, maxHeight: "calc(80vh - 120px)" }}>
+            <div style={{ borderRight: "1px solid var(--border)", overflowY: "auto", padding: 12, display: "grid", gap: 8 }}>
+              {collections.map((collection) => {
+                const active = collection.id === activeCollectionId;
+                return (
+                  <button
+                    key={collection.id}
+                    type="button"
+                    onClick={() => setActiveCollectionId(collection.id)}
+                    style={{
+                      textAlign: "left",
+                      padding: "10px 12px",
+                      borderRadius: 8,
+                      border: active ? "1px solid rgba(59,130,246,.24)" : "1px solid var(--border)",
+                      background: active ? "rgba(59,130,246,.06)" : "var(--surface)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ fontSize: 12, fontWeight: 600 }}>{`Сборник ${collection.num}. ${collection.name}`}</div>
+                    <div style={{ marginTop: 4, fontSize: 10, color: "var(--muted)" }}>{collection.sections.length} разделов</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ overflowY: "auto", padding: 16, display: "grid", gap: 10 }}>
+              {activeCollection ? (
+                <>
+                  <label
+                    style={{
+                      display: "grid",
+                      gap: 4,
+                      padding: "10px 12px",
+                      border: selectedValue === `collection:${activeCollection.id}` ? "1px solid rgba(59,130,246,.28)" : "1px solid var(--border)",
+                      background: selectedValue === `collection:${activeCollection.id}` ? "rgba(59,130,246,.05)" : "var(--surface)",
+                      borderRadius: 8,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                      <input
+                        type="radio"
+                        name="manual-fer-group"
+                        checked={selectedValue === `collection:${activeCollection.id}`}
+                        onChange={() => setSelectedValue(`collection:${activeCollection.id}`)}
+                        style={{ marginTop: 2 }}
+                      />
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 600 }}>{`Сборник ${activeCollection.num}. ${activeCollection.name}`}</div>
+                        <div style={{ marginTop: 3, fontSize: 10, color: "var(--muted)" }}>Назначить весь сборник</div>
+                      </div>
+                    </div>
+                  </label>
+
+                  {activeCollection.sections.map((section) => (
+                    <label
+                      key={section.id}
+                      style={{
+                        display: "grid",
+                        gap: 4,
+                        padding: "10px 12px",
+                        border: selectedValue === `section:${section.id}` ? "1px solid rgba(59,130,246,.28)" : "1px solid var(--border)",
+                        background: selectedValue === `section:${section.id}` ? "rgba(59,130,246,.05)" : "var(--surface)",
+                        borderRadius: 8,
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                        <input
+                          type="radio"
+                          name="manual-fer-group"
+                          checked={selectedValue === `section:${section.id}`}
+                          onChange={() => setSelectedValue(`section:${section.id}`)}
+                          style={{ marginTop: 2 }}
+                        />
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.35 }}>{section.title}</div>
+                          <div style={{ marginTop: 3, fontSize: 10, color: "var(--muted)" }}>{`Сборник ${activeCollection.num}. ${activeCollection.name}`}</div>
+                        </div>
+                      </div>
+                    </label>
+                  ))}
+                </>
+              ) : (
+                <div style={{ color: "var(--muted)", fontSize: 13 }}>Нет доступных вариантов ФЕР для этой группы.</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{ padding: "7px 10px", borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface)", cursor: "pointer", fontSize: 12 }}
+          >
+            Закрыть
+          </button>
+          <button
+            type="button"
+            disabled={loading || saving || !selectedValue}
+            onClick={() => {
+              const [kind, refId] = selectedValue.split(":");
+              if (!kind || !refId) {
+                return;
+              }
+              onSave(representativeRow, kind as "section" | "collection", Number(refId));
+            }}
+            style={{
+              padding: "7px 12px",
+              borderRadius: 8,
+              border: "1px solid rgba(59,130,246,.18)",
+              background: "rgba(59,130,246,.08)",
+              color: "var(--blue-dark)",
+              cursor: saving ? "default" : "pointer",
+              opacity: saving ? 0.7 : 1,
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            {saving ? "Сохраняем..." : "Сохранить"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -865,6 +1155,10 @@ export default function EstimatePage() {
   const [runningGroupSectionKey, setRunningGroupSectionKey] = useState<string | null>(null);
   const [confirmingGroupSectionKey, setConfirmingGroupSectionKey] = useState<string | null>(null);
   const [groupCandidatesModal, setGroupCandidatesModal] = useState<GroupCandidatesModalState | null>(null);
+  const [groupManualModal, setGroupManualModal] = useState<GroupManualModalState | null>(null);
+  const [groupManualOptions, setGroupManualOptions] = useState<FerGroupOptionCollection[]>([]);
+  const [groupManualLoading, setGroupManualLoading] = useState(false);
+  const [groupManualError, setGroupManualError] = useState<string | null>(null);
 
   const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
 
@@ -928,6 +1222,7 @@ export default function EstimatePage() {
     setActiveBatchId(batchId);
     setPopup(null);
     setGroupCandidatesModal(null);
+    setGroupManualModal(null);
     router.replace(`/projects/${id}/estimate?batch=${batchId}`);
   };
 
@@ -1068,6 +1363,40 @@ export default function EstimatePage() {
     }
   };
 
+  const openManualGroupModal = async (selectedRow: EstimateRow) => {
+    const sectionKey = selectedRow.section ?? "Без раздела";
+    setGroupManualModal({ sectionKey });
+    setGroupManualLoading(true);
+    setGroupManualError(null);
+    try {
+      const result = await estimates.ferGroupOptions(id, selectedRow.id);
+      setGroupManualOptions(result.collections ?? []);
+    } catch (error: any) {
+      setGroupManualOptions([]);
+      setGroupManualError(error.message ?? "Не удалось загрузить варианты ФЕР.");
+    } finally {
+      setGroupManualLoading(false);
+    }
+  };
+
+  const handleManualGroupSave = async (
+    selectedRow: EstimateRow,
+    kind: "section" | "collection",
+    refId: number,
+  ) => {
+    const sectionKey = selectedRow.section ?? "Без раздела";
+    try {
+      setConfirmingGroupSectionKey(sectionKey);
+      const result = await estimates.updateFerGroupManual(id, selectedRow.id, { kind, ref_id: refId });
+      applyGroupMatchResult(selectedRow.section, result);
+      setGroupManualModal(null);
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setConfirmingGroupSectionKey(null);
+    }
+  };
+
   if (loading) {
     return <div style={{ padding: 24, color: "var(--muted)" }}>Загрузка сметы...</div>;
   }
@@ -1126,6 +1455,7 @@ export default function EstimatePage() {
   const matchStatus = matchJob?.status;
   const popupRow = popup ? rows.find((row) => row.id === popup.estimateId) ?? null : null;
   const groupCandidatesRow = groupCandidatesModal ? sections[groupCandidatesModal.sectionKey]?.[0] ?? null : null;
+  const groupManualRow = groupManualModal ? sections[groupManualModal.sectionKey]?.[0] ?? null : null;
 
   return (
     <div style={{ padding: 16, height: "100%", overflow: "auto" }}>
@@ -1266,7 +1596,7 @@ export default function EstimatePage() {
                     verticalAlign: "top",
                   }}
                 >
-                  <GroupFerCell row={sectionRows[0]} />
+                  <GroupFerCell row={sectionRows[0]} onOpenManual={openManualGroupModal} />
                 </td>
                 <td
                   style={{
@@ -1360,6 +1690,18 @@ export default function EstimatePage() {
           saving={confirmingGroupSectionKey === groupCandidatesModal.sectionKey}
           onClose={() => setGroupCandidatesModal(null)}
           onConfirm={handleConfirmGroup}
+        />
+      )}
+      {groupManualModal && groupManualRow && (
+        <GroupManualModal
+          sectionName={groupManualModal.sectionKey}
+          representativeRow={groupManualRow}
+          collections={groupManualOptions}
+          loading={groupManualLoading}
+          saving={confirmingGroupSectionKey === groupManualModal.sectionKey}
+          error={groupManualError}
+          onClose={() => setGroupManualModal(null)}
+          onSave={handleManualGroupSave}
         />
       )}
     </div>
