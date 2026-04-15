@@ -624,7 +624,24 @@ async def match_estimate_group_with_vector(
             no_match=False,
         )
 
-    if top_candidate.score >= float(settings.FER_GROUP_COLLECTION_AMBIGUOUS_THRESHOLD):
+    if len(collection_candidates) == 1:
+        return GroupMatchResult(
+            kind="collection",
+            ref_id=top_candidate.ref_id,
+            title=top_candidate.title,
+            collection_id=top_candidate.collection_id,
+            collection_num=top_candidate.collection_num,
+            collection_name=top_candidate.collection_name,
+            score=top_candidate.score,
+            is_ambiguous=False,
+            candidates=None,
+            no_match=False,
+        )
+
+    if (
+        top_candidate.score >= float(settings.FER_GROUP_COLLECTION_AMBIGUOUS_THRESHOLD)
+        or len(collection_candidates) > 1
+    ):
         return GroupMatchResult(
             kind="collection",
             ref_id=top_candidate.ref_id,
@@ -637,19 +654,6 @@ async def match_estimate_group_with_vector(
             candidates=collection_candidates,
             no_match=False,
         )
-
-    return GroupMatchResult(
-        kind=None,
-        ref_id=None,
-        title=None,
-        collection_id=None,
-        collection_num=None,
-        collection_name=None,
-        score=None,
-        is_ambiguous=False,
-        candidates=None,
-        no_match=True,
-    )
 
 
 async def _get_allowed_section_ids_for_batch(

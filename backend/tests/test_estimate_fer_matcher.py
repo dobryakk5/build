@@ -300,7 +300,7 @@ async def test_match_estimate_group_with_vector_falls_back_to_ambiguous_collecti
 
 
 @pytest.mark.asyncio
-async def test_match_estimate_group_with_vector_returns_no_match_when_collection_too_weak(monkeypatch):
+async def test_match_estimate_group_with_vector_auto_assigns_single_weak_collection(monkeypatch):
     estimate = SimpleNamespace(section="Неизвестная группа", estimate_batch_id="batch-1")
 
     monkeypatch.setattr("app.services.estimate_fer_matcher.has_fer_vector_index_rows", AsyncMock(return_value=True))
@@ -320,6 +320,38 @@ async def test_match_estimate_group_with_vector_returns_no_match_when_collection
 
     match = await match_estimate_group_with_vector(AsyncMock(), estimate)
 
-    assert match.no_match is True
-    assert match.kind is None
-    assert match.ref_id is None
+    assert match.no_match is False
+    assert match.kind == "collection"
+    assert match.ref_id == 8
+    assert match.is_ambiguous is False
+    assert match.candidates is None
+
+
+@pytest.mark.asyncio
+async def test_match_estimate_group_with_vector_returns_ambiguous_when_multiple_weak_collections(monkeypatch):
+    estimate = SimpleNamespace(section="Неизвестная группа", estimate_batch_id="batch-1")
+
+    monkeypatch.setattr("app.services.estimate_fer_matcher.has_fer_vector_index_rows", AsyncMock(return_value=True))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._get_allowed_section_ids_for_batch", AsyncMock(return_value=[8, 11]))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._normalize_group_title", AsyncMock(return_value="неизвестная группа"))
+    monkeypatch.setattr("app.services.estimate_fer_matcher.create_embeddings", AsyncMock(return_value=[[0.1, 0.2]]))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._search_section_group_candidates", AsyncMock(return_value=[]))
+    monkeypatch.setattr("app.services.estimate_fer_matcher._get_allowed_collection_ids", AsyncMock(return_value=[8, 15]))
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher._search_collection_group_candidates",
+        AsyncMock(
+            return_value=[
+                FerGroupCandidate("collection", 8, "Сборник 08. Конструкции из кирпича", 8, "08", "Конструкции из кирпича", 0.31),
+                FerGroupCandidate("collection", 15, "Сборник 15. Отделочные работы", 15, "15", "Отделочные работы", 0.22),
+            ]
+        ),
+    )
+
+    match = await match_estimate_group_with_vector(AsyncMock(), estimate)
+
+    assert match.no_match is False
+    assert match.kind == "collection"
+    assert match.ref_id == 8
+    assert match.is_ambiguous is True
+    assert match.candidates is not None
+    assert len(match.candidates) == 2
