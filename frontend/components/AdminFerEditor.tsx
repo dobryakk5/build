@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
+import AdminFerKnowledgePanel from "@/components/AdminFerKnowledgePanel";
 import { admin as adminApi, fer as ferApi } from "@/lib/api";
 import type { FerBrowseItem, FerCollectionSummary } from "@/lib/types";
 
@@ -265,6 +266,7 @@ export default function AdminFerEditor() {
 
   return (
     <div>
+      <AdminFerKnowledgePanel />
       <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", background: "#f8fafc", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
         Игнор работает на уровне всей системы. Серые строки видны и в админской консоли, и в клиентском каталоге ФЕР. Наследование идёт сверху вниз: если игнорируется родитель, дочерние строки тоже становятся серыми.
       </div>

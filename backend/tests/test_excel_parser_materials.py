@@ -180,3 +180,34 @@ def test_structured_type1_parser_attaches_material_rows_to_previous_work(tmp_pat
     assert rows[1].work_name == "Доставка смеси"
     assert rows[1].unit_price == 1800
     assert rows[1].total_price == 1800
+
+
+def test_row_parser_keeps_parent_section_when_numbered_subsection_follows(tmp_path: Path) -> None:
+    def fill(ws):
+        ws.title = "Лист1"
+        headers = ["№", "Наименование работ", "Ед.изм.", "Кол-во", "Цена", "Сумма"]
+        for idx, value in enumerate(headers, start=1):
+            ws.cell(1, idx).value = value
+
+        ws.cell(2, 1).value = "6."
+        ws.cell(2, 2).value = "6. Потолки"
+
+        ws.cell(3, 1).value = "6.1"
+        ws.cell(3, 2).value = "Штукатурные работы (потолок)"
+
+        ws.cell(4, 1).value = "6.2"
+        ws.cell(4, 2).value = "Грунтование потолка бетоконтактом 1 раз"
+        ws.cell(4, 3).value = "м2"
+        ws.cell(4, 4).value = 200
+        ws.cell(4, 5).value = 110.5
+        ws.cell(4, 6).value = 22100
+
+    path = _save_workbook(tmp_path, "СтрокиСПотолками", fill)
+
+    rows, meta = ExcelEstimateParser().parse(path)
+
+    assert meta["strategy"] == "row"
+    assert len(rows) == 1
+    assert rows[0].section == "6. Потолки"
+    assert rows[0].raw_data["group_path"] == ["6. Потолки", "Штукатурные работы (потолок)"]
+    assert rows[0].work_name == "Грунтование потолка бетоконтактом 1 раз"

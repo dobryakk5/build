@@ -7,6 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, get_db
 from app.models import Organization, Project, User
+from app.services.fer_match_examples_service import (
+    get_fer_knowledge_import_job_status,
+    import_fer_knowledge_batch,
+    list_recent_fer_knowledge_imports,
+)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -31,6 +36,10 @@ class UserAdminUpdate(BaseModel):
 
 class FerIgnoreUpdate(BaseModel):
     ignored: bool
+
+
+class FerKnowledgeImportRequest(BaseModel):
+    batch_id: str
 
 
 _FER_ENTITY_TABLES = {
@@ -177,6 +186,39 @@ async def update_fer_ignore(
         "id": int(row["id"]),
         "ignored": bool(row["ignored"]),
     }
+
+
+@router.post("/fer-knowledge/import-batch")
+async def import_fer_knowledge_batch_route(
+    body: FerKnowledgeImportRequest,
+    current_admin: User = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await import_fer_knowledge_batch(
+        batch_id=str(body.batch_id).strip(),
+        admin_user_id=current_admin.id,
+        db=db,
+    )
+
+
+@router.get("/fer-knowledge/import-batch")
+async def list_fer_knowledge_imports(
+    limit: int = Query(10, ge=1, le=50),
+    _: User = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_db),
+):
+    return {
+        "items": await list_recent_fer_knowledge_imports(db=db, limit=limit),
+    }
+
+
+@router.get("/fer-knowledge/import-batch/{job_id}")
+async def get_fer_knowledge_import_status(
+    job_id: str,
+    _: User = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_fer_knowledge_import_job_status(job_id=job_id, db=db)
 
 
 @router.get("/users")

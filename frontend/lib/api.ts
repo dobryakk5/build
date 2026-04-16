@@ -11,6 +11,8 @@ import type {
   FerGroupOptionCollection,
   FerSearchResult,
   FerTableDetail,
+  FerKnowledgeImportJobStatus,
+  FerKnowledgeImportResponse,
   FerWordsCandidate,
   EstimateBatch,
   EstimateRow,
@@ -145,8 +147,14 @@ export const projects = {
 };
 
 export const gantt = {
-  list:      (pid: string, estimateBatchId?: string | null) =>
-    request<any>(`/projects/${pid}/gantt${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
+  list:      (pid: string, estimateBatchId?: string | null, limit?: number, offset?: number) => {
+    const params = new URLSearchParams();
+    if (estimateBatchId) params.set("estimate_batch_id", estimateBatchId);
+    if (limit != null) params.set("limit", String(limit));
+    if (offset != null) params.set("offset", String(offset));
+    const query = params.toString();
+    return request<any>(`/projects/${pid}/gantt${query ? `?${query}` : ""}`);
+  },
   create:    (pid: string, body: any)               => request<any>(`/projects/${pid}/gantt`, { method: "POST", body: JSON.stringify(body) }),
   update:    (pid: string, tid: string, body: any)  => request<any>(`/projects/${pid}/gantt/${tid}`, { method: "PATCH", body: JSON.stringify(body) }),
   split:     (pid: string, tid: string, body: any)  => request<any>(`/projects/${pid}/gantt/${tid}/split`, { method: "POST", body: JSON.stringify(body) }),
@@ -398,4 +406,13 @@ export const admin = {
     }),
   deleteUser: (userId: string) =>
     request<void>(`/admin/users/${userId}`, { method: "DELETE" }),
+  importFerKnowledge: (batchId: string) =>
+    request<FerKnowledgeImportResponse>("/admin/fer-knowledge/import-batch", {
+      method: "POST",
+      body: JSON.stringify({ batch_id: batchId }),
+    }),
+  listFerKnowledgeImports: (limit = 10) =>
+    request<{ items: FerKnowledgeImportJobStatus[] }>(`/admin/fer-knowledge/import-batch?limit=${limit}`),
+  getFerKnowledgeImportStatus: (jobId: string) =>
+    request<FerKnowledgeImportJobStatus>(`/admin/fer-knowledge/import-batch/${jobId}`),
 };

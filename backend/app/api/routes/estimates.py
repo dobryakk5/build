@@ -390,6 +390,7 @@ async def update_estimate_fer(
         "fer_work_type": est.fer_work_type,
         "fer_match_score": float(est.fer_match_score) if est.fer_match_score is not None else None,
         "fer_matched_at": est.fer_matched_at.isoformat() if est.fer_matched_at else None,
+        "strategy": match.strategy if match is not None else None,
     }
 
 

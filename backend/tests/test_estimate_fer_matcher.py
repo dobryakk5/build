@@ -16,8 +16,10 @@ from app.services.estimate_fer_matcher import (
     confirm_group_candidate,
     has_fer_vector_index_rows,
     match_estimate_group_with_vector,
+    match_estimate_with_vector,
 )
 from app.services.estimate_fer_matcher import FerGroupCandidate
+from app.services.fer_match_examples_service import FerExampleMatch
 from app.services.fer_hybrid_search_service import HybridCandidate
 
 
@@ -221,6 +223,83 @@ async def test_match_estimate_hybrid_falls_back_when_rerank_fails(monkeypatch):
     assert decision.reranked is False
     assert decision.rerank_corrected is False
     assert decision.fallback_used is True
+
+
+@pytest.mark.asyncio
+async def test_match_estimate_with_vector_returns_example_match_without_normalization(monkeypatch):
+    estimate = SimpleNamespace(work_name="Кладка стен", estimate_batch_id="batch-1")
+
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher.search_fer_match_example",
+        AsyncMock(
+            return_value=FerExampleMatch(
+                fer_table_id=101,
+                fer_work_type="Кладка кирпичных стен",
+                fer_code=None,
+                score=0.96,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher.has_fer_vector_index_rows",
+        AsyncMock(side_effect=AssertionError("vector index should not be checked when example match exists")),
+    )
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher._normalize_estimates",
+        AsyncMock(side_effect=AssertionError("normalization should not run when example match exists")),
+    )
+
+    match = await match_estimate_with_vector(AsyncMock(), estimate)
+
+    assert match is not None
+    assert match.table_id == 101
+    assert match.strategy == "example_match"
+    assert match.normalized_text is None
+
+
+@pytest.mark.asyncio
+async def test_match_estimate_with_vector_falls_back_to_hybrid_on_example_miss(monkeypatch):
+    estimate = SimpleNamespace(work_name="Кладка стен", estimate_batch_id="batch-1")
+
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher.search_fer_match_example",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher.has_fer_vector_index_rows",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher._normalize_estimates",
+        AsyncMock(return_value=(["Кладка кирпичных стен"], 0)),
+    )
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher.create_embeddings",
+        AsyncMock(return_value=[[0.1, 0.2]]),
+    )
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher._get_allowed_section_ids_for_batch",
+        AsyncMock(return_value=[8]),
+    )
+    monkeypatch.setattr(
+        "app.services.estimate_fer_matcher._match_estimate_hybrid",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                match=SimpleNamespace(
+                    table_id=101,
+                    work_type="Кладка кирпичных стен",
+                    score=0.74,
+                    strategy="hybrid_match",
+                )
+            )
+        ),
+    )
+
+    match = await match_estimate_with_vector(AsyncMock(), estimate)
+
+    assert match is not None
+    assert match.table_id == 101
+    assert match.strategy == "hybrid_match"
 
 
 def test_resolve_row_match_scope_uses_confirmed_section_group():

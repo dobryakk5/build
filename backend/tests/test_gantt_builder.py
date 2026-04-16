@@ -70,3 +70,43 @@ def test_build_groups_consecutive_rows_without_section_into_single_fallback_grou
     group_tasks = [task for task in tasks if task.is_group]
 
     assert [task.name for task in group_tasks] == ["Прочие работы", "Фундамент"]
+
+
+def test_build_uses_group_path_for_nested_gantt_groups():
+    builder = GanttBuilder()
+    estimates = [
+        SimpleNamespace(
+            id="est-1",
+            row_order=0,
+            section="6. Потолки",
+            work_name="Грунтование потолка",
+            quantity=1,
+            total_price=1000,
+            labor_hours=None,
+            raw_data={"group_path": ["6. Потолки", "Штукатурные работы (потолок)"]},
+        ),
+        SimpleNamespace(
+            id="est-2",
+            row_order=1,
+            section="6. Потолки",
+            work_name="Шпатлевка потолка",
+            quantity=1,
+            total_price=1000,
+            labor_hours=None,
+            raw_data={"group_path": ["6. Потолки", "Штукатурные работы (потолок)"]},
+        ),
+    ]
+
+    tasks = builder.build(
+        project_id="project-1",
+        estimates=estimates,
+        start_date=date(2026, 4, 15),
+        workers=3,
+    )
+
+    group_tasks = [task for task in tasks if task.is_group]
+    leaf_tasks = [task for task in tasks if not task.is_group]
+
+    assert [task.name for task in group_tasks] == ["6. Потолки", "Штукатурные работы (потолок)"]
+    assert group_tasks[1].parent_id == group_tasks[0].id
+    assert all(task.parent_id == group_tasks[1].id for task in leaf_tasks)

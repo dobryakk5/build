@@ -13,6 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models import Estimate, EstimateBatch, Job
+from app.services.fer_match_examples_service import (
+    FerExampleMatch,
+    search_fer_match_example,
+    search_fer_match_example_by_embedding,
+)
 from app.services.fer_hybrid_search_service import (
     HybridCandidate,
     hybrid_search_candidates,
@@ -42,6 +47,7 @@ class MatchResult:
     table_id: int | None
     work_type: str
     score: float
+    strategy: str = "hybrid_match"
     normalized_text: str | None = None
     reranked: bool = False
     rerank_corrected: bool = False
@@ -137,10 +143,20 @@ def _candidate_to_match_result(
         table_id=candidate.table_id,
         work_type=candidate.work_type,
         score=float(candidate.final_score),
+        strategy="hybrid_match",
         normalized_text=normalized_text,
         reranked=reranked,
         rerank_corrected=rerank_corrected,
         rerank_reason=rerank_reason,
+    )
+
+
+def _example_to_match_result(example: FerExampleMatch) -> MatchResult:
+    return MatchResult(
+        table_id=example.fer_table_id,
+        work_type=example.fer_work_type,
+        score=float(example.score),
+        strategy="example_match",
     )
 
 
@@ -461,11 +477,6 @@ async def _process_fer_match(job_id: str) -> None:
         await db.commit()
 
         try:
-            allowed_section_ids = await _get_allowed_section_ids_for_batch(db, estimate_batch_id)
-            if not allowed_section_ids:
-                raise ValueError(
-                    "Для выбранного типа сметы не настроены разрешённые разделы ФЕР в fer.work_type_sections."
-                )
             estimates = list(
                 await db.scalars(
                     select(Estimate)
@@ -478,15 +489,13 @@ async def _process_fer_match(job_id: str) -> None:
             if not estimates:
                 raise ValueError("В блоке сметы не найдено строк для сопоставления")
 
-            normalized_texts, normalization_fallbacks = await _normalize_estimates(estimates)
-            embeddings = await create_embeddings(normalized_texts)
-
             matched_at = datetime.utcnow()
             matched_count = 0
             low_confidence_count = 0
+            example_match_rows_count = 0
             reranked_rows_count = 0
             rerank_corrected_count = 0
-            fallback_rows_count = normalization_fallbacks
+            fallback_rows_count = 0
 
             for estimate in estimates:
                 estimate.fer_table_id = None
@@ -494,7 +503,50 @@ async def _process_fer_match(job_id: str) -> None:
                 estimate.fer_match_score = None
                 estimate.fer_matched_at = None
 
-            for estimate, normalized_text, embedding in zip(estimates, normalized_texts, embeddings):
+            raw_texts = [str(estimate.work_name or "").strip() or _build_estimate_search_text(estimate) for estimate in estimates]
+            raw_embeddings = await create_embeddings(raw_texts)
+            miss_estimates: list[Estimate] = []
+
+            for estimate, raw_embedding in zip(estimates, raw_embeddings):
+                example = await search_fer_match_example_by_embedding(
+                    db,
+                    query_embedding=raw_embedding,
+                    threshold=float(settings.FER_EXAMPLE_MATCH_THRESHOLD),
+                )
+                if example is None:
+                    miss_estimates.append(estimate)
+                    continue
+
+                match = _example_to_match_result(example)
+                estimate.fer_table_id = match.table_id
+                estimate.fer_work_type = match.work_type
+                estimate.fer_match_score = round(match.score, 4)
+                estimate.fer_matched_at = matched_at
+                matched_count += 1
+                example_match_rows_count += 1
+
+            normalized_rows_count = 0
+            if miss_estimates:
+                if not await has_fer_vector_index_rows(db):
+                    raise ValueError("Векторный индекс ФЕР пуст. Сначала выполните векторизацию ФЕР.")
+
+                allowed_section_ids = await _get_allowed_section_ids_for_batch(db, estimate_batch_id)
+                if not allowed_section_ids:
+                    raise ValueError(
+                        "Для выбранного типа сметы не настроены разрешённые разделы ФЕР в fer.work_type_sections."
+                    )
+
+                normalized_texts, normalization_fallbacks = await _normalize_estimates(miss_estimates)
+                embeddings = await create_embeddings(normalized_texts)
+                normalized_rows_count = len(normalized_texts)
+                fallback_rows_count += normalization_fallbacks
+
+            else:
+                normalized_texts = []
+                embeddings = []
+                allowed_section_ids = None
+
+            for estimate, normalized_text, embedding in zip(miss_estimates, normalized_texts, embeddings):
                 decision = await _match_estimate_hybrid(
                     db,
                     estimate=estimate,
@@ -512,8 +564,7 @@ async def _process_fer_match(job_id: str) -> None:
                 estimate.fer_match_score = round(decision.match.score, 4)
                 estimate.fer_matched_at = matched_at
                 matched_count += 1
-
-                if decision.match.score < LOW_CONFIDENCE_SCORE_THRESHOLD:
+                if decision.match.strategy != "example_match" and decision.match.score < LOW_CONFIDENCE_SCORE_THRESHOLD:
                     low_confidence_count += 1
                 if decision.reranked:
                     reranked_rows_count += 1
@@ -527,8 +578,9 @@ async def _process_fer_match(job_id: str) -> None:
                 "estimate_batch_id": estimate_batch_id,
                 "estimate_batch_name": job.input.get("estimate_batch_name"),
                 "matched_rows_count": matched_count,
+                "example_match_rows_count": example_match_rows_count,
                 "low_confidence_count": low_confidence_count,
-                "normalized_rows_count": len(normalized_texts),
+                "normalized_rows_count": normalized_rows_count,
                 "reranked_rows_count": reranked_rows_count,
                 "rerank_corrected_count": rerank_corrected_count,
                 "fallback_rows_count": fallback_rows_count,
@@ -662,11 +714,19 @@ async def match_estimate_with_vector(
     db: AsyncSession,
     estimate: Estimate,
 ) -> MatchResult | None:
-    if not await has_fer_vector_index_rows(db):
-        raise HTTPException(400, "Векторный индекс ФЕР пуст. Сначала выполните векторизацию ФЕР.")
+    example_match = await search_fer_match_example(
+        db,
+        query_text=str(estimate.work_name or "").strip(),
+        threshold=float(settings.FER_EXAMPLE_MATCH_THRESHOLD),
+    )
+    if example_match is not None:
+        return _example_to_match_result(example_match)
 
     if not estimate.estimate_batch_id:
         raise HTTPException(400, "У строки сметы не указан блок сметы.")
+
+    if not await has_fer_vector_index_rows(db):
+        raise HTTPException(400, "Векторный индекс ФЕР пуст. Сначала выполните векторизацию ФЕР.")
 
     normalized_texts, _ = await _normalize_estimates([estimate])
     embedding = (await create_embeddings(normalized_texts))[0]

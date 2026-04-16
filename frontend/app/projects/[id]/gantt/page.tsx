@@ -7,6 +7,7 @@ import type { BaselineStatus, EstimateBatch, EstimateMaterial, Task } from "@/li
 
 const DEFAULT_DAY_W = 24;
 const DEFAULT_HOURS_PER_DAY = 8;
+const GANTT_PAGE_SIZE = 500;
 const MIN_DAY_W = 12;
 const MAX_DAY_W = 56;
 const MOBILE_BREAKPOINT = 980;
@@ -67,6 +68,12 @@ type PanelFormState = {
   prog: string;
   depends_on: string;
   color: string;
+};
+
+type HoveredTaskTooltip = {
+  name: string;
+  x: number;
+  y: number;
 };
 
 const z = (n: number | string) => String(n).padStart(2, "0");
@@ -465,6 +472,12 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .bp{position:absolute;left:0;top:0;bottom:0;border-radius:3px 0 0 3px;}
 .bl{position:relative;padding:0 6px;font-size:10px;color:rgba(255,255,255,.9);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--sans);font-weight:500;z-index:1;}
 .darr{position:absolute;top:0;left:0;pointer-events:none;z-index:15;overflow:visible;}
+.task-tip{
+  position:fixed;z-index:120;pointer-events:none;max-width:min(480px,calc(100vw - 24px));
+  padding:8px 10px;border-radius:8px;background:rgba(15,23,42,.96);color:#f8fafc;
+  box-shadow:0 10px 24px rgba(15,23,42,.22);font:500 12px/1.45 var(--sans);
+  white-space:normal;word-break:break-word;
+}
 
 /* ── TASK DETAIL PANEL ─────────────────────────────────────────────────────── */
 .panel-overlay{position:fixed;inset:0;background:rgba(15,23,42,.35);z-index:100;display:flex;justify-content:flex-end;}
@@ -664,6 +677,7 @@ export default function App() {
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [baselineReason, setBaselineReason] = useState("");
   const [actsSaving, setActsSaving] = useState(false);
+  const [hoveredTaskTooltip, setHoveredTaskTooltip] = useState<HoveredTaskTooltip | null>(null);
 
   const lbRef = useRef<HTMLDivElement | null>(null);
   const rbRef = useRef<HTMLDivElement | null>(null);
@@ -709,8 +723,17 @@ export default function App() {
     setApiLoaded(false);
     setTaskError(null);
     try {
-      const data = await ganttApi.list(pid, targetBatchId);
-      const apiTasks = (data?.tasks ?? []) as ApiTask[];
+      const apiTasks: ApiTask[] = [];
+      let offset = 0;
+
+      while (true) {
+        const data = await ganttApi.list(pid, targetBatchId, GANTT_PAGE_SIZE, offset);
+        const pageTasks = (data?.tasks ?? []) as ApiTask[];
+        apiTasks.push(...pageTasks);
+        if (!data?.has_more || pageTasks.length === 0) break;
+        offset += pageTasks.length;
+      }
+
       if (apiTasks.length > 0) {
         setTasks(resolveDates(apiTasks.map((task) => syncTaskDerivedFields(apiToLocal(task)))));
         setSel(preferredTaskId ?? apiTasks[0]?.id ?? null);
@@ -833,6 +856,30 @@ export default function App() {
   const showZoomControls = isTouchDevice || viewportW < MOBILE_BREAKPOINT;
   const canResizeSplit = !isCompactLayout;
   const W = totalDays * dayWidth;
+
+  const showTaskTooltip = useCallback((event: MouseEvent<HTMLDivElement>, name: string) => {
+    setHoveredTaskTooltip({
+      name,
+      x: event.clientX + 14,
+      y: event.clientY + 18,
+    });
+  }, []);
+
+  const moveTaskTooltip = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    setHoveredTaskTooltip((current) => (
+      current
+        ? {
+            ...current,
+            x: event.clientX + 14,
+            y: event.clientY + 18,
+          }
+        : current
+    ));
+  }, []);
+
+  const hideTaskTooltip = useCallback(() => {
+    setHoveredTaskTooltip(null);
+  }, []);
 
   const { mb, wb } = useMemo(() => {
     const months: Array<{ label: string; x: number; w: number }> = [];
@@ -1646,7 +1693,9 @@ export default function App() {
                             border:`1.5px solid ${row.clr}`,
                             opacity: isP ? .85 : 1,
                           }}
-                          title={`${row.name} · ${dispD(row.start)}–${dispD(finishD(row.start,row.dur))} · ${row.dur}д · ${row.prog}%`}>
+                          onMouseEnter={(event) => showTaskTooltip(event, row.name)}
+                          onMouseMove={moveTaskTooltip}
+                          onMouseLeave={hideTaskTooltip}>
                           {/* color fill = progress % */}
                           {row.prog>0&&<div className="bp" style={{width:row.prog+'%',background:row.clr,opacity:.82}}/>}
                           {bw>44&&<div className="bl" style={{
@@ -1707,6 +1756,18 @@ export default function App() {
         </div>
         </div>
       </div>
+
+      {hoveredTaskTooltip && (
+        <div
+          className="task-tip"
+          style={{
+            left: hoveredTaskTooltip.x,
+            top: hoveredTaskTooltip.y,
+          }}
+        >
+          {hoveredTaskTooltip.name}
+        </div>
+      )}
 
       {/* TASK DETAIL PANEL */}
       {panelId && panelTask && (()=>{

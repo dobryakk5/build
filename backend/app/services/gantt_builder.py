@@ -118,63 +118,78 @@ class GanttBuilder:
     ) -> list[GanttTaskDTO]:
         """
         Алгоритм:
-        1. Разбиваем строки сметы на последовательные блоки по section
-        2. Каждый блок = родительская задача (project), его строки = дочерние
+        1. Идём по строкам сметы в row_order
+        2. Строим вложенные группы по raw_data.group_path, если он есть
         4. После импорта все группы и задачи стартуют с одной даты
         5. Зависимости оператор проставляет вручную
         """
         tasks: list[GanttTaskDTO] = []
+        ordered_estimates = sorted(
+            estimates,
+            key=lambda est: (
+                getattr(est, "row_order", 0),
+                getattr(est, "created_at", None) or "",
+                getattr(est, "id", ""),
+            ),
+        )
 
         row_order = 1000.0
+        group_stack: list[tuple[str, GanttTaskDTO]] = []
 
-        for section_name, section_estimates in self._group_estimates_by_section_run(estimates):
-            section_id = str(uuid4())
-            color = self._section_color(section_name)
-            section_tasks: list[GanttTaskDTO] = []
-            max_duration = 1
+        for est in ordered_estimates:
+            group_path = self._estimate_group_path(est)
+            color = self._section_color(group_path[0])
 
-            for est in section_estimates:
-                labor_hours = self._calc_labor_hours(est, workers)
-                dur = calculate_working_days(labor_hours, workers, self.HOURS_PER_DAY) or 1
-                task_id = str(uuid4())
+            common_depth = 0
+            max_common = min(len(group_stack), len(group_path))
+            while common_depth < max_common and group_stack[common_depth][0] == group_path[common_depth]:
+                common_depth += 1
+            group_stack = group_stack[:common_depth]
+
+            for segment in group_path[common_depth:]:
                 row_order += 10.0
-                max_duration = max(max_duration, dur)
+                group_task = GanttTaskDTO(
+                    id=str(uuid4()),
+                    project_id=project_id,
+                    estimate_id=None,
+                    parent_id=group_stack[-1][1].id if group_stack else None,
+                    name=segment,
+                    start_date=start_date,
+                    working_days=1,
+                    workers_count=None,
+                    labor_hours=None,
+                    hours_per_day=self.HOURS_PER_DAY,
+                    is_group=True,
+                    type="project",
+                    color=color,
+                    row_order=row_order,
+                )
+                tasks.append(group_task)
+                group_stack.append((segment, group_task))
 
-                section_tasks.append(GanttTaskDTO(
-                    id           = task_id,
-                    project_id   = project_id,
-                    estimate_id  = est.id,
-                    parent_id    = section_id,
-                    name         = est.work_name,
-                    start_date   = start_date,
-                    working_days = dur,
-                    workers_count = workers,
-                    labor_hours  = labor_hours,
-                    hours_per_day = self.HOURS_PER_DAY,
-                    is_group     = False,
-                    type         = "task",
-                    color        = color,
-                    row_order    = row_order,
-                ))
+            labor_hours = self._calc_labor_hours(est, workers)
+            dur = calculate_working_days(labor_hours, workers, self.HOURS_PER_DAY) or 1
             row_order += 10.0
-            section_task = GanttTaskDTO(
-                id           = section_id,
-                project_id   = project_id,
-                estimate_id  = None,
-                parent_id    = None,
-                name         = section_name,
-                start_date   = start_date,
-                working_days = max_duration,
-                workers_count = None,
-                labor_hours  = None,
-                hours_per_day = self.HOURS_PER_DAY,
-                is_group     = True,
-                type         = "project",
-                color        = color,
-                row_order    = row_order - len(section_estimates) * 10.0 - 5.0,
-            )
-            tasks.append(section_task)
-            tasks.extend(section_tasks)
+
+            for _, group_task in group_stack:
+                group_task.working_days = max(group_task.working_days, dur)
+
+            tasks.append(GanttTaskDTO(
+                id=str(uuid4()),
+                project_id=project_id,
+                estimate_id=est.id,
+                parent_id=group_stack[-1][1].id if group_stack else None,
+                name=est.work_name,
+                start_date=start_date,
+                working_days=dur,
+                workers_count=workers,
+                labor_hours=labor_hours,
+                hours_per_day=self.HOURS_PER_DAY,
+                is_group=False,
+                type="task",
+                color=color,
+                row_order=row_order,
+            ))
 
         return tasks
 
@@ -204,34 +219,17 @@ class GanttBuilder:
 
         return calculate_labor_hours(3, workers, self.HOURS_PER_DAY)
 
-    def _group_estimates_by_section_run(self, estimates: list) -> list[tuple[str, list]]:
-        ordered_estimates = sorted(
-            estimates,
-            key=lambda est: (
-                getattr(est, "row_order", 0),
-                getattr(est, "created_at", None) or "",
-                getattr(est, "id", ""),
-            ),
-        )
+    def _estimate_group_path(self, estimate) -> list[str]:
+        raw_data = getattr(estimate, "raw_data", None)
+        if isinstance(raw_data, dict):
+            raw_path = raw_data.get("group_path")
+            if isinstance(raw_path, list):
+                normalized = [str(item).strip() for item in raw_path if str(item).strip()]
+                if normalized:
+                    return normalized
 
-        groups: list[tuple[str, list]] = []
-        current_name: str | None = None
-        current_items: list = []
-
-        for est in ordered_estimates:
-            section_name = (str(getattr(est, "section", "") or "").strip() or "Прочие работы")
-            if current_name != section_name:
-                if current_items:
-                    groups.append((current_name or "Прочие работы", current_items))
-                current_name = section_name
-                current_items = [est]
-                continue
-            current_items.append(est)
-
-        if current_items:
-            groups.append((current_name or "Прочие работы", current_items))
-
-        return groups
+        section_name = str(getattr(estimate, "section", "") or "").strip()
+        return [section_name or "Прочие работы"]
 
     def _section_color(self, section: str) -> str:
         lower = section.lower()

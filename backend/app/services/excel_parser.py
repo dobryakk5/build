@@ -176,6 +176,7 @@ def match_any_field(cell_value: str) -> Optional[str]:
 
 
 _TYPE1_ITEM_RE = re.compile(r"^\d+\.\d+$")
+_HEADING_NUM_RE = re.compile(r"^\d+(?:\.\d+)*\.?$")
 
 
 def _cell_text(value) -> str:
@@ -617,6 +618,10 @@ class RowOrientedParser:
             cell_val = ws.cell(header_row, col_idx).value
             if not cell_val:
                 continue
+            normalized = normalize(str(cell_val))
+            if normalized in {"№", "номер"} or normalized.startswith("№"):
+                col_map["num"] = col_idx
+                continue
             field = match_any_field(str(cell_val))
             if field and col_map[field] is None:  # первое совпадение побеждает
                 col_map[field] = col_idx
@@ -626,7 +631,8 @@ class RowOrientedParser:
         self, ws: Worksheet, header_row: int, col_map: dict
     ) -> list[ParsedRow]:
         results: list[ParsedRow] = []
-        current_section: Optional[str] = None
+        section_stack: list[str] = []
+        prev_row_was_section = False
         order = 0
 
         for row_idx in range(header_row + 1, ws.max_row + 1):
@@ -641,27 +647,38 @@ class RowOrientedParser:
                 continue
 
             work_name = row_values.get("work_name")
+            num_value = row_values.get("num")
 
             # Определяем: это раздел или строка данных?
             if self._is_section(row_values, col_map):
-                current_section = str(work_name).strip() if work_name else current_section
+                next_section = str(work_name).strip() if work_name else None
+                if next_section:
+                    level = self._section_level(num_value, prev_row_was_section, section_stack)
+                    section_stack = section_stack[:max(level - 1, 0)]
+                    section_stack.append(next_section)
+                prev_row_was_section = True
                 continue
 
             if not work_name:
                 continue
 
+            group_path = list(section_stack)
             results.append(ParsedRow(
-                section=current_section,
+                section=group_path[0] if group_path else None,
                 work_name=str(work_name).strip(),
                 unit=_to_str(row_values.get("unit")),
                 quantity=_to_float(row_values.get("quantity")),
                 unit_price=_to_float(row_values.get("unit_price")),
                 total_price=_to_float(row_values.get("total_price")),
                 row_order=order,
-                raw_data={f: str(v) for f, v in row_values.items() if v is not None},
+                raw_data={
+                    **{f: str(v) for f, v in row_values.items() if v is not None},
+                    **({"group_path": group_path} if group_path else {}),
+                },
                 source_strategy="row",
             ))
             order += 1
+            prev_row_was_section = False
 
         return results
 
@@ -678,6 +695,22 @@ class RowOrientedParser:
             for f in ("quantity", "unit_price", "total_price")
         )
         return not has_numbers and len(str(work_name)) < 120
+
+    def _section_level(
+        self,
+        num_value,
+        prev_row_was_section: bool,
+        section_stack: list[str],
+    ) -> int:
+        if num_value is not None:
+            normalized = str(num_value).strip()
+            if _HEADING_NUM_RE.match(normalized):
+                return normalized.strip(".").count(".") + 1
+
+        if prev_row_was_section and section_stack:
+            return len(section_stack) + 1
+
+        return 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────

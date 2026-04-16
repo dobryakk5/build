@@ -196,6 +196,31 @@ export interface EstimateSummary {
   }>;
 }
 
+export interface FerKnowledgeImportResponse {
+  batch_id: string;
+  total_matched_rows: number;
+  imported_count: number;
+  skipped_duplicates: number;
+  embedding_job_id?: string | null;
+  status: string;
+  reason?: string | null;
+}
+
+export interface FerKnowledgeImportJobStatus {
+  job_id: string;
+  batch_id: string;
+  status: "pending" | "processing" | "done" | "failed";
+  total: number;
+  embedded: number;
+  failed_rows: number;
+  imported_count: number;
+  total_matched_rows: number;
+  skipped_duplicates: number;
+  created_at?: string | null;
+  finished_at?: string | null;
+  error?: string | null;
+}
+
 export interface User {
   id: string;
   email: string;
