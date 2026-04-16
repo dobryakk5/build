@@ -857,7 +857,7 @@ export default function App() {
   const canResizeSplit = !isCompactLayout;
   const W = totalDays * dayWidth;
 
-  const showTaskTooltip = useCallback((event: MouseEvent<HTMLDivElement>, name: string) => {
+  const showTaskTooltip = useCallback((event: MouseEvent<HTMLElement>, name: string) => {
     setHoveredTaskTooltip({
       name,
       x: event.clientX + 14,
@@ -865,7 +865,7 @@ export default function App() {
     });
   }, []);
 
-  const moveTaskTooltip = useCallback((event: MouseEvent<HTMLDivElement>) => {
+  const moveTaskTooltip = useCallback((event: MouseEvent<HTMLElement>) => {
     setHoveredTaskTooltip((current) => (
       current
         ? {
@@ -1538,7 +1538,14 @@ export default function App() {
                           ? <input ref={inpRef} style={{flex:1,minWidth:0}}
                               value={editVal} onChange={e=>setEditVal(e.target.value)}
                               onBlur={commit} onKeyDown={onKD}/>
-                          : <span className="nt">{row.name}</span>
+                          : <span
+                              className="nt"
+                              onMouseEnter={(event) => showTaskTooltip(event, row.name)}
+                              onMouseMove={moveTaskTooltip}
+                              onMouseLeave={hideTaskTooltip}
+                            >
+                              {row.name}
+                            </span>
                         }
                       </div>
                     </div>
