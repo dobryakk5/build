@@ -1149,21 +1149,26 @@ export default function App() {
   const onKD = useCallback((e: KeyboardEvent<HTMLInputElement>) => {
     if (!editing) return;
     if (e.key === "Escape") {
+      e.stopPropagation();
       setEditing(null);
       return;
     }
     if (e.key === "Tab") {
       e.preventDefault();
+      e.stopPropagation();
       commit();
       return;
     }
     if (e.key === "Enter") {
       e.preventDefault();
+      e.stopPropagation();
       const saved = editing;
       const value = editVal;
       setEditing(null);
       applyAndClose(saved.id, saved.field, value);
-      setTimeout(() => addAfter(saved.id), 20);
+      if (saved.field !== "depends_on") {
+        setTimeout(() => addAfter(saved.id), 20);
+      }
     }
   }, [addAfter, applyAndClose, commit, editVal, editing]);
 

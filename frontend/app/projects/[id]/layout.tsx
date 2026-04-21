@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
+import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
 import EmailVerificationBanner from "@/components/EmailVerificationBanner";
@@ -89,17 +90,17 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
           zIndex: 50,
         }}
       >
-        <span
-          onClick={() => router.push("/projects")}
-          style={{ color: "#64748b", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", gap: 4 }}
+        <Link
+          href="/projects"
+          style={{ color: "#64748b", cursor: "pointer", fontSize: 13, display: "flex", alignItems: "center", gap: 4, textDecoration: "none" }}
         >
           ← Объекты
-        </span>
+        </Link>
 
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           {currentUser?.is_superadmin && (
-            <button
-              onClick={() => router.push("/admin")}
+            <Link
+              href="/admin"
               style={{
                 padding: "3px 10px",
                 background: "#7c3aed18",
@@ -110,10 +111,11 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
                 fontWeight: 700,
                 cursor: "pointer",
                 letterSpacing: ".04em",
+                textDecoration: "none",
               }}
             >
               ⚡ Admin
-            </button>
+            </Link>
           )}
 
           <div style={{ position: "relative" }}>
@@ -216,18 +218,20 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
         }}
       >
         {tabs.map((tab) => (
-          <button
+          <Link
             key={tab.id}
-            onClick={() => {
-              if (tab.id === "fer" && pathname.startsWith(tab.path)) {
+            href={tab.path}
+            onClick={(event) => {
+              const isPlainLeftClick = event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+              if (isPlainLeftClick && tab.id === "fer" && pathname.startsWith(tab.path)) {
+                event.preventDefault();
                 window.dispatchEvent(new Event("fer:navigate-root"));
-                return;
               }
-              router.push(tab.path);
             }}
             style={{
               padding: "10px 14px",
-              border: "none",
+              display: "inline-flex",
+              alignItems: "center",
               cursor: "pointer",
               fontSize: 12,
               fontWeight: 500,
@@ -235,10 +239,11 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
               whiteSpace: "nowrap",
               color: activeTab === tab.id ? "#e2e8f0" : "#64748b",
               borderBottom: activeTab === tab.id ? "2px solid var(--blue)" : "2px solid transparent",
+              textDecoration: "none",
             }}
           >
             {tab.label}
-          </button>
+          </Link>
         ))}
       </div>
 

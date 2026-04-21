@@ -243,6 +243,7 @@ async def _process_upload(job_id: str) -> None:
                 project_id=job.project_id,
                 name=_make_batch_name(job.input.get("filename")),
                 estimate_kind=estimate_kind,
+                workers_count=workers,
                 source_filename=job.input.get("filename"),
             )
             db.add(batch)

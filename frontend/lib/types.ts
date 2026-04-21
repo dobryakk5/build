@@ -44,6 +44,7 @@ export interface EstimateBatch {
   project_id: string;
   name: string;
   estimate_kind: number;
+  workers_count?: number | null;
   source_filename?: string | null;
   estimates_count: number;
   gantt_tasks_count: number;

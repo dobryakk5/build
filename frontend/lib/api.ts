@@ -176,6 +176,11 @@ export const estimates = {
   summary: (pid: string, estimateBatchId?: string | null) =>
     request<EstimateSummary>(`/projects/${pid}/estimates/summary${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
   batches: (pid: string) => request<EstimateBatch[]>(`/projects/${pid}/estimate-batches`),
+  updateBatchWorkers: (pid: string, batchId: string, workersCount: number) =>
+    request<{ id: string; workers_count: number; updated_gantt_tasks_count: number }>(`/projects/${pid}/estimate-batches/${batchId}/workers`, {
+      method: "PATCH",
+      body: JSON.stringify({ workers_count: workersCount }),
+    }),
   updateActs: (pid: string, eid: string, body: {
     req_hidden_work_act?: boolean;
     req_intermediate_act?: boolean;

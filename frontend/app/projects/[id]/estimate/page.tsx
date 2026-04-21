@@ -1196,6 +1196,8 @@ export default function EstimatePage() {
   const [groupManualOptions, setGroupManualOptions] = useState<FerGroupOptionCollection[]>([]);
   const [groupManualLoading, setGroupManualLoading] = useState(false);
   const [groupManualError, setGroupManualError] = useState<string | null>(null);
+  const [workersDraft, setWorkersDraft] = useState("1");
+  const [savingWorkers, setSavingWorkers] = useState(false);
 
   const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
 
@@ -1265,6 +1267,10 @@ export default function EstimatePage() {
 
   const activeBatch = batches.find((batch) => batch.id === activeBatchId) ?? null;
 
+  useEffect(() => {
+    setWorkersDraft(String(activeBatch?.workers_count ?? 1));
+  }, [activeBatch?.id, activeBatch?.workers_count]);
+
   const handleMatchFer = async (batchId: string) => {
     try {
       setRunningBatchId(batchId);
@@ -1273,6 +1279,36 @@ export default function EstimatePage() {
     } catch (error: any) {
       setRunningBatchId(null);
       alert(error.message);
+    }
+  };
+
+  const handleSaveWorkers = async () => {
+    if (!activeBatch) return;
+
+    const nextWorkers = Number(workersDraft);
+    if (!Number.isInteger(nextWorkers) || nextWorkers < 1 || nextWorkers > 500) {
+      alert("Введите целое число рабочих от 1 до 500.");
+      return;
+    }
+
+    try {
+      setSavingWorkers(true);
+      const result = await estimates.updateBatchWorkers(id, activeBatch.id, nextWorkers);
+      setBatches((current) =>
+        current.map((batch) =>
+          batch.id === activeBatch.id
+            ? {
+                ...batch,
+                workers_count: result.workers_count,
+              }
+            : batch,
+        ),
+      );
+      setWorkersDraft(String(result.workers_count));
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setSavingWorkers(false);
     }
   };
 
@@ -1493,6 +1529,9 @@ export default function EstimatePage() {
   const popupRow = popup ? rows.find((row) => row.id === popup.estimateId) ?? null : null;
   const groupCandidatesRow = groupCandidatesModal ? sections[groupCandidatesModal.sectionKey]?.[0] ?? null : null;
   const groupManualRow = groupManualModal ? sections[groupManualModal.sectionKey]?.[0] ?? null : null;
+  const activeBatchWorkers = activeBatch?.workers_count ?? 1;
+  const workersDraftNumber = Number(workersDraft);
+  const workersChanged = Number.isInteger(workersDraftNumber) && workersDraftNumber !== activeBatchWorkers;
 
   return (
     <div style={{ padding: 16, height: "100%", overflow: "auto" }}>
@@ -1538,9 +1577,54 @@ export default function EstimatePage() {
       </div>
 
       {activeBatch && (
-        <div style={{ marginBottom: 12, fontSize: 12, color: "var(--muted)" }}>
-          ФЕР размечено: <b style={{ color: "var(--text)" }}>{activeBatch.fer_matched_count}</b> из <b style={{ color: "var(--text)" }}>{activeBatch.estimates_count}</b>
-          <span style={{ marginLeft: 10, color: "var(--muted)" }}>· кнопка ИИ в строке запускает векторную сверку по этой работе</span>
+        <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", fontSize: 12, color: "var(--muted)" }}>
+          <div>
+            ФЕР размечено: <b style={{ color: "var(--text)" }}>{activeBatch.fer_matched_count}</b> из <b style={{ color: "var(--text)" }}>{activeBatch.estimates_count}</b>
+            <span style={{ marginLeft: 10, color: "var(--muted)" }}>· кнопка ИИ в строке запускает векторную сверку по этой работе</span>
+          </div>
+          <label style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, color: "var(--text)", fontWeight: 600 }}>
+            Рабочих:
+            <input
+              type="number"
+              min={1}
+              max={500}
+              step={1}
+              value={workersDraft}
+              onChange={(event) => setWorkersDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && workersChanged && !savingWorkers) {
+                  handleSaveWorkers();
+                }
+              }}
+              style={{
+                width: 82,
+                padding: "6px 8px",
+                borderRadius: 7,
+                border: "1px solid var(--border2)",
+                background: "var(--surface)",
+                fontSize: 12,
+                fontFamily: "var(--mono)",
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={savingWorkers || !workersChanged}
+            onClick={handleSaveWorkers}
+            style={{
+              padding: "6px 10px",
+              borderRadius: 7,
+              border: "1px solid rgba(59,130,246,.18)",
+              background: workersChanged ? "rgba(59,130,246,.08)" : "var(--surface)",
+              color: workersChanged ? "var(--blue-dark)" : "var(--muted)",
+              cursor: savingWorkers || !workersChanged ? "default" : "pointer",
+              opacity: savingWorkers ? 0.7 : 1,
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            {savingWorkers ? "Сохраняем..." : "Сохранить"}
+          </button>
         </div>
       )}
 

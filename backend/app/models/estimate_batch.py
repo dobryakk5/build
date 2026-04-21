@@ -26,6 +26,7 @@ class EstimateBatch(Base, SoftDeleteMixin):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     estimate_kind: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    workers_count: Mapped[int | None] = mapped_column(SmallInteger)
     source_filename: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ,

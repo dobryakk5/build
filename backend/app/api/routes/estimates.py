@@ -30,6 +30,8 @@ from app.services.fer_words_service import (
     get_fer_words_candidates_for_estimate,
     start_fer_words_match_job,
 )
+from app.services.gantt_calculations import DEFAULT_HOURS_PER_DAY, calculate_working_days
+from app.services.gantt_service import resolve_project_dates
 from app.services.upload_service import start_upload_job, start_upload_job_with_mapping
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
@@ -229,6 +231,7 @@ async def list_estimate_batches(
                 project_id=batch.project_id,
                 name=batch.name,
                 estimate_kind=batch.estimate_kind,
+                workers_count=batch.workers_count,
                 source_filename=batch.source_filename,
                 estimates_count=estimates_count or 0,
                 gantt_tasks_count=gantt_tasks_count or 0,
@@ -239,6 +242,54 @@ async def list_estimate_batches(
             )
         )
     return result
+
+
+class EstimateBatchWorkersUpdate(BaseModel):
+    workers_count: int
+
+
+@router.patch("/estimate-batches/{estimate_batch_id}/workers")
+async def update_estimate_batch_workers(
+    project_id: UUID,
+    estimate_batch_id: UUID,
+    body: EstimateBatchWorkersUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    if body.workers_count < 1 or body.workers_count > 500:
+        raise HTTPException(422, "workers_count must be between 1 and 500")
+
+    batch = await db.get(EstimateBatch, str(estimate_batch_id))
+    if not batch or batch.project_id != str(project_id) or batch.deleted_at:
+        raise HTTPException(404, "Блок сметы не найден")
+
+    batch.workers_count = body.workers_count
+    gantt_tasks = list(
+        await db.scalars(
+            select(GanttTask)
+            .where(GanttTask.project_id == str(project_id))
+            .where(GanttTask.estimate_batch_id == str(estimate_batch_id))
+            .where(GanttTask.deleted_at.is_(None))
+            .where(GanttTask.is_group.is_(False))
+        )
+    )
+    for task in gantt_tasks:
+        task.workers_count = body.workers_count
+        if task.labor_hours is not None:
+            task.working_days = calculate_working_days(
+                task.labor_hours,
+                body.workers_count,
+                float(task.hours_per_day or DEFAULT_HOURS_PER_DAY),
+            ) or 1
+
+    await db.flush()
+    await resolve_project_dates(str(project_id), db)
+    await db.commit()
+    return {
+        "id": batch.id,
+        "workers_count": batch.workers_count,
+        "updated_gantt_tasks_count": len(gantt_tasks),
+    }
 
 
 @router.post("/estimate-batches/{estimate_batch_id}/match-fer", response_model=JobStartResponse, status_code=202)
@@ -390,7 +441,7 @@ async def update_estimate_fer(
         "fer_work_type": est.fer_work_type,
         "fer_match_score": float(est.fer_match_score) if est.fer_match_score is not None else None,
         "fer_matched_at": est.fer_matched_at.isoformat() if est.fer_matched_at else None,
-        "strategy": match.strategy if match is not None else None,
+        "strategy": "manual" if est.fer_table_id is not None else None,
     }
 
 
