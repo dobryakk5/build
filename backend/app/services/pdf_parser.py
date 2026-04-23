@@ -81,7 +81,7 @@ _SKIP_RE = re.compile(
     re.IGNORECASE,
 )
 
-_TOTAL_RE = re.compile(r'^ИТОГО', re.IGNORECASE)
+_TOTAL_RE = re.compile(r'^(ИТОГО|ВСЕГО)', re.IGNORECASE)
 
 
 def _f(s: str) -> Optional[float]:

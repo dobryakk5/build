@@ -32,7 +32,7 @@ from app.services.fer_words_service import (
 )
 from app.services.gantt_calculations import DEFAULT_HOURS_PER_DAY, calculate_working_days
 from app.services.gantt_service import resolve_project_dates
-from app.services.upload_service import start_upload_job, start_upload_job_with_mapping
+from app.services.upload_service import build_gantt_for_estimate_batch, start_upload_job, start_upload_job_with_mapping
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
 
@@ -67,7 +67,7 @@ async def upload_estimate(
 ):
     """
     Принимает Excel-смету, немедленно отвечает 202 + job_id.
-    Парсинг и построение Ганта происходят в фоне.
+    Парсинг сметы происходит в фоне. Гант строится отдельным действием со страницы сметы.
     Клиент опрашивает GET /jobs/{job_id} каждые 1-2 секунды.
     """
     job = await start_upload_job(
@@ -231,6 +231,7 @@ async def list_estimate_batches(
                 project_id=batch.project_id,
                 name=batch.name,
                 estimate_kind=batch.estimate_kind,
+                start_date=batch.start_date,
                 workers_count=batch.workers_count,
                 source_filename=batch.source_filename,
                 estimates_count=estimates_count or 0,
@@ -246,6 +247,10 @@ async def list_estimate_batches(
 
 class EstimateBatchWorkersUpdate(BaseModel):
     workers_count: int
+
+
+class EstimateBatchGanttBuildRequest(BaseModel):
+    start_date: date | None = None
 
 
 @router.patch("/estimate-batches/{estimate_batch_id}/workers")
@@ -290,6 +295,25 @@ async def update_estimate_batch_workers(
         "workers_count": batch.workers_count,
         "updated_gantt_tasks_count": len(gantt_tasks),
     }
+
+
+@router.post("/estimate-batches/{estimate_batch_id}/build-gantt")
+async def build_estimate_batch_gantt(
+    project_id: UUID,
+    estimate_batch_id: UUID,
+    body: EstimateBatchGanttBuildRequest | None = None,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await build_gantt_for_estimate_batch(
+        project_id=str(project_id),
+        estimate_batch_id=str(estimate_batch_id),
+        start_date=body.start_date if body else None,
+        db=db,
+    )
+    await resolve_project_dates(str(project_id), db)
+    await db.commit()
+    return result
 
 
 @router.post("/estimate-batches/{estimate_batch_id}/match-fer", response_model=JobStartResponse, status_code=202)
@@ -338,6 +362,10 @@ class ActFlagsUpdate(BaseModel):
     req_ks2_ks3: bool | None = None
 
 
+class FerMultiplierUpdate(BaseModel):
+    fer_multiplier: float
+
+
 @router.patch("/estimates/{estimate_id}/acts")
 async def update_estimate_acts(
     project_id: UUID,
@@ -363,6 +391,30 @@ async def update_estimate_acts(
         "req_hidden_work_act": est.req_hidden_work_act,
         "req_intermediate_act": est.req_intermediate_act,
         "req_ks2_ks3": est.req_ks2_ks3,
+    }
+
+
+@router.patch("/estimates/{estimate_id}/fer-multiplier")
+async def update_estimate_fer_multiplier(
+    project_id: UUID,
+    estimate_id: UUID,
+    body: FerMultiplierUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+
+    if body.fer_multiplier < 0 or body.fer_multiplier > 1000:
+        raise HTTPException(400, "Множитель должен быть от 0 до 1000")
+
+    est.fer_multiplier = round(float(body.fer_multiplier), 1)
+
+    await db.commit()
+    return {
+        "id": est.id,
+        "fer_multiplier": float(est.fer_multiplier),
     }
 
 

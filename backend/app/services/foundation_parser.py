@@ -10,7 +10,7 @@ from .pdf_parser import ParsedRow, _f
 # First row of each table: [section_num, section_name, '', '', '', '']
 # Data rows:               [None,        name,          unit, qty, price, sum]
 
-_SKIP_ROW_RE = re.compile(r'^(ИТОГО|ед\.?изм|кол-во|наименование)', re.IGNORECASE)
+_SKIP_ROW_RE = re.compile(r'^(ИТОГО|ВСЕГО|ед\.?изм|кол-во|наименование)', re.IGNORECASE)
 
 
 class FoundationTableParser:

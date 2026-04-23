@@ -189,6 +189,7 @@ class EstimateRow(BaseModel):
     fer_words_machine_hours: float | None = None
     fer_words_match_score: float | None = None
     fer_words_match_count: int | None = None
+    fer_multiplier: float = 1.0
     req_hidden_work_act: bool = False
     req_intermediate_act: bool = False
     req_ks2_ks3: bool = False
@@ -210,6 +211,7 @@ class EstimateBatchResponse(BaseModel):
     project_id: str
     name: str
     estimate_kind: int
+    start_date: date | None = None
     workers_count: int | None = None
     source_filename: str | None = None
     estimates_count: int = 0

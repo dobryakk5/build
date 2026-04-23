@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
+import { useSearchParams } from "next/navigation";
 
 import { fer as ferApi } from "@/lib/api";
 import type {
@@ -113,6 +114,8 @@ function IgnoreBadge({
 }
 
 export default function FerPage() {
+  const searchParams = useSearchParams();
+  const tableFromUrl = searchParams.get("table");
   const [collections, setCollections] = useState<FerCollectionSummary[]>([]);
   const [collectionsLoad, setCollectionsLoad] = useState(true);
   const [browse, setBrowse] = useState<FerBrowseResponse | null>(null);
@@ -148,6 +151,28 @@ export default function FerPage() {
     setSearchLoad(false);
     setSearchError(null);
   }
+
+  useEffect(() => {
+    if (!tableFromUrl) {
+      return;
+    }
+
+    const tableId = Number(tableFromUrl);
+    if (!Number.isInteger(tableId) || tableId <= 0) {
+      return;
+    }
+
+    setSearchValue("");
+    setSearchResults([]);
+    setSearchActive(false);
+    setSearchLoad(false);
+    setSearchError(null);
+    setBrowse(null);
+    setDetailLoad(true);
+    ferApi.table(tableId)
+      .then(setDetail)
+      .finally(() => setDetailLoad(false));
+  }, [tableFromUrl]);
 
   useEffect(() => {
     const handleNavigateRoot = () => openCollections();

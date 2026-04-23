@@ -181,6 +181,11 @@ export const estimates = {
       method: "PATCH",
       body: JSON.stringify({ workers_count: workersCount }),
     }),
+  buildGantt: (pid: string, batchId: string, startDate?: string | null) =>
+    request<{ id: string; start_date: string; gantt_tasks_count: number }>(`/projects/${pid}/estimate-batches/${batchId}/build-gantt`, {
+      method: "POST",
+      body: JSON.stringify({ start_date: startDate ?? null }),
+    }),
   updateActs: (pid: string, eid: string, body: {
     req_hidden_work_act?: boolean;
     req_intermediate_act?: boolean;
@@ -189,6 +194,11 @@ export const estimates = {
     request<any>(`/projects/${pid}/estimates/${eid}/acts`, {
       method: "PATCH",
       body: JSON.stringify(body),
+    }),
+  updateFerMultiplier: (pid: string, eid: string, ferMultiplier: number) =>
+    request<{ id: string; fer_multiplier: number }>(`/projects/${pid}/estimates/${eid}/fer-multiplier`, {
+      method: "PATCH",
+      body: JSON.stringify({ fer_multiplier: ferMultiplier }),
     }),
   updateFer: (pid: string, eid: string, body: { fer_table_id: number | null }) =>
     request<any>(`/projects/${pid}/estimates/${eid}/fer`, {

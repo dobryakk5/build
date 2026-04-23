@@ -19,8 +19,7 @@
     → Job.status = "processing"
     → удаляем старые estimates + gantt_tasks проекта
     → парсим Excel (авто или по маппингу)
-    → сохраняем estimates, gantt_tasks, task_dependencies
-    → пересчитываем даты
+    → сохраняем estimates и estimate_batch
     → Job.status = "done" | "failed"
     → temp-файл удаляется в любом случае (finally)
 """
@@ -33,12 +32,17 @@ from datetime import date, datetime
 from uuid import uuid4
 
 from fastapi import UploadFile, HTTPException
-from sqlalchemy import select, delete, func
+from sqlalchemy import select, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.date_utils             import working_days_between, task_end_date
 from app.models                      import Job, GanttTask, Estimate, EstimateBatch, TaskDependency
-from app.services.excel_parser       import ExcelEstimateParser, NeedsMappingError
+from app.services.excel_parser       import (
+    ExcelEstimateParser,
+    NeedsMappingError,
+    describe_subtotal_row,
+    is_subtotal_row,
+)
 from app.services.gantt_builder      import GanttBuilder, GanttTaskDTO
 
 
@@ -238,11 +242,20 @@ async def _process_upload(job_id: str) -> None:
                     "наименование, количество, единица, сумма."
                 )
 
+            rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
+            if not rows:
+                raise ValueError(
+                    "В файле найдены только строки подытогов. "
+                    "Строки с «Итого» и «Всего» используются для сверки, "
+                    "но не считаются работами."
+                )
+
             batch = EstimateBatch(
                 id=str(uuid4()),
                 project_id=job.project_id,
                 name=_make_batch_name(job.input.get("filename")),
                 estimate_kind=estimate_kind,
+                start_date=start_date,
                 workers_count=workers,
                 source_filename=job.input.get("filename"),
             )
@@ -271,58 +284,33 @@ async def _process_upload(job_id: str) -> None:
 
             await db.flush()
 
-            # ── 4. Строим Ганта ───────────────────────────────────────────────
-            builder   = GanttBuilder()
-            task_dtos = builder.build(
-                project_id = job.project_id,
-                estimates  = estimates,
-                start_date = start_date,
-                workers    = workers,
-            )
-            task_dtos = _wrap_batch_tasks(
-                batch_id=batch.id,
-                batch_name=batch.name,
-                start_date=start_date,
-                task_dtos=task_dtos,
-            )
-            row_order_offset = await _get_row_order_offset(job.project_id, db)
-            task_dtos = _shift_row_order(task_dtos, row_order_offset)
+            # Гант строится отдельным действием со страницы сметы.
 
-            for dto in task_dtos:
-                db.add(GanttTask(
-                    id           = dto.id,
-                    project_id   = dto.project_id,
-                    estimate_batch_id = batch.id,
-                    estimate_id  = dto.estimate_id,
-                    parent_id    = dto.parent_id,
-                    name         = dto.name,
-                    start_date   = dto.start_date,
-                    working_days = dto.working_days,
-                    workers_count = dto.workers_count,
-                    labor_hours  = dto.labor_hours,
-                    hours_per_day = dto.hours_per_day,
-                    progress     = 0,
-                    is_group     = dto.is_group,
-                    type         = dto.type,
-                    color        = dto.color,
-                    row_order    = dto.row_order,
-                ))
-
-            await db.flush()
+            total_price = sum(
+                float(e.total_price) for e in estimates if e.total_price
+            )
+            declared_total_price = _declared_total_price(subtotal_rows)
+            subtotal_difference = (
+                round(total_price - declared_total_price, 2)
+                if declared_total_price is not None
+                else None
+            )
 
             job.status = "done"
             job.result = {
                 "estimates_count":   len(estimates),
-                "gantt_tasks_count": len(task_dtos),
+                "gantt_tasks_count": 0,
                 "estimate_batch_id": batch.id,
                 "estimate_batch_name": batch.name,
                 "estimate_kind": estimate_kind,
                 "complex_mode": complex_mode,
                 "strategy":          meta.get("strategy"),
                 "confidence":        meta.get("confidence"),
-                "total_price":       sum(
-                    float(e.total_price) for e in estimates if e.total_price
-                ),
+                "total_price":       total_price,
+                "ignored_subtotal_rows_count": len(subtotal_rows),
+                "declared_total_price": declared_total_price,
+                "subtotal_difference": subtotal_difference,
+                "subtotal_rows": subtotal_rows[:50],
             }
 
         except Exception as exc:
@@ -349,6 +337,102 @@ async def get_job(job_id: str, db: AsyncSession) -> Job:
     if not job:
         raise HTTPException(404, "Job не найден")
     return job
+
+
+async def build_gantt_for_estimate_batch(
+    project_id: str,
+    estimate_batch_id: str,
+    db: AsyncSession,
+    start_date: date | None = None,
+) -> dict:
+    batch = await db.get(EstimateBatch, estimate_batch_id)
+    if not batch or batch.project_id != project_id or batch.deleted_at:
+        raise HTTPException(404, "Блок сметы не найден")
+
+    effective_start_date = start_date or batch.start_date or date.today()
+    workers = int(batch.workers_count or 1)
+
+    estimates = list(
+        await db.scalars(
+            select(Estimate)
+            .where(Estimate.project_id == project_id)
+            .where(Estimate.estimate_batch_id == estimate_batch_id)
+            .where(Estimate.deleted_at == None)
+            .order_by(Estimate.row_order, Estimate.created_at, Estimate.id)
+        )
+    )
+    if not estimates:
+        raise HTTPException(422, "В выбранном блоке нет строк сметы для построения Ганта")
+
+    existing_gantt_ids = list(
+        await db.scalars(
+            select(GanttTask.id)
+            .where(GanttTask.project_id == project_id)
+            .where(GanttTask.estimate_batch_id == estimate_batch_id)
+            .where(GanttTask.deleted_at == None)
+        )
+    )
+    if existing_gantt_ids:
+        await db.execute(
+            delete(TaskDependency).where(
+                or_(
+                    TaskDependency.task_id.in_(existing_gantt_ids),
+                    TaskDependency.depends_on.in_(existing_gantt_ids),
+                )
+            )
+        )
+        await db.execute(
+            GanttTask.__table__.update()
+            .where(GanttTask.id.in_(existing_gantt_ids))
+            .values(deleted_at=datetime.utcnow())
+        )
+        await db.flush()
+
+    builder = GanttBuilder()
+    task_dtos = builder.build(
+        project_id=project_id,
+        estimates=estimates,
+        start_date=effective_start_date,
+        workers=workers,
+    )
+    task_dtos = _wrap_batch_tasks(
+        batch_id=batch.id,
+        batch_name=batch.name,
+        start_date=effective_start_date,
+        task_dtos=task_dtos,
+    )
+    row_order_offset = await _get_row_order_offset(project_id, db)
+    task_dtos = _shift_row_order(task_dtos, row_order_offset)
+
+    for dto in task_dtos:
+        db.add(
+            GanttTask(
+                id=dto.id,
+                project_id=dto.project_id,
+                estimate_batch_id=batch.id,
+                estimate_id=dto.estimate_id,
+                parent_id=dto.parent_id,
+                name=dto.name,
+                start_date=dto.start_date,
+                working_days=dto.working_days,
+                workers_count=dto.workers_count,
+                labor_hours=dto.labor_hours,
+                hours_per_day=dto.hours_per_day,
+                progress=0,
+                is_group=dto.is_group,
+                type=dto.type,
+                color=dto.color,
+                row_order=dto.row_order,
+            )
+        )
+
+    batch.start_date = effective_start_date
+    await db.flush()
+    return {
+        "id": batch.id,
+        "start_date": str(effective_start_date),
+        "gantt_tasks_count": len(task_dtos),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -412,6 +496,25 @@ def _make_batch_name(filename: str | None) -> str:
         return "Смета"
     stem, _ = os.path.splitext(os.path.basename(filename))
     return stem.strip() or "Смета"
+
+
+def _split_work_and_subtotal_rows(rows: list) -> tuple[list, list[dict]]:
+    work_rows = []
+    subtotal_rows = []
+    for row in rows:
+        if is_subtotal_row(row):
+            subtotal_rows.append(describe_subtotal_row(row))
+            continue
+        work_rows.append(row)
+    return work_rows, subtotal_rows
+
+
+def _declared_total_price(subtotal_rows: list[dict]) -> float | None:
+    for subtotal in reversed(subtotal_rows):
+        value = subtotal.get("total_price")
+        if value is not None:
+            return float(value)
+    return None
 
 
 async def _get_row_order_offset(project_id: str, db: AsyncSession) -> float:

@@ -3,6 +3,7 @@ from pathlib import Path
 from openpyxl import Workbook
 
 from app.services.excel_parser import ExcelEstimateParser
+from app.services.upload_service import _declared_total_price, _split_work_and_subtotal_rows
 
 
 def _save_workbook(tmp_path: Path, name: str, fill_rows) -> Path:
@@ -211,3 +212,37 @@ def test_row_parser_keeps_parent_section_when_numbered_subsection_follows(tmp_pa
     assert rows[0].section == "6. Потолки"
     assert rows[0].raw_data["group_path"] == ["6. Потолки", "Штукатурные работы (потолок)"]
     assert rows[0].work_name == "Грунтование потолка бетоконтактом 1 раз"
+
+
+def test_upload_filter_treats_itogo_and_vsego_as_subtotals(tmp_path: Path) -> None:
+    def fill(ws):
+        ws.title = "Лист1"
+        headers = ["№", "Наименование работ", "Ед.изм.", "Кол-во", "Цена", "Сумма"]
+        for idx, value in enumerate(headers, start=1):
+            ws.cell(1, idx).value = value
+
+        ws.cell(2, 1).value = "1."
+        ws.cell(2, 2).value = "Отделочные работы"
+
+        ws.cell(3, 1).value = "1.1"
+        ws.cell(3, 2).value = "Шпатлевка стен"
+        ws.cell(3, 3).value = "м2"
+        ws.cell(3, 4).value = 10
+        ws.cell(3, 5).value = 100
+        ws.cell(3, 6).value = 1000
+
+        ws.cell(4, 2).value = "Итого по разделу"
+        ws.cell(4, 6).value = 1000
+
+        ws.cell(5, 2).value = "Всего по смете"
+        ws.cell(5, 6).value = 1000
+
+    path = _save_workbook(tmp_path, "СтрокиСПодытом", fill)
+
+    rows, meta = ExcelEstimateParser().parse(path)
+    work_rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
+
+    assert meta["strategy"] == "row"
+    assert [row.work_name for row in work_rows] == ["Шпатлевка стен"]
+    assert [row["label"] for row in subtotal_rows] == ["Итого по разделу", "Всего по смете"]
+    assert _declared_total_price(subtotal_rows) == 1000

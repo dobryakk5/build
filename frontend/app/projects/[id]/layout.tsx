@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useParams, usePathname, useRouter } from "next/navigation";
 
 import EmailVerificationBanner from "@/components/EmailVerificationBanner";
-import { auth, notifications as notifApi } from "@/lib/api";
+import { auth, notifications as notifApi, projects as projectsApi } from "@/lib/api";
 import { useUser } from "@/lib/UserContext";
 
 export default function ProjectLayout({ children }: { children: ReactNode }) {
@@ -19,6 +19,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const [showNotif, setShowNotif] = useState(false);
   const [notifs, setNotifs] = useState<any[]>([]);
   const [resendingVerification, setResendingVerification] = useState(false);
+  const [deletingProject, setDeletingProject] = useState(false);
 
   useEffect(() => {
     if (!userLoading && !currentUser) {
@@ -40,6 +41,21 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
 
   async function handleLogout() {
     await auth.logout();
+  }
+
+  async function handleDeleteProject() {
+    if (!window.confirm("Удалить объект? Это действие нельзя отменить.")) {
+      return;
+    }
+
+    setDeletingProject(true);
+    try {
+      await projectsApi.delete(id);
+      router.replace("/projects");
+    } catch (error: unknown) {
+      alert(error instanceof Error ? error.message : "Не удалось удалить объект");
+      setDeletingProject(false);
+    }
   }
 
   async function handleResendVerification() {
@@ -197,6 +213,26 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
               </>
             )}
           </div>
+
+          {isOwner && (
+            <button
+              onClick={handleDeleteProject}
+              disabled={deletingProject}
+              style={{
+                background: "rgba(239, 68, 68, .04)",
+                border: "1px solid rgba(239, 68, 68, .16)",
+                borderRadius: 4,
+                cursor: deletingProject ? "default" : "pointer",
+                color: "#b91c1c",
+                fontSize: 12,
+                fontWeight: 400,
+                padding: "4px 10px",
+                opacity: deletingProject ? 0.45 : 0.72,
+              }}
+            >
+              {deletingProject ? "Удаление..." : "Удалить объект"}
+            </button>
+          )}
 
           <button
             onClick={handleLogout}

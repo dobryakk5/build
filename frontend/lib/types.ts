@@ -44,6 +44,7 @@ export interface EstimateBatch {
   project_id: string;
   name: string;
   estimate_kind: number;
+  start_date?: string | null;
   workers_count?: number | null;
   source_filename?: string | null;
   estimates_count: number;
@@ -92,6 +93,7 @@ export interface EstimateRow {
   fer_words_machine_hours?: number | null;
   fer_words_match_score?: number | null;
   fer_words_match_count?: number | null;
+  fer_multiplier?: number | null;
   req_hidden_work_act?: boolean;
   req_intermediate_act?: boolean;
   req_ks2_ks3?: boolean;

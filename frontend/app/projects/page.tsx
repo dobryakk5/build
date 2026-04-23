@@ -46,7 +46,7 @@ export default function ProjectsPage() {
     if (!newName.trim()) return;
     try {
       const p = await projects.create({ name: newName });
-      router.push(`/projects/${p.id}`);
+      router.push(`/projects/${p.id}/upload`);
     } catch {}
   }
 

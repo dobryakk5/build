@@ -64,12 +64,7 @@ function clearCache(): void {
 }
 
 export function UserProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<UserState>(() => {
-    const cached = readCache();
-    return cached
-      ? { status: "authenticated", user: cached }
-      : { status: "loading" };
-  });
+  const [state, setState] = useState<UserState>({ status: "loading" });
 
   const fetchUser = useCallback(async () => {
     try {
@@ -95,6 +90,10 @@ export function UserProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
+    const cached = readCache();
+    if (cached) {
+      setState({ status: "authenticated", user: cached });
+    }
     fetchUser();
   }, [fetchUser]);
 

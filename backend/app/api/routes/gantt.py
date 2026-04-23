@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import bindparam, select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps        import require_action, require_task_in_project, get_project_member, get_db, get_current_user
@@ -114,6 +114,133 @@ async def _enrich_task(task: GanttTask, db: AsyncSession) -> TaskResponse:
     )
 
 
+def _task_response_from_prefetched(
+    task: GanttTask,
+    *,
+    progress: int,
+    depends_on: str,
+    comments_count: int,
+    assignee: User | None,
+    estimate: Estimate | None,
+) -> TaskResponse:
+    assignee_payload = (
+        {"id": assignee.id, "name": assignee.name, "avatar_url": assignee.avatar_url}
+        if assignee else None
+    )
+
+    return TaskResponse(
+        id             = task.id,
+        project_id     = task.project_id,
+        estimate_batch_id = task.estimate_batch_id,
+        parent_id      = task.parent_id,
+        estimate_id    = task.estimate_id,
+        name           = task.name,
+        start_date     = task.start_date,
+        working_days   = task.working_days,
+        workers_count  = task.workers_count,
+        labor_hours    = float(task.labor_hours) if task.labor_hours is not None else None,
+        fer_labor_hours = _estimate_fer_labor_hours(estimate),
+        hours_per_day  = float(task.hours_per_day or DEFAULT_HOURS_PER_DAY),
+        end_date       = task_end_date(task.start_date, task.working_days),
+        progress       = progress,
+        is_group       = task.is_group,
+        type           = task.type,
+        color          = task.color,
+        requires_act   = task.requires_act,
+        act_signed     = task.act_signed,
+        req_hidden_work_act = estimate.req_hidden_work_act if estimate else False,
+        req_intermediate_act = estimate.req_intermediate_act if estimate else False,
+        req_ks2_ks3 = estimate.req_ks2_ks3 if estimate else False,
+        row_order      = float(task.row_order),
+        assignee       = assignee_payload,
+        depends_on     = depends_on,
+        materials      = estimate.materials or [] if estimate else [],
+        comments_count = comments_count,
+    )
+
+
+async def _enrich_tasks(tasks: list[GanttTask], db: AsyncSession) -> list[TaskResponse]:
+    """Добавляет вычисляемые поля пачкой, без N+1 запросов на строку Ганта."""
+    if not tasks:
+        return []
+
+    task_ids = [task.id for task in tasks]
+    group_ids = [task.id for task in tasks if task.is_group]
+    assignee_ids = sorted({task.assignee_id for task in tasks if task.assignee_id})
+    estimate_ids = sorted({task.estimate_id for task in tasks if task.estimate_id})
+
+    progress_by_id = {task.id: int(task.progress or 0) for task in tasks if not task.is_group}
+    if group_ids:
+        progress_stmt = text("""
+            WITH RECURSIVE tree AS (
+                SELECT id AS root_id, id, parent_id, working_days, progress, is_group
+                  FROM gantt_tasks
+                 WHERE id IN :root_ids AND deleted_at IS NULL
+                UNION ALL
+                SELECT tree.root_id, t.id, t.parent_id, t.working_days, t.progress, t.is_group
+                  FROM gantt_tasks t
+                  JOIN tree ON t.parent_id = tree.id
+                 WHERE t.deleted_at IS NULL
+            )
+            SELECT
+                root_id,
+                CASE
+                    WHEN COALESCE(SUM(working_days) FILTER (WHERE NOT is_group), 0) = 0 THEN 0
+                    ELSE ROUND(
+                        SUM(progress * working_days) FILTER (WHERE NOT is_group)::numeric /
+                        SUM(working_days)            FILTER (WHERE NOT is_group)
+                    )
+                END AS progress
+              FROM tree
+             WHERE NOT is_group
+             GROUP BY root_id
+        """).bindparams(bindparam("root_ids", expanding=True))
+        progress_rows = await db.execute(progress_stmt, {"root_ids": group_ids})
+        progress_by_id.update({row.root_id: int(row.progress or 0) for row in progress_rows})
+        for group_id in group_ids:
+            progress_by_id.setdefault(group_id, 0)
+
+    depends_by_task = {task_id: [] for task_id in task_ids}
+    deps_rows = await db.execute(
+        select(TaskDependency.task_id, TaskDependency.depends_on)
+        .where(TaskDependency.task_id.in_(task_ids))
+    )
+    for task_id, depends_on in deps_rows:
+        depends_by_task.setdefault(task_id, []).append(depends_on)
+
+    comments_by_task = {task_id: 0 for task_id in task_ids}
+    comments_rows = await db.execute(
+        select(Comment.task_id, func.count())
+        .where(Comment.task_id.in_(task_ids))
+        .where(Comment.deleted_at == None)
+        .group_by(Comment.task_id)
+    )
+    for task_id, count in comments_rows:
+        comments_by_task[task_id] = int(count or 0)
+
+    users_by_id: dict[str, User] = {}
+    if assignee_ids:
+        users = await db.scalars(select(User).where(User.id.in_(assignee_ids)))
+        users_by_id = {user.id: user for user in users}
+
+    estimates_by_id: dict[str, Estimate] = {}
+    if estimate_ids:
+        estimates = await db.scalars(select(Estimate).where(Estimate.id.in_(estimate_ids)))
+        estimates_by_id = {estimate.id: estimate for estimate in estimates}
+
+    return [
+        _task_response_from_prefetched(
+            task,
+            progress=progress_by_id.get(task.id, 0),
+            depends_on=",".join(depends_by_task.get(task.id, [])),
+            comments_count=comments_by_task.get(task.id, 0),
+            assignee=users_by_id.get(task.assignee_id) if task.assignee_id else None,
+            estimate=estimates_by_id.get(task.estimate_id) if task.estimate_id else None,
+        )
+        for task in tasks
+    ]
+
+
 class BaselineAcceptRequest(BaseModel):
     reason: str | None = None
 
@@ -147,11 +274,9 @@ async def list_tasks(
 
     total = await db.scalar(total_q)
 
-    tasks = await db.scalars(
-        tasks_q
-    )
+    tasks = list(await db.scalars(tasks_q))
 
-    enriched = [await _enrich_task(t, db) for t in tasks]
+    enriched = await _enrich_tasks(tasks, db)
 
     return GanttResponse(
         tasks    = enriched,

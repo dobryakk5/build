@@ -177,6 +177,10 @@ def match_any_field(cell_value: str) -> Optional[str]:
 
 _TYPE1_ITEM_RE = re.compile(r"^\d+\.\d+$")
 _HEADING_NUM_RE = re.compile(r"^\d+(?:\.\d+)*\.?$")
+_SUBTOTAL_WORD_RE = re.compile(
+    r"(?<![A-Za-zА-Яа-яЁё])(итого|всего)(?![A-Za-zА-Яа-яЁё])",
+    re.IGNORECASE,
+)
 
 
 def _cell_text(value) -> str:
@@ -249,6 +253,41 @@ def _pick_rightmost_numeric(ws: Worksheet, row_idx: int, columns: list[int]) -> 
         if value is not None:
             return value
     return None
+
+
+def is_subtotal_label(text: str | None) -> bool:
+    """Строки с Итого/Всего — подытоги, а не отдельные работы."""
+    return bool(text and _SUBTOTAL_WORD_RE.search(str(text)))
+
+
+def is_subtotal_row(row) -> bool:
+    return is_subtotal_label(getattr(row, "work_name", None))
+
+
+def subtotal_row_amount(row) -> Optional[float]:
+    for attr in ("total_price", "unit_price", "quantity"):
+        value = _to_float(getattr(row, attr, None))
+        if value is not None:
+            return value
+
+    raw_data = getattr(row, "raw_data", None)
+    if isinstance(raw_data, dict):
+        values = [_to_float(value) for value in raw_data.values()]
+        values = [value for value in values if value is not None]
+        if values:
+            return values[-1]
+
+    return None
+
+
+def describe_subtotal_row(row) -> dict:
+    return {
+        "label": str(getattr(row, "work_name", "") or "").strip(),
+        "section": getattr(row, "section", None),
+        "total_price": subtotal_row_amount(row),
+        "row_order": getattr(row, "row_order", None),
+        "source_strategy": getattr(row, "source_strategy", None),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

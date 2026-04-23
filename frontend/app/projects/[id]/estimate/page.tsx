@@ -52,20 +52,67 @@ type FerTableInfo = {
   effective_ignored: boolean;
 };
 
+type FerHoursInfo = {
+  humanHours: number | null;
+  loading?: boolean;
+};
+
 const tableHeaders = [
   "Наименование работ",
-  "Материалы",
-  "Акты",
-  "Тип работ ФЕР",
-  "ИИ",
   "Ед.",
   "Кол-во",
   "Цена за ед., ₽",
   "Сумма, ₽",
+  "Материалы",
+  "Акты",
+  "Тип работ ФЕР",
+  "Номер ФЕР",
+  "Нормочасы ФЕР",
+  "Множитель",
+  "Расчет",
+  "Человеко-дни",
+  "ИИ",
 ];
 
 function fmtQuantity(value?: number | null) {
   return value == null ? "—" : value.toLocaleString("ru-RU");
+}
+
+function fmtFerHours(value?: number | null) {
+  return value == null
+    ? "—"
+    : value.toLocaleString("ru-RU", {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 3,
+      });
+}
+
+function sumFerHours(rows: FerTableDetail["rows"]) {
+  let total = 0;
+  let hasValue = false;
+  for (const row of rows) {
+    const value = row.h_hour;
+    if (value != null) {
+      total += value;
+      hasValue = true;
+    }
+  }
+  return hasValue ? total : null;
+}
+
+function calcNormHours(row: EstimateRow, ferHours?: FerHoursInfo) {
+  if (row.quantity == null || ferHours?.humanHours == null) {
+    return null;
+  }
+  return row.quantity * ferHours.humanHours * (row.fer_multiplier ?? 1);
+}
+
+function calcPersonDays(row: EstimateRow, ferHours: FerHoursInfo | undefined, hoursPerDay: number, workersCount: number) {
+  const normHours = calcNormHours(row, ferHours);
+  if (normHours == null || hoursPerDay <= 0 || workersCount <= 0) {
+    return null;
+  }
+  return normHours / hoursPerDay / workersCount;
 }
 
 function materialMeta(material: EstimateMaterial) {
@@ -554,7 +601,6 @@ function FerCell({
               <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--mono)" }}>score {(row.fer_match_score ?? 0).toFixed(2)}</span>
             )}
             {tableInfo?.effective_ignored && <FerIgnoreBadge ignored={tableInfo.ignored} effectiveIgnored={tableInfo.effective_ignored} />}
-            {row.fer_table_id && <span style={{ fontSize: 9, color: "var(--muted)", fontFamily: "var(--mono)" }}>#{row.fer_table_id}</span>}
           </div>
         </>
       ) : (
@@ -598,6 +644,154 @@ function FerCell({
           <div style={{ marginTop: 8, fontSize: 10, color: "#475569" }}>Нажмите для изменения маппинга</div>
         </div>
       )}
+    </td>
+  );
+}
+
+function FerNumberCell({
+  tableId,
+  onOpen,
+}: {
+  tableId?: number | null;
+  onOpen: (tableId: number) => void;
+}) {
+  return (
+    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>
+      {tableId ? (
+        <button
+          type="button"
+          onClick={() => onOpen(tableId)}
+          title="Открыть таблицу в справочнике ФЕР"
+          style={{
+            border: "none",
+            background: "transparent",
+            padding: 0,
+            margin: 0,
+            color: "var(--blue-dark)",
+            cursor: "pointer",
+            font: "inherit",
+            textDecoration: "underline",
+          }}
+        >
+          #{tableId}
+        </button>
+      ) : (
+        <span style={{ color: "var(--muted)" }}>—</span>
+      )}
+    </td>
+  );
+}
+
+function FerHoursCell({
+  tableId,
+  hours,
+}: {
+  tableId?: number | null;
+  hours?: FerHoursInfo;
+}) {
+  const value = tableId ? hours?.humanHours : null;
+  return (
+    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>
+      {tableId && hours?.loading ? (
+        <span style={{ color: "var(--muted)" }}>...</span>
+      ) : (
+        fmtFerHours(value)
+      )}
+    </td>
+  );
+}
+
+function CalculatedNormHoursCell({
+  row,
+  hours,
+}: {
+  row: EstimateRow;
+  hours?: FerHoursInfo;
+}) {
+  return (
+    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600 }}>
+      {hours?.loading ? <span style={{ color: "var(--muted)" }}>...</span> : fmtFerHours(calcNormHours(row, hours))}
+    </td>
+  );
+}
+
+function PersonDaysCell({
+  row,
+  hours,
+  hoursPerDay,
+  workersCount,
+}: {
+  row: EstimateRow;
+  hours?: FerHoursInfo;
+  hoursPerDay: number;
+  workersCount: number;
+}) {
+  return (
+    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600 }}>
+      {hours?.loading ? <span style={{ color: "var(--muted)" }}>...</span> : fmtFerHours(calcPersonDays(row, hours, hoursPerDay, workersCount))}
+    </td>
+  );
+}
+
+function FerMultiplierCell({
+  row,
+  onChange,
+}: {
+  row: EstimateRow;
+  onChange: (row: EstimateRow, nextMultiplier: number) => Promise<void>;
+}) {
+  const value = row.fer_multiplier ?? 1;
+  const update = (delta: number) => {
+    const next = Math.max(0, Math.round((value + delta) * 10) / 10);
+    if (next !== value) {
+      onChange(row, next);
+    }
+  };
+
+  return (
+    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>
+      <div style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+        <button
+          type="button"
+          onClick={() => update(-0.1)}
+          disabled={value <= 0}
+          aria-label="Уменьшить множитель ФЕР"
+          style={{
+            width: 22,
+            height: 22,
+            borderRadius: 4,
+            border: "1px solid var(--border)",
+            background: "var(--surface)",
+            color: value <= 0 ? "var(--muted)" : "var(--text)",
+            cursor: value <= 0 ? "default" : "pointer",
+            padding: 0,
+            lineHeight: "20px",
+          }}
+        >
+          -
+        </button>
+        <span style={{ minWidth: 34, textAlign: "center", color: "var(--text)" }}>
+          {value.toFixed(1)}
+        </span>
+        <button
+          type="button"
+          onClick={() => update(0.1)}
+          aria-label="Увеличить множитель ФЕР"
+          style={{
+            width: 22,
+            height: 22,
+            borderRadius: 4,
+            border: "1px solid var(--border)",
+            background: "var(--surface)",
+            color: "var(--text)",
+            cursor: "pointer",
+            padding: 0,
+            lineHeight: "20px",
+          }}
+        >
+          +
+        </button>
+      </div>
     </td>
   );
 }
@@ -647,13 +841,11 @@ function SectionGroupAiControls({
   running,
   onRun,
   onOpenCandidates,
-  onOpenManual,
 }: {
   representativeRow: EstimateRow;
   running: boolean;
   onRun: (row: EstimateRow) => Promise<void>;
   onOpenCandidates: (row: EstimateRow) => void;
-  onOpenManual: (row: EstimateRow) => void;
 }) {
   const hasSection = Boolean(representativeRow.section?.trim());
 
@@ -680,28 +872,6 @@ function SectionGroupAiControls({
           }}
         >
           {running ? "ИИ раздел..." : "ИИ раздел"}
-        </button>
-
-        <button
-          type="button"
-          onClick={() => onOpenManual(representativeRow)}
-          disabled={!hasSection}
-          title={hasSection ? "Выбрать сборник или раздел ФЕР вручную" : "У группы нет названия"}
-          style={{
-            border: "none",
-            background: "transparent",
-            padding: 0,
-            margin: 0,
-            color: hasSection ? "var(--blue-dark)" : "var(--muted)",
-            cursor: hasSection ? "pointer" : "default",
-            fontSize: 11,
-            fontWeight: 600,
-            textDecoration: "underline",
-            opacity: hasSection ? 1 : 0.7,
-            width: "fit-content",
-          }}
-        >
-          Выбрать вручную
         </button>
       </div>
 
@@ -736,8 +906,32 @@ function GroupFerCell({
   row: EstimateRow;
   onOpenManual: (row: EstimateRow) => void;
 }) {
+  const hasSection = Boolean(row.section?.trim());
+
   if (!row.fer_group_kind || !row.fer_group_title) {
-    return <span style={{ color: "var(--muted)" }}>—</span>;
+    return hasSection ? (
+      <button
+        type="button"
+        onClick={() => onOpenManual(row)}
+        style={{
+          border: "none",
+          background: "transparent",
+          padding: 0,
+          margin: 0,
+          textAlign: "left",
+          color: "var(--blue-dark)",
+          cursor: "pointer",
+          fontSize: 11,
+          lineHeight: 1.35,
+          textDecoration: "underline",
+          width: "fit-content",
+        }}
+      >
+        Выбрать
+      </button>
+    ) : (
+      <span style={{ color: "var(--muted)" }}>—</span>
+    );
   }
 
   const score = typeof row.fer_group_match_score === "number" ? row.fer_group_match_score.toFixed(2) : null;
@@ -745,6 +939,25 @@ function GroupFerCell({
 
   return (
     <div style={{ display: "grid", gap: 3, color: row.fer_group_is_ambiguous ? "var(--muted)" : "var(--text)" }}>
+      <button
+        type="button"
+        onClick={() => onOpenManual(row)}
+        style={{
+          border: "none",
+          background: "transparent",
+          padding: 0,
+          margin: 0,
+          textAlign: "left",
+          color: "var(--blue-dark)",
+          cursor: "pointer",
+          fontSize: 11,
+          lineHeight: 1.35,
+          textDecoration: "underline",
+          width: "fit-content",
+        }}
+      >
+        Выбрать
+      </button>
       <button
         type="button"
         onClick={() => onOpenManual(row)}
@@ -1188,6 +1401,7 @@ export default function EstimatePage() {
   const [popup, setPopup] = useState<PopupState | null>(null);
   const [savingActsId, setSavingActsId] = useState<string | null>(null);
   const [ferModalRow, setFerModalRow] = useState<EstimateRow | null>(null);
+  const [ferHoursByTableId, setFerHoursByTableId] = useState<Record<number, FerHoursInfo>>({});
   const [runningAiRowId, setRunningAiRowId] = useState<string | null>(null);
   const [runningGroupSectionKey, setRunningGroupSectionKey] = useState<string | null>(null);
   const [confirmingGroupSectionKey, setConfirmingGroupSectionKey] = useState<string | null>(null);
@@ -1197,7 +1411,10 @@ export default function EstimatePage() {
   const [groupManualLoading, setGroupManualLoading] = useState(false);
   const [groupManualError, setGroupManualError] = useState<string | null>(null);
   const [workersDraft, setWorkersDraft] = useState("1");
+  const [hoursPerDay, setHoursPerDay] = useState(8);
   const [savingWorkers, setSavingWorkers] = useState(false);
+  const [buildingGanttBatchId, setBuildingGanttBatchId] = useState<string | null>(null);
+  const multiplierRequestSeq = useRef<Record<string, number>>({});
 
   const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
 
@@ -1257,12 +1474,53 @@ export default function EstimatePage() {
     }
   }, [activeBatchId, loadBatches, loadEstimateData, matchJob?.status]);
 
+  useEffect(() => {
+    const tableIds = Array.from(
+      new Set(rows.map((row) => row.fer_table_id).filter((tableId): tableId is number => tableId != null)),
+    ).filter((tableId) => ferHoursByTableId[tableId] == null);
+
+    if (!tableIds.length) {
+      return;
+    }
+
+    setFerHoursByTableId((current) => {
+      const next = { ...current };
+      for (const tableId of tableIds) {
+        next[tableId] = { humanHours: null, loading: true };
+      }
+      return next;
+    });
+
+    for (const tableId of tableIds) {
+      ferApi
+        .table(tableId)
+        .then((detail) => {
+          setFerHoursByTableId((current) => ({
+            ...current,
+            [tableId]: {
+              humanHours: sumFerHours(detail.rows),
+            },
+          }));
+        })
+        .catch(() => {
+          setFerHoursByTableId((current) => ({
+            ...current,
+            [tableId]: { humanHours: null },
+          }));
+        });
+    }
+  }, [ferHoursByTableId, rows]);
+
   const selectBatch = (batchId: string) => {
     setActiveBatchId(batchId);
     setPopup(null);
     setGroupCandidatesModal(null);
     setGroupManualModal(null);
     router.replace(`/projects/${id}/estimate?batch=${batchId}`);
+  };
+
+  const openFerReference = (tableId: number) => {
+    router.push(`/projects/${id}/fer?table=${tableId}`);
   };
 
   const activeBatch = batches.find((batch) => batch.id === activeBatchId) ?? null;
@@ -1279,6 +1537,28 @@ export default function EstimatePage() {
     } catch (error: any) {
       setRunningBatchId(null);
       alert(error.message);
+    }
+  };
+
+  const handleBuildGantt = async (batch: EstimateBatch) => {
+    try {
+      setBuildingGanttBatchId(batch.id);
+      const result = await estimates.buildGantt(id, batch.id, batch.start_date);
+      setBatches((current) =>
+        current.map((item) =>
+          item.id === batch.id
+            ? {
+                ...item,
+                start_date: result.start_date,
+                gantt_tasks_count: result.gantt_tasks_count,
+              }
+            : item,
+        ),
+      );
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setBuildingGanttBatchId(null);
     }
   };
 
@@ -1327,6 +1607,53 @@ export default function EstimatePage() {
       alert(error.message);
     } finally {
       setSavingActsId(null);
+    }
+  };
+
+  const handleFerMultiplierChange = async (selectedRow: EstimateRow, nextMultiplier: number) => {
+    const previousMultiplier = selectedRow.fer_multiplier ?? 1;
+    const requestSeq = (multiplierRequestSeq.current[selectedRow.id] ?? 0) + 1;
+    multiplierRequestSeq.current[selectedRow.id] = requestSeq;
+
+    setRows((current) =>
+      current.map((row) =>
+        row.id === selectedRow.id
+          ? {
+              ...row,
+              fer_multiplier: nextMultiplier,
+            }
+          : row,
+      ),
+    );
+
+    try {
+      const result = await estimates.updateFerMultiplier(id, selectedRow.id, nextMultiplier);
+      if (multiplierRequestSeq.current[selectedRow.id] === requestSeq) {
+        setRows((current) =>
+          current.map((row) =>
+            row.id === selectedRow.id
+              ? {
+                  ...row,
+                  fer_multiplier: result.fer_multiplier,
+                }
+              : row,
+          ),
+        );
+      }
+    } catch (error: any) {
+      if (multiplierRequestSeq.current[selectedRow.id] === requestSeq) {
+        setRows((current) =>
+          current.map((row) =>
+            row.id === selectedRow.id
+              ? {
+                  ...row,
+                  fer_multiplier: previousMultiplier,
+                }
+              : row,
+          ),
+        );
+        alert(error.message);
+      }
     }
   };
 
@@ -1532,6 +1859,7 @@ export default function EstimatePage() {
   const activeBatchWorkers = activeBatch?.workers_count ?? 1;
   const workersDraftNumber = Number(workersDraft);
   const workersChanged = Number.isInteger(workersDraftNumber) && workersDraftNumber !== activeBatchWorkers;
+  const calculationWorkers = Number.isInteger(workersDraftNumber) && workersDraftNumber > 0 ? workersDraftNumber : activeBatchWorkers;
 
   return (
     <div style={{ padding: 16, height: "100%", overflow: "auto" }}>
@@ -1556,23 +1884,47 @@ export default function EstimatePage() {
           ))}
         </div>
         {activeBatch && (
-          <button
-            onClick={() => handleMatchFer(activeBatch.id)}
-            disabled={matching}
-            style={{
-              padding: "8px 14px",
-              borderRadius: 8,
-              border: "1px solid var(--border2)",
-              background: matching && runningBatchId === activeBatch.id ? "rgba(59,130,246,.08)" : "var(--surface)",
-              cursor: matching ? "default" : "pointer",
-              fontSize: 12,
-              fontWeight: 600,
-              opacity: matching ? 0.7 : 1,
-              whiteSpace: "nowrap",
-            }}
-          >
-            {matching && runningBatchId === activeBatch.id ? "Векторно сопоставляем с ФЕР..." : "Векторно сопоставить с ФЕР"}
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <button
+              onClick={() => handleMatchFer(activeBatch.id)}
+              disabled={matching}
+              style={{
+                padding: "8px 14px",
+                borderRadius: 8,
+                border: "1px solid var(--border2)",
+                background: matching && runningBatchId === activeBatch.id ? "rgba(59,130,246,.08)" : "var(--surface)",
+                cursor: matching ? "default" : "pointer",
+                fontSize: 12,
+                fontWeight: 600,
+                opacity: matching ? 0.7 : 1,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {matching && runningBatchId === activeBatch.id ? "Векторно сопоставляем с ФЕР..." : "Векторно сопоставить с ФЕР"}
+            </button>
+            <button
+              onClick={() => handleBuildGantt(activeBatch)}
+              disabled={buildingGanttBatchId === activeBatch.id}
+              style={{
+                padding: "8px 14px",
+                borderRadius: 8,
+                border: "1px solid rgba(59,130,246,.22)",
+                background: "var(--blue-dark)",
+                color: "#fff",
+                cursor: buildingGanttBatchId === activeBatch.id ? "default" : "pointer",
+                fontSize: 12,
+                fontWeight: 700,
+                opacity: buildingGanttBatchId === activeBatch.id ? 0.7 : 1,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {buildingGanttBatchId === activeBatch.id
+                ? "Строим Гант..."
+                : activeBatch.gantt_tasks_count > 0
+                  ? "Перестроить Гант"
+                  : "Построить Гант"}
+            </button>
+          </div>
         )}
       </div>
 
@@ -1580,6 +1932,9 @@ export default function EstimatePage() {
         <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", fontSize: 12, color: "var(--muted)" }}>
           <div>
             ФЕР размечено: <b style={{ color: "var(--text)" }}>{activeBatch.fer_matched_count}</b> из <b style={{ color: "var(--text)" }}>{activeBatch.estimates_count}</b>
+            <span style={{ marginLeft: 10 }}>
+              · Гант: <b style={{ color: "var(--text)" }}>{activeBatch.gantt_tasks_count}</b> задач
+            </span>
             <span style={{ marginLeft: 10, color: "var(--muted)" }}>· кнопка ИИ в строке запускает векторную сверку по этой работе</span>
           </div>
           <label style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 8, color: "var(--text)", fontWeight: 600 }}>
@@ -1625,6 +1980,27 @@ export default function EstimatePage() {
           >
             {savingWorkers ? "Сохраняем..." : "Сохранить"}
           </button>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, color: "var(--text)", fontWeight: 600 }}>
+            Часов/день:
+            <select
+              value={hoursPerDay}
+              onChange={(event) => setHoursPerDay(Number(event.target.value))}
+              style={{
+                padding: "6px 8px",
+                borderRadius: 7,
+                border: "1px solid var(--border2)",
+                background: "var(--surface)",
+                fontSize: 12,
+                fontFamily: "var(--mono)",
+              }}
+            >
+              {[8, 9, 10].map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       )}
 
@@ -1666,8 +2042,8 @@ export default function EstimatePage() {
         </div>
       )}
 
-      <div style={{ position: "relative", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+      <div style={{ position: "relative", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, overflowX: "auto", overflowY: "hidden" }}>
+        <table style={{ width: "max-content", minWidth: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ background: "#1e293b" }}>
               {tableHeaders.map((header) => (
@@ -1676,6 +2052,7 @@ export default function EstimatePage() {
                   style={{
                     padding: "9px 12px",
                     textAlign: ["Наименование работ", "Материалы", "Тип работ ФЕР", "ИИ"].includes(header) ? "left" : "right",
+                    width: header === "Наименование работ" ? "1%" : undefined,
                     fontSize: 10,
                     color: "#94a3b8",
                     textTransform: "uppercase",
@@ -1699,6 +2076,8 @@ export default function EstimatePage() {
                     padding: "8px 12px",
                     fontWeight: 700,
                     fontSize: 11,
+                    width: "1%",
+                    whiteSpace: "nowrap",
                     background: "rgba(59,130,246,.06)",
                     color: "var(--blue-dark)",
                     letterSpacing: ".03em",
@@ -1706,34 +2085,6 @@ export default function EstimatePage() {
                   }}
                 >
                   {sectionName}
-                </td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", color: "var(--muted)" }}>—</td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)" }}>—</td>
-                <td
-                  style={{
-                    padding: "8px 12px",
-                    borderBottom: "1px solid var(--border)",
-                    background: "rgba(59,130,246,.06)",
-                    verticalAlign: "top",
-                  }}
-                >
-                  <GroupFerCell row={sectionRows[0]} onOpenManual={openManualGroupModal} />
-                </td>
-                <td
-                  style={{
-                    padding: "8px 12px",
-                    borderBottom: "1px solid var(--border)",
-                    background: "rgba(59,130,246,.06)",
-                    verticalAlign: "top",
-                  }}
-                >
-                  <SectionGroupAiControls
-                    representativeRow={sectionRows[0]}
-                    running={runningGroupSectionKey === sectionName}
-                    onRun={handleAIGroupMatch}
-                    onOpenCandidates={(row) => setGroupCandidatesModal({ sectionKey: row.section ?? "Без раздела" })}
-                    onOpenManual={openManualGroupModal}
-                  />
                 </td>
                 <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
                 <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
@@ -1751,10 +2102,46 @@ export default function EstimatePage() {
                 >
                   {fmtMoney(sectionRows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))}
                 </td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", color: "var(--muted)" }}>—</td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)" }}>—</td>
+                <td
+                  style={{
+                    padding: "8px 12px",
+                    borderBottom: "1px solid var(--border)",
+                    background: "rgba(59,130,246,.06)",
+                    verticalAlign: "top",
+                  }}
+                >
+                  <GroupFerCell row={sectionRows[0]} onOpenManual={openManualGroupModal} />
+                </td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                <td
+                  style={{
+                    padding: "8px 12px",
+                    borderBottom: "1px solid var(--border)",
+                    background: "rgba(59,130,246,.06)",
+                    verticalAlign: "top",
+                  }}
+                >
+                  <SectionGroupAiControls
+                    representativeRow={sectionRows[0]}
+                    running={runningGroupSectionKey === sectionName}
+                    onRun={handleAIGroupMatch}
+                    onOpenCandidates={(row) => setGroupCandidatesModal({ sectionKey: row.section ?? "Без раздела" })}
+                  />
+                </td>
               </tr>,
               ...sectionRows.map((row, index) => (
                 <tr key={row.id} style={{ background: index % 2 ? "var(--stripe)" : "" }}>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>{row.work_name}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", width: "1%", whiteSpace: "nowrap" }}>{row.work_name}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtQuantity(row.quantity)}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtMoney(row.unit_price ?? 0)}</td>
+                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 500 }}>{fmtMoney(row.total_price ?? 0)}</td>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", verticalAlign: "top" }}>
                     {row.materials?.length ? (
                       <div style={{ display: "grid", gap: 4 }}>
@@ -1773,21 +2160,23 @@ export default function EstimatePage() {
                     <ActsCell row={row} onOpen={handleOpenActs} />
                   </td>
                   <FerCell row={row} onOpenModal={setFerModalRow} />
+                  <FerNumberCell tableId={row.fer_table_id} onOpen={openFerReference} />
+                  <FerHoursCell tableId={row.fer_table_id} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
+                  <FerMultiplierCell row={row} onChange={handleFerMultiplierChange} />
+                  <CalculatedNormHoursCell row={row} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
+                  <PersonDaysCell row={row} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} hoursPerDay={hoursPerDay} workersCount={calculationWorkers} />
                   <AIVectorCell row={row} running={runningAiRowId === row.id} onRun={handleAIVectorMatch} />
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtQuantity(row.quantity)}</td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtMoney(row.unit_price ?? 0)}</td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 500 }}>{fmtMoney(row.total_price ?? 0)}</td>
                 </tr>
               )),
             ])}
             <tr style={{ background: "#f1f5f9", fontWeight: 700 }}>
-              <td colSpan={8} style={{ padding: "10px 12px", textAlign: "right", fontSize: 11, color: "var(--muted)", letterSpacing: ".06em" }}>
+              <td colSpan={4} style={{ padding: "10px 12px", textAlign: "right", fontSize: 11, color: "var(--muted)", letterSpacing: ".06em" }}>
                 ИТОГО
               </td>
               <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 15, color: "var(--blue-dark)" }}>
                 {fmtMoney(summary?.total ?? rows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))} ₽
               </td>
+              <td colSpan={9} style={{ padding: "10px 12px" }} />
             </tr>
           </tbody>
         </table>

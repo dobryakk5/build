@@ -44,6 +44,7 @@ class Estimate(Base, SoftDeleteMixin):
     fer_words_match_score: Mapped[float|None] = mapped_column(Numeric(5, 4))
     fer_words_match_count: Mapped[int|None] = mapped_column(Integer)
     fer_words_matched_at: Mapped[datetime|None] = mapped_column(TIMESTAMPTZ)
+    fer_multiplier: Mapped[float] = mapped_column(Numeric(6, 2), default=1.0, nullable=False, server_default=text("1.0"))
     labor_hours: Mapped[float|None] = mapped_column(Numeric(10, 2))        # трудоёмкость чел/час
     req_hidden_work_act: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     req_intermediate_act: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

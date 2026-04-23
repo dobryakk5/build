@@ -1,11 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import { estimates } from "@/lib/api";
 import { fmtMoney } from "@/lib/dateUtils";
-import type { EstimateBatch } from "@/lib/types";
 import { useJobPoller } from "@/lib/useJobPoller";
 
 const KIND_OPTIONS = [
@@ -55,47 +54,9 @@ export default function UploadPage() {
   const [complexMode, setComplexMode] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [batches, setBatches] = useState<EstimateBatch[]>([]);
-  const [loadingBatches, setLoadingBatches] = useState(true);
-  const [matchJobId, setMatchJobId] = useState<string | null>(null);
-  const [runningBatchId, setRunningBatchId] = useState<string | null>(null);
 
   const { job, loading: polling } = useJobPoller(jobId);
-  const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
   const canUpload = estimateKind !== null;
-
-  const loadBatches = useCallback(async () => {
-    if (!id) return;
-    try {
-      setLoadingBatches(true);
-      const data = await estimates.batches(id);
-      setBatches(data);
-    } catch {
-      setBatches([]);
-    } finally {
-      setLoadingBatches(false);
-    }
-  }, [id]);
-
-  useEffect(() => {
-    loadBatches();
-  }, [loadBatches]);
-
-  useEffect(() => {
-    if (job?.status === "done") {
-      loadBatches();
-    }
-  }, [job?.status, loadBatches]);
-
-  useEffect(() => {
-    if (matchJob?.status === "done") {
-      loadBatches();
-      setRunningBatchId(null);
-    }
-    if (matchJob?.status === "failed") {
-      setRunningBatchId(null);
-    }
-  }, [loadBatches, matchJob?.status]);
 
   const handleDrop = useCallback((files: FileList | null) => {
     if (!canUpload) return;
@@ -121,20 +82,8 @@ export default function UploadPage() {
     }
   }
 
-  async function handleMatchFer(batchId: string) {
-    try {
-      setRunningBatchId(batchId);
-      const res = await estimates.matchFer(id, batchId);
-      setMatchJobId(res.job_id);
-    } catch (e: any) {
-      setRunningBatchId(null);
-      alert(e.message);
-    }
-  }
-
   const status = job?.status;
   const result = job?.result;
-  const matchStatus = matchJob?.status;
 
   return (
     <div
@@ -349,7 +298,6 @@ export default function UploadPage() {
               ["Блок", result.estimate_batch_name],
               ["Тип", formatEstimateKind(result.estimate_kind ?? estimateKind)],
               ["Позиций сметы", result.estimates_count],
-              ["Задач в графике", result.gantt_tasks_count],
               ["Сумма", result.total_price ? `${fmtMoney(result.total_price)} ₽` : "—"],
             ].map(([label, value]) => (
               <span key={label as string}>
@@ -358,20 +306,11 @@ export default function UploadPage() {
             ))}
           </div>
           <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
-            {result.estimate_batch_id && (
-              <button
-                onClick={() => handleMatchFer(result.estimate_batch_id as string)}
-                disabled={matching}
-                style={{ padding: "8px 18px", background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border2)", borderRadius: 5, fontSize: 13, fontWeight: 600, cursor: matching ? "default" : "pointer", opacity: matching ? 0.7 : 1 }}
-              >
-                {matching && runningBatchId === result.estimate_batch_id ? "Векторно сопоставляем..." : "Векторно сопоставить с ФЕР"}
-              </button>
-            )}
             <button
-              onClick={() => router.push(`/projects/${id}/gantt${result.estimate_batch_id ? `?batch=${result.estimate_batch_id}` : ""}`)}
+              onClick={() => router.push(`/projects/${id}/estimate${result.estimate_batch_id ? `?batch=${result.estimate_batch_id}` : ""}`)}
               style={{ padding: "8px 18px", background: "var(--blue-dark)", color: "#fff", border: "none", borderRadius: 5, fontSize: 13, fontWeight: 600, cursor: "pointer" }}
             >
-              Открыть диаграмму Ганта →
+              Открыть смету
             </button>
           </div>
         </div>
@@ -392,118 +331,6 @@ export default function UploadPage() {
           </button>
         </div>
       )}
-
-      {matchStatus === "processing" && (
-        <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.18)", borderRadius: 6 }}>
-          <div style={{ color: "var(--blue-dark)", fontWeight: 600, fontSize: 13 }}>
-            ⏳ Идёт векторное сопоставление сметы с ФЕР
-          </div>
-        </div>
-      )}
-
-      {matchStatus === "done" && matchJob?.result && (
-        <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.18)", borderRadius: 6 }}>
-          <div style={{ color: "#15803d", fontWeight: 600, fontSize: 13 }}>
-            ✓ Векторное сопоставление с ФЕР завершено
-          </div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
-            Размечено строк: <b style={{ color: "var(--text)" }}>{matchJob.result.matched_rows_count ?? 0}</b>
-            {typeof matchJob.result.low_confidence_count === "number"
-              ? ` · низкая уверенность: ${matchJob.result.low_confidence_count}`
-              : ""}
-            {matchJob.result.strategy ? ` · стратегия: ${matchJob.result.strategy}` : ""}
-            {typeof matchJob.result.normalized_rows_count === "number"
-              ? ` · нормализовано: ${matchJob.result.normalized_rows_count}`
-              : ""}
-            {typeof matchJob.result.reranked_rows_count === "number"
-              ? ` · rerank: ${matchJob.result.reranked_rows_count}`
-              : ""}
-            {typeof matchJob.result.rerank_corrected_count === "number"
-              ? ` · исправлено rerank: ${matchJob.result.rerank_corrected_count}`
-              : ""}
-            {typeof matchJob.result.fallback_rows_count === "number"
-              ? ` · fallback: ${matchJob.result.fallback_rows_count}`
-              : ""}
-          </div>
-        </div>
-      )}
-
-      {matchStatus === "failed" && (
-        <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.18)", borderRadius: 6 }}>
-          <div style={{ color: "var(--red)", fontWeight: 600, fontSize: 13 }}>❌ Ошибка векторного сопоставления с ФЕР</div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{matchJob?.result?.error}</div>
-        </div>
-      )}
-
-      <div style={{ marginTop: 24, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".08em", fontFamily: "var(--mono)" }}>
-            Блоки работ в объекте
-          </div>
-          {loadingBatches && <div style={{ fontSize: 11, color: "var(--muted)" }}>Загрузка...</div>}
-        </div>
-
-        {!loadingBatches && batches.length === 0 && (
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>
-            Пока нет загруженных смет. Первая загрузка создаст первый блок работ.
-          </div>
-        )}
-
-        <div style={{ display: "grid", gap: 10 }}>
-          {batches.map((batch) => (
-            <div
-              key={batch.id}
-              style={{
-                border: "1px solid var(--border)",
-                borderRadius: 8,
-                padding: "12px 14px",
-                background: "var(--bg)",
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{batch.name}</div>
-                  <div style={{ marginTop: 4, fontSize: 11, color: "var(--muted)" }}>
-                    {formatEstimateKind(batch.estimate_kind)}
-                    {batch.source_filename ? ` · ${batch.source_filename}` : ""}
-                  </div>
-                </div>
-                <button
-                  onClick={() => router.push(`/projects/${id}/gantt?batch=${batch.id}`)}
-                  style={{ padding: "6px 12px", border: "1px solid var(--border2)", borderRadius: 5, background: "var(--surface)", cursor: "pointer", fontSize: 12 }}
-                >
-                  Открыть гант
-                </button>
-              </div>
-              <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 11, color: "var(--muted)", flexWrap: "wrap" }}>
-                <span>Позиций: <b style={{ color: "var(--text)" }}>{batch.estimates_count}</b></span>
-                <span>Задач: <b style={{ color: "var(--text)" }}>{batch.gantt_tasks_count}</b></span>
-                <span>ФЕР: <b style={{ color: "var(--text)" }}>{batch.fer_matched_count}</b> / {batch.estimates_count}</span>
-                <span>Сумма: <b style={{ color: "var(--text)" }}>{fmtMoney(batch.total_price)} ₽</b></span>
-              </div>
-              <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
-                <button
-                  onClick={() => handleMatchFer(batch.id)}
-                  disabled={matching}
-                  style={{ padding: "7px 12px", border: "1px solid var(--border2)", borderRadius: 5, background: "var(--surface)", cursor: matching ? "default" : "pointer", fontSize: 12, fontWeight: 600, opacity: matching ? 0.7 : 1 }}
-                >
-                  {matching && runningBatchId === batch.id
-                    ? "Векторно сопоставляем..."
-                    : batch.fer_matched_count > 0
-                      ? "Обновить векторные типы ФЕР"
-                      : "Векторно сопоставить с ФЕР"}
-                </button>
-                <button
-                  onClick={() => router.push(`/projects/${id}/estimate?batch=${batch.id}`)}
-                  style={{ padding: "7px 12px", border: "1px solid var(--border2)", borderRadius: 5, background: "var(--surface)", cursor: "pointer", fontSize: 12 }}
-                >
-                  Открыть смету
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
 
       <div style={{ marginTop: 24, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: 16 }}>
         <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 10, fontFamily: "var(--mono)" }}>
