@@ -56,6 +56,48 @@ async def test_update_estimate_batch_workers_saves_count(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_update_estimate_batch_schedule_saves_workers_and_hours(monkeypatch):
+    from app.api.routes.estimates import EstimateBatchScheduleUpdate, update_estimate_batch_schedule
+
+    batch = SimpleNamespace(
+        id="batch-1",
+        project_id="project-1",
+        deleted_at=None,
+        workers_count=3,
+        hours_per_day=8,
+    )
+    task = SimpleNamespace(
+        workers_count=3,
+        labor_hours=80,
+        hours_per_day=8,
+        working_days=4,
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=batch)
+    db.scalars = AsyncMock(return_value=[task])
+    resolve_dates = AsyncMock(return_value=[])
+    monkeypatch.setattr("app.api.routes.estimates.resolve_project_dates", resolve_dates)
+
+    result = await update_estimate_batch_schedule(
+        "project-1",
+        "batch-1",
+        EstimateBatchScheduleUpdate(workers_count=5, hours_per_day=10),
+        member=object(),
+        db=db,
+    )
+
+    assert batch.workers_count == 5
+    assert float(batch.hours_per_day) == 10
+    assert task.workers_count == 5
+    assert float(task.hours_per_day) == 10
+    assert task.working_days == 2
+    assert result == {"id": "batch-1", "workers_count": 5, "hours_per_day": 10.0, "updated_gantt_tasks_count": 1}
+    db.flush.assert_awaited_once()
+    resolve_dates.assert_awaited_once_with("project-1", db)
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_update_estimate_fer_assigns_manual_override():
     from app.api.routes.estimates import FerMappingUpdate, update_estimate_fer
 

@@ -115,6 +115,8 @@ class GanttBuilder:
         estimates:  list,       # list[Estimate ORM objects]
         start_date: date,
         workers:    int = 3,
+        hours_per_day: float = DEFAULT_HOURS_PER_DAY,
+        fer_hours_by_table_id: dict[int, float] | None = None,
     ) -> list[GanttTaskDTO]:
         """
         Алгоритм:
@@ -124,6 +126,8 @@ class GanttBuilder:
         5. Зависимости оператор проставляет вручную
         """
         tasks: list[GanttTaskDTO] = []
+        effective_hours_per_day = float(hours_per_day or self.HOURS_PER_DAY)
+        effective_fer_hours_by_table_id = fer_hours_by_table_id or {}
         ordered_estimates = sorted(
             estimates,
             key=lambda est: (
@@ -158,7 +162,7 @@ class GanttBuilder:
                     working_days=1,
                     workers_count=None,
                     labor_hours=None,
-                    hours_per_day=self.HOURS_PER_DAY,
+                    hours_per_day=effective_hours_per_day,
                     is_group=True,
                     type="project",
                     color=color,
@@ -167,8 +171,8 @@ class GanttBuilder:
                 tasks.append(group_task)
                 group_stack.append((segment, group_task))
 
-            labor_hours = self._calc_labor_hours(est, workers)
-            dur = calculate_working_days(labor_hours, workers, self.HOURS_PER_DAY) or 1
+            labor_hours = self._calc_labor_hours(est, workers, effective_hours_per_day, effective_fer_hours_by_table_id)
+            dur = calculate_working_days(labor_hours, workers, effective_hours_per_day) or 1
             row_order += 10.0
 
             for _, group_task in group_stack:
@@ -184,7 +188,7 @@ class GanttBuilder:
                 working_days=dur,
                 workers_count=workers,
                 labor_hours=labor_hours,
-                hours_per_day=self.HOURS_PER_DAY,
+                hours_per_day=effective_hours_per_day,
                 is_group=False,
                 type="task",
                 color=color,
@@ -199,8 +203,22 @@ class GanttBuilder:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _calc_labor_hours(self, estimate, workers: int) -> float:
+    def _calc_labor_hours(
+        self,
+        estimate,
+        workers: int,
+        hours_per_day: float,
+        fer_hours_by_table_id: dict[int, float],
+    ) -> float:
         """Рассчитывает плановую трудоёмкость задачи в человеко-часах."""
+        fer_table_id = getattr(estimate, "fer_table_id", None)
+        quantity = getattr(estimate, "quantity", None)
+        if fer_table_id is not None and quantity is not None:
+            fer_hours = fer_hours_by_table_id.get(int(fer_table_id))
+            if fer_hours is not None:
+                multiplier = float(getattr(estimate, "fer_multiplier", 1) or 1)
+                return round(float(quantity) * fer_hours * multiplier, 2)
+
         # Из трудоёмкости ЕНиР если есть
         if estimate.labor_hours and estimate.quantity:
             return round(float(estimate.labor_hours) * float(estimate.quantity), 2)
@@ -215,9 +233,9 @@ class GanttBuilder:
         # Fallback по стоимости (~50 000 ₽/день бригады)
         if estimate.total_price:
             days = float(estimate.total_price) / 50_000
-            return calculate_labor_hours(max(1, min(30, round(days))), workers, self.HOURS_PER_DAY)
+            return calculate_labor_hours(max(1, min(30, round(days))), workers, hours_per_day)
 
-        return calculate_labor_hours(3, workers, self.HOURS_PER_DAY)
+        return calculate_labor_hours(3, workers, hours_per_day)
 
     def _estimate_group_path(self, estimate) -> list[str]:
         raw_data = getattr(estimate, "raw_data", None)

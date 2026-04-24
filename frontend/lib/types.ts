@@ -46,6 +46,7 @@ export interface EstimateBatch {
   estimate_kind: number;
   start_date?: string | null;
   workers_count?: number | null;
+  hours_per_day?: number | null;
   source_filename?: string | null;
   estimates_count: number;
   gantt_tasks_count: number;
@@ -167,10 +168,27 @@ export interface ScheduleBaselineJournalEntry {
   report_date: string;
 }
 
+export interface ForemanTaskReportEntry {
+  entry_type: "foreman_report";
+  id: string;
+  report_date: string;
+  event_date: string;
+  status: "pending" | "done_as_planned" | "done_not_as_planned" | "not_done";
+  status_label: string;
+  note: string | null;
+  task_id: string;
+  task_name: string | null;
+  foreman_id: string;
+  foreman_name: string | null;
+  email_sent_at: string | null;
+  responded_at: string | null;
+}
+
 export type JournalEntry =
   | WorkJournalEntry
   | MaterialDelayJournalEntry
-  | ScheduleBaselineJournalEntry;
+  | ScheduleBaselineJournalEntry
+  | ForemanTaskReportEntry;
 
 export interface BaselineStatus {
   can_accept: boolean;

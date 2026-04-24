@@ -57,6 +57,13 @@ type FerHoursInfo = {
   loading?: boolean;
 };
 
+const DEFAULT_HOURS_PER_DAY = 8;
+const BATCH_SETTINGS_AUTOSAVE_MS = 700;
+const ESTIMATE_COLUMN_WIDTHS: Record<string, number> = {
+  "Кол-во": 72,
+  "Цена за ед., ₽": 96,
+};
+
 const tableHeaders = [
   "Наименование работ",
   "Ед.",
@@ -1411,9 +1418,11 @@ export default function EstimatePage() {
   const [groupManualLoading, setGroupManualLoading] = useState(false);
   const [groupManualError, setGroupManualError] = useState<string | null>(null);
   const [workersDraft, setWorkersDraft] = useState("1");
-  const [hoursPerDay, setHoursPerDay] = useState(8);
+  const [hoursPerDay, setHoursPerDay] = useState(DEFAULT_HOURS_PER_DAY);
   const [savingWorkers, setSavingWorkers] = useState(false);
   const [buildingGanttBatchId, setBuildingGanttBatchId] = useState<string | null>(null);
+  const batchSettingsDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const batchSettingsRequestSeq = useRef(0);
   const multiplierRequestSeq = useRef<Record<string, number>>({});
 
   const { job: matchJob, loading: matching } = useJobPoller(matchJobId);
@@ -1527,7 +1536,48 @@ export default function EstimatePage() {
 
   useEffect(() => {
     setWorkersDraft(String(activeBatch?.workers_count ?? 1));
-  }, [activeBatch?.id, activeBatch?.workers_count]);
+    setHoursPerDay(activeBatch?.hours_per_day ?? DEFAULT_HOURS_PER_DAY);
+  }, [activeBatch?.hours_per_day, activeBatch?.id, activeBatch?.workers_count]);
+
+  const saveBatchSchedule = useCallback(
+    async (batchId: string, nextWorkers: number, nextHoursPerDay: number) => {
+      const requestSeq = batchSettingsRequestSeq.current + 1;
+      batchSettingsRequestSeq.current = requestSeq;
+
+      try {
+        setSavingWorkers(true);
+        const result = await estimates.updateBatchSchedule(id, batchId, {
+          workers_count: nextWorkers,
+          hours_per_day: nextHoursPerDay,
+        });
+        if (batchSettingsRequestSeq.current !== requestSeq) {
+          return;
+        }
+        setBatches((current) =>
+          current.map((batch) =>
+            batch.id === batchId
+              ? {
+                  ...batch,
+                  workers_count: result.workers_count,
+                  hours_per_day: result.hours_per_day,
+                }
+              : batch,
+          ),
+        );
+        setWorkersDraft(String(result.workers_count));
+        setHoursPerDay(result.hours_per_day);
+      } catch (error: any) {
+        if (batchSettingsRequestSeq.current === requestSeq) {
+          alert(error.message);
+        }
+      } finally {
+        if (batchSettingsRequestSeq.current === requestSeq) {
+          setSavingWorkers(false);
+        }
+      }
+    },
+    [id],
+  );
 
   const handleMatchFer = async (batchId: string) => {
     try {
@@ -1570,27 +1620,45 @@ export default function EstimatePage() {
       alert("Введите целое число рабочих от 1 до 500.");
       return;
     }
-
-    try {
-      setSavingWorkers(true);
-      const result = await estimates.updateBatchWorkers(id, activeBatch.id, nextWorkers);
-      setBatches((current) =>
-        current.map((batch) =>
-          batch.id === activeBatch.id
-            ? {
-                ...batch,
-                workers_count: result.workers_count,
-              }
-            : batch,
-        ),
-      );
-      setWorkersDraft(String(result.workers_count));
-    } catch (error: any) {
-      alert(error.message);
-    } finally {
-      setSavingWorkers(false);
+    if (!Number.isFinite(hoursPerDay) || hoursPerDay <= 0 || hoursPerDay > 24) {
+      alert("Введите количество часов в дне от 1 до 24.");
+      return;
     }
+
+    await saveBatchSchedule(activeBatch.id, nextWorkers, hoursPerDay);
   };
+
+  useEffect(() => {
+    if (!activeBatch) {
+      return;
+    }
+
+    const nextWorkers = Number(workersDraft);
+    const nextHoursPerDay = Number(hoursPerDay);
+
+    if (!Number.isInteger(nextWorkers) || nextWorkers < 1 || nextWorkers > 500) {
+      return;
+    }
+    if (!Number.isFinite(nextHoursPerDay) || nextHoursPerDay <= 0 || nextHoursPerDay > 24) {
+      return;
+    }
+    if (nextWorkers === (activeBatch.workers_count ?? 1) && nextHoursPerDay === (activeBatch.hours_per_day ?? DEFAULT_HOURS_PER_DAY)) {
+      return;
+    }
+
+    if (batchSettingsDebounce.current) {
+      clearTimeout(batchSettingsDebounce.current);
+    }
+    batchSettingsDebounce.current = setTimeout(() => {
+      saveBatchSchedule(activeBatch.id, nextWorkers, nextHoursPerDay).catch(() => undefined);
+    }, BATCH_SETTINGS_AUTOSAVE_MS);
+
+    return () => {
+      if (batchSettingsDebounce.current) {
+        clearTimeout(batchSettingsDebounce.current);
+      }
+    };
+  }, [activeBatch, hoursPerDay, saveBatchSchedule, workersDraft]);
 
   const handleOpenActs = (event: ReactMouseEvent<HTMLButtonElement>, row: EstimateRow) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1857,9 +1925,13 @@ export default function EstimatePage() {
   const groupCandidatesRow = groupCandidatesModal ? sections[groupCandidatesModal.sectionKey]?.[0] ?? null : null;
   const groupManualRow = groupManualModal ? sections[groupManualModal.sectionKey]?.[0] ?? null : null;
   const activeBatchWorkers = activeBatch?.workers_count ?? 1;
+  const activeBatchHoursPerDay = activeBatch?.hours_per_day ?? DEFAULT_HOURS_PER_DAY;
   const workersDraftNumber = Number(workersDraft);
   const workersChanged = Number.isInteger(workersDraftNumber) && workersDraftNumber !== activeBatchWorkers;
+  const hoursChanged = Number.isFinite(hoursPerDay) && hoursPerDay !== activeBatchHoursPerDay;
+  const batchSettingsChanged = workersChanged || hoursChanged;
   const calculationWorkers = Number.isInteger(workersDraftNumber) && workersDraftNumber > 0 ? workersDraftNumber : activeBatchWorkers;
+  const calculationHoursPerDay = Number.isFinite(hoursPerDay) && hoursPerDay > 0 ? hoursPerDay : activeBatchHoursPerDay;
 
   return (
     <div style={{ padding: 16, height: "100%", overflow: "auto" }}>
@@ -1919,10 +1991,10 @@ export default function EstimatePage() {
               }}
             >
               {buildingGanttBatchId === activeBatch.id
-                ? "Строим Гант..."
+                ? "Формируем Гант..."
                 : activeBatch.gantt_tasks_count > 0
-                  ? "Перестроить Гант"
-                  : "Построить Гант"}
+                  ? "Сформировать Гант заново"
+                  : "Сформировать Гант"}
             </button>
           </div>
         )}
@@ -1947,7 +2019,7 @@ export default function EstimatePage() {
               value={workersDraft}
               onChange={(event) => setWorkersDraft(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && workersChanged && !savingWorkers) {
+                if (event.key === "Enter" && batchSettingsChanged && !savingWorkers) {
                   handleSaveWorkers();
                 }
               }}
@@ -1964,21 +2036,21 @@ export default function EstimatePage() {
           </label>
           <button
             type="button"
-            disabled={savingWorkers || !workersChanged}
+            disabled={savingWorkers || !batchSettingsChanged}
             onClick={handleSaveWorkers}
             style={{
               padding: "6px 10px",
               borderRadius: 7,
               border: "1px solid rgba(59,130,246,.18)",
-              background: workersChanged ? "rgba(59,130,246,.08)" : "var(--surface)",
-              color: workersChanged ? "var(--blue-dark)" : "var(--muted)",
-              cursor: savingWorkers || !workersChanged ? "default" : "pointer",
+              background: batchSettingsChanged ? "rgba(59,130,246,.08)" : "var(--surface)",
+              color: batchSettingsChanged ? "var(--blue-dark)" : "var(--muted)",
+              cursor: savingWorkers || !batchSettingsChanged ? "default" : "pointer",
               opacity: savingWorkers ? 0.7 : 1,
               fontSize: 12,
               fontWeight: 600,
             }}
           >
-            {savingWorkers ? "Сохраняем..." : "Сохранить"}
+            {savingWorkers ? "Сохраняем..." : batchSettingsChanged ? "Сохранить сейчас" : "Сохранено"}
           </button>
           <label style={{ display: "inline-flex", alignItems: "center", gap: 8, color: "var(--text)", fontWeight: 600 }}>
             Часов/день:
@@ -2001,6 +2073,9 @@ export default function EstimatePage() {
               ))}
             </select>
           </label>
+          <div style={{ fontSize: 11, color: savingWorkers ? "var(--blue-dark)" : batchSettingsChanged ? "var(--muted)" : "#166534" }}>
+            {savingWorkers ? "Автосохранение..." : batchSettingsChanged ? "Изменения будут сохранены автоматически." : "Изменения сохранены."}
+          </div>
         </div>
       )}
 
@@ -2052,7 +2127,8 @@ export default function EstimatePage() {
                   style={{
                     padding: "9px 12px",
                     textAlign: ["Наименование работ", "Материалы", "Тип работ ФЕР", "ИИ"].includes(header) ? "left" : "right",
-                    width: header === "Наименование работ" ? "1%" : undefined,
+                    width: header === "Наименование работ" ? "1%" : ESTIMATE_COLUMN_WIDTHS[header],
+                    minWidth: ESTIMATE_COLUMN_WIDTHS[header],
                     fontSize: 10,
                     color: "#94a3b8",
                     textTransform: "uppercase",
@@ -2139,8 +2215,30 @@ export default function EstimatePage() {
                 <tr key={row.id} style={{ background: index % 2 ? "var(--stripe)" : "" }}>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", width: "1%", whiteSpace: "nowrap" }}>{row.work_name}</td>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtQuantity(row.quantity)}</td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtMoney(row.unit_price ?? 0)}</td>
+                  <td
+                    style={{
+                      padding: "8px 12px",
+                      borderBottom: "1px solid var(--border)",
+                      textAlign: "right",
+                      fontFamily: "var(--mono)",
+                      width: ESTIMATE_COLUMN_WIDTHS["Кол-во"],
+                      minWidth: ESTIMATE_COLUMN_WIDTHS["Кол-во"],
+                    }}
+                  >
+                    {fmtQuantity(row.quantity)}
+                  </td>
+                  <td
+                    style={{
+                      padding: "8px 12px",
+                      borderBottom: "1px solid var(--border)",
+                      textAlign: "right",
+                      fontFamily: "var(--mono)",
+                      width: ESTIMATE_COLUMN_WIDTHS["Цена за ед., ₽"],
+                      minWidth: ESTIMATE_COLUMN_WIDTHS["Цена за ед., ₽"],
+                    }}
+                  >
+                    {fmtMoney(row.unit_price ?? 0)}
+                  </td>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 500 }}>{fmtMoney(row.total_price ?? 0)}</td>
                   <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", verticalAlign: "top" }}>
                     {row.materials?.length ? (
@@ -2164,7 +2262,12 @@ export default function EstimatePage() {
                   <FerHoursCell tableId={row.fer_table_id} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
                   <FerMultiplierCell row={row} onChange={handleFerMultiplierChange} />
                   <CalculatedNormHoursCell row={row} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
-                  <PersonDaysCell row={row} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} hoursPerDay={hoursPerDay} workersCount={calculationWorkers} />
+                  <PersonDaysCell
+                    row={row}
+                    hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined}
+                    hoursPerDay={calculationHoursPerDay}
+                    workersCount={calculationWorkers}
+                  />
                   <AIVectorCell row={row} running={runningAiRowId === row.id} onRun={handleAIVectorMatch} />
                 </tr>
               )),

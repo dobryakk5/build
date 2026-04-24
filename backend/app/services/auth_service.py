@@ -32,7 +32,7 @@ def generate_token() -> str:
 def is_effectively_email_verified(user: User) -> bool:
     if user.email_verified_at is not None:
         return True
-    return user.email.lower() in {"test@example.com", "test@test.local"}
+    return user.email.lower() == "test@mail.ru"
 
 
 def get_request_ip(request: Request) -> str | None:

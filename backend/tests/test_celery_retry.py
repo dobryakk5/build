@@ -26,11 +26,19 @@ def test_celery_app_has_result_expires():
 
 
 def test_all_tasks_have_retry_config():
+    from app.tasks.foreman_email_tasks import send_foreman_daily_emails
     from app.tasks.report_tasks import remind_foremen, morning_summary, escalate_overdue
 
-    for task in (remind_foremen, morning_summary, escalate_overdue):
+    for task in (remind_foremen, morning_summary, escalate_overdue, send_foreman_daily_emails):
         assert task.max_retries is not None and task.max_retries > 0
         assert task.default_retry_delay is not None and task.default_retry_delay > 0
+
+
+def test_celery_app_includes_foreman_email_schedule():
+    from app.tasks.celery_app import celery_app
+
+    assert "app.tasks.foreman_email_tasks" in celery_app.conf.include
+    assert "foreman-daily-emails" in celery_app.conf.beat_schedule
 
 
 def test_remind_foremen_retries_on_error(caplog):

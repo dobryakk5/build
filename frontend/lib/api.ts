@@ -176,6 +176,11 @@ export const estimates = {
   summary: (pid: string, estimateBatchId?: string | null) =>
     request<EstimateSummary>(`/projects/${pid}/estimates/summary${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
   batches: (pid: string) => request<EstimateBatch[]>(`/projects/${pid}/estimate-batches`),
+  updateBatchSchedule: (pid: string, batchId: string, body: { workers_count?: number; hours_per_day?: number }) =>
+    request<{ id: string; workers_count: number; hours_per_day: number; updated_gantt_tasks_count: number }>(`/projects/${pid}/estimate-batches/${batchId}/schedule`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
   updateBatchWorkers: (pid: string, batchId: string, workersCount: number) =>
     request<{ id: string; workers_count: number; updated_gantt_tasks_count: number }>(`/projects/${pid}/estimate-batches/${batchId}/workers`, {
       method: "PATCH",
@@ -285,6 +290,11 @@ export const reports = {
   create: (pid: string, body: any)    => request<any>(`/projects/${pid}/reports`, { method: "POST", body: JSON.stringify(body) }),
   submit: (pid: string, rid: string)  => request<any>(`/projects/${pid}/reports/${rid}/submit`, { method: "POST" }),
   review: (pid: string, rid: string)  => request<any>(`/projects/${pid}/reports/${rid}/review`, { method: "POST" }),
+};
+
+export const foremanReports = {
+  list: (pid: string, date?: string) =>
+    request<any[]>(`/projects/${pid}/foreman-reports${date ? `?report_date=${date}` : ""}`),
 };
 
 export const notifications = {

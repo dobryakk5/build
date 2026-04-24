@@ -6,7 +6,7 @@ celery_app = Celery(
     "construction",
     broker  = settings.CELERY_BROKER_URL,
     backend = settings.CELERY_RESULT_BACKEND,
-    include = ["app.tasks.report_tasks"],
+    include = ["app.tasks.report_tasks", "app.tasks.foreman_email_tasks"],
 )
 
 celery_app.conf.update(
@@ -35,5 +35,9 @@ celery_app.conf.beat_schedule = {
     "escalate-overdue": {
         "task":     "app.tasks.report_tasks.escalate_overdue",
         "schedule": crontab(minute=0),
+    },
+    "foreman-daily-emails": {
+        "task":     "app.tasks.foreman_email_tasks.send_foreman_daily_emails",
+        "schedule": crontab(hour=18, minute=0),
     },
 }

@@ -4,9 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { useParams } from "next/navigation";
 
-import { reports } from "@/lib/api";
+import { foremanReports, reports } from "@/lib/api";
 import { fmtDate } from "@/lib/dateUtils";
 import type {
+  ForemanTaskReportEntry,
   JournalEntry,
   MaterialDelayJournalEntry,
   ScheduleBaselineJournalEntry,
@@ -221,6 +222,88 @@ function BaselineRow({ entry, striped }: { entry: ScheduleBaselineJournalEntry; 
   );
 }
 
+const FOREMAN_STATUS_CONFIG: Record<string, { label: string; icon: string; color: string; bg: string }> = {
+  done_as_planned: { label: "Выполнил по плану", icon: "✅", color: "#15803d", bg: "rgba(22,163,74,.10)" },
+  done_not_as_planned: { label: "Выполнил не по плану", icon: "⚠️", color: "#92400e", bg: "rgba(217,119,6,.10)" },
+  not_done: { label: "Не выполнил", icon: "❌", color: "#b91c1c", bg: "rgba(220,38,38,.10)" },
+  pending: { label: "Ожидает ответа", icon: "🕐", color: "#6b7280", bg: "rgba(107,114,128,.10)" },
+};
+
+function ForemanReportRow({ entry, striped }: { entry: ForemanTaskReportEntry; striped: boolean }) {
+  const cfg = FOREMAN_STATUS_CONFIG[entry.status] ?? FOREMAN_STATUS_CONFIG.pending;
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: TABLE_COLUMNS,
+        gap: 0,
+        background: striped ? "#f9fafb" : "#ffffff",
+      }}
+    >
+      <div style={{ padding: "14px 16px", minWidth: 0 }}>
+        <div style={{ display: "inline-flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <span
+            style={{
+              fontSize: 10,
+              padding: "2px 7px",
+              borderRadius: 999,
+              background: "rgba(99,102,241,.10)",
+              color: "#4338ca",
+              fontFamily: "var(--mono)",
+            }}
+          >
+            прораб
+          </span>
+          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+            {entry.task_name ?? "—"}
+          </span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              fontSize: 12,
+              fontWeight: 600,
+              padding: "3px 10px",
+              borderRadius: 999,
+              background: cfg.bg,
+              color: cfg.color,
+            }}
+          >
+            <span>{cfg.icon}</span>
+            <span>{cfg.label}</span>
+          </span>
+          {entry.foreman_name && (
+            <span style={{ fontSize: 11, color: "var(--muted)" }}>{entry.foreman_name}</span>
+          )}
+        </div>
+        {entry.note && (
+          <div style={{ marginTop: 5, fontSize: 12, color: "var(--muted)", lineHeight: 1.4 }}>
+            {entry.note}
+          </div>
+        )}
+      </div>
+      <div style={{ padding: "14px 16px" }} />
+      <div
+        style={{
+          padding: "14px 16px",
+          fontSize: 12,
+          color: "var(--text)",
+          fontFamily: "var(--mono)",
+          fontWeight: 600,
+          display: "flex",
+          alignItems: "center",
+        }}
+      >
+        {formatReportDate(entry.report_date)}
+      </div>
+    </div>
+  );
+}
+
 export default function JournalPage() {
   const { id } = useParams<{ id: string }>();
   const [entries, setEntries] = useState<JournalEntry[]>([]);
@@ -232,10 +315,30 @@ export default function JournalPage() {
   useEffect(() => {
     let cancelled = false;
 
-    reports.journal(id)
-      .then((data) => {
+    Promise.all([
+      reports.journal(id),
+      foremanReports.list(id).catch(() => [] as any[]),
+    ])
+      .then(([journalData, foremanData]) => {
         if (cancelled) return;
-        setEntries(data);
+
+        const foremanEntries: ForemanTaskReportEntry[] = (foremanData as any[]).map((report) => ({
+          entry_type: "foreman_report",
+          id: report.id,
+          report_date: report.report_date,
+          event_date: report.responded_at ?? report.email_sent_at ?? `${report.report_date}T00:00:00`,
+          status: report.status,
+          status_label: report.status_label,
+          note: report.note ?? null,
+          task_id: report.task_id,
+          task_name: report.task_name ?? null,
+          foreman_id: report.foreman_id,
+          foreman_name: report.foreman_name ?? null,
+          email_sent_at: report.email_sent_at ?? null,
+          responded_at: report.responded_at ?? null,
+        }));
+
+        setEntries([...journalData, ...foremanEntries]);
       })
       .catch((err: Error) => {
         if (cancelled) return;
@@ -365,6 +468,7 @@ export default function JournalPage() {
                 {entry.entry_type === "work" && <WorkRow entry={entry} striped={index % 2 === 1} />}
                 {entry.entry_type === "material_delay" && <DelayRow entry={entry} striped={index % 2 === 1} />}
                 {entry.entry_type === "schedule_baseline" && <BaselineRow entry={entry} striped={index % 2 === 1} />}
+                {entry.entry_type === "foreman_report" && <ForemanReportRow entry={entry} striped={index % 2 === 1} />}
               </div>
             ))
           )}

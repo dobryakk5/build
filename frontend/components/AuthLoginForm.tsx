@@ -60,18 +60,6 @@ export default function AuthLoginForm({
     router.push("/projects");
   }
 
-  async function handleTestLogin() {
-    setError("");
-    setLoading(true);
-    try {
-      await completeLogin("test@example.com", "test123");
-    } catch (err: unknown) {
-      setError("Тест: " + (err instanceof Error ? err.message : "неизвестная ошибка"));
-    } finally {
-      setLoading(false);
-    }
-  }
-
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError("");
@@ -162,25 +150,6 @@ export default function AuthLoginForm({
           }}
         >
           {loading ? "Входим..." : "Войти"}
-        </button>
-
-        <button
-          type="button"
-          onClick={handleTestLogin}
-          disabled={loading}
-          style={{
-            padding: "12px",
-            background: "transparent",
-            color: "var(--muted)",
-            border: "1px dashed var(--border2)",
-            borderRadius: 10,
-            fontSize: 13,
-            fontWeight: 500,
-            cursor: "pointer",
-            opacity: loading ? 0.6 : 1,
-          }}
-        >
-          Тестовый вход
         </button>
 
         <button

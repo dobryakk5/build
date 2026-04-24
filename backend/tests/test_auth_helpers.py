@@ -81,7 +81,7 @@ def test_hash_token_is_deterministic_and_opaque() -> None:
 
 
 def test_effective_email_verification_allows_seed_test_account() -> None:
-    test_user = SimpleNamespace(email="test@example.com", email_verified_at=None)
+    test_user = SimpleNamespace(email="test@mail.ru", email_verified_at=None)
     regular_user = SimpleNamespace(email="user@example.com", email_verified_at=None)
 
     assert is_effectively_email_verified(test_user) is True

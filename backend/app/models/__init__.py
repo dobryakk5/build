@@ -9,6 +9,7 @@ from .fer_words    import FerWordsEntry
 from .material_delay import MaterialDelayEvent
 from .schedule_baseline import ScheduleBaseline, ScheduleBaselineTask
 from .gantt        import GanttTask, TaskDependency
+from .foreman_task_report import ForemanTaskReport
 from .other        import (
     Comment,
     TaskHistory,
@@ -54,6 +55,7 @@ __all__ = [
     "MaterialDelayEvent",
     "ScheduleBaseline", "ScheduleBaselineTask",
     "GanttTask", "TaskDependency",
+    "ForemanTaskReport",
     "Comment", "TaskHistory", "Job",
     "DailyReport", "DailyReportItem",
     "Material", "Escalation", "Notification",

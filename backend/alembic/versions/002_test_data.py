@@ -3,8 +3,8 @@
 Тестовые данные — организация, пользователь-PM и два демо-проекта
 с полноценной иерархией задач (3 уровня вложенности).
 
-Логин: test@test.local
-Пароль: test123
+Логин: test@mail.ru
+Пароль: test
 """
 
 from alembic import op
@@ -196,7 +196,7 @@ TODAY = date.today()
 def upgrade():
     conn = op.get_bind()
 
-    password_hash = hash_password('test123')
+    password_hash = hash_password('test')
 
     # ─── Организация ─────────────────────────────────────────────────────────
     conn.execute(text("""
@@ -208,7 +208,7 @@ def upgrade():
     # ─── Пользователь ────────────────────────────────────────────────────────
     conn.execute(text("""
         INSERT INTO users (id, organization_id, email, name, password_hash, is_active)
-        VALUES (:id, :org, 'test@example.com', 'Тестов Иван Петрович', :pwd, true)
+        VALUES (:id, :org, 'test@mail.ru', 'Тестов Иван Петрович', :pwd, true)
         ON CONFLICT (id) DO NOTHING
     """), {'id': USER_ID, 'org': ORG_ID, 'pwd': password_hash})
 
@@ -661,8 +661,8 @@ def upgrade():
         """), {'d': hdate, 'n': hname})
 
     print("\n✅ Тестовые данные созданы:")
-    print("   Логин:  test@test.local")
-    print("   Пароль: test123")
+    print("   Логин:  test@mail.ru")
+    print("   Пароль: test")
     print(f"   Задач ЖК «Сосновый бор»: {len(gantt_p1)} (3 уровня вложенности)")
     print(f"   Задач ТЦ «Меркурий»:     {len(gantt_p2)} (2 уровня вложенности)\n")
 

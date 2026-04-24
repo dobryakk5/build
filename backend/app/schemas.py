@@ -213,6 +213,7 @@ class EstimateBatchResponse(BaseModel):
     estimate_kind: int
     start_date: date | None = None
     workers_count: int | None = None
+    hours_per_day: float = 8
     source_filename: str | None = None
     estimates_count: int = 0
     gantt_tasks_count: int = 0

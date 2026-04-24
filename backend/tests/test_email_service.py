@@ -123,3 +123,37 @@ async def test_send_email_logs_success_for_resend(
     assert record.provider == "resend"
     assert record.to == "user@example.com"
     assert record.subject == "Verify"
+
+
+@pytest.mark.asyncio
+async def test_send_foreman_task_email_builds_callback_links(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "APP_BASE_URL", "https://example.com/app")
+
+    captured: dict[str, str] = {}
+
+    async def fake_send_email(*, to_email: str, subject: str, html: str) -> str:
+        captured["to_email"] = to_email
+        captured["subject"] = subject
+        captured["html"] = html
+        return "log"
+
+    monkeypatch.setattr(email_service, "_send_email", fake_send_email)
+
+    provider = await email_service.send_foreman_task_email(
+        to_email="foreman@example.com",
+        foreman_name="Иван",
+        project_name="ЖК Север",
+        task_name="Монтаж перекрытий",
+        report_date="2026-04-24",
+        report_id="report-123",
+        token="token-xyz",
+    )
+
+    assert provider == "log"
+    assert captured["to_email"] == "foreman@example.com"
+    assert "[ЖК Север] Отчет прораба за 2026-04-24: Монтаж перекрытий" == captured["subject"]
+    assert "/api/foreman-reports/report-123/respond?token=token-xyz&status=done_as_planned" in captured["html"]
+    assert "/api/foreman-reports/report-123/respond?token=token-xyz&status=done_not_as_planned" in captured["html"]
+    assert "/api/foreman-reports/report-123/respond?token=token-xyz&status=not_done" in captured["html"]

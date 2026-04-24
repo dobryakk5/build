@@ -233,6 +233,7 @@ async def list_estimate_batches(
                 estimate_kind=batch.estimate_kind,
                 start_date=batch.start_date,
                 workers_count=batch.workers_count,
+                hours_per_day=float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY),
                 source_filename=batch.source_filename,
                 estimates_count=estimates_count or 0,
                 gantt_tasks_count=gantt_tasks_count or 0,
@@ -249,26 +250,39 @@ class EstimateBatchWorkersUpdate(BaseModel):
     workers_count: int
 
 
+class EstimateBatchScheduleUpdate(BaseModel):
+    workers_count: int | None = None
+    hours_per_day: float | None = None
+
+
 class EstimateBatchGanttBuildRequest(BaseModel):
     start_date: date | None = None
 
 
-@router.patch("/estimate-batches/{estimate_batch_id}/workers")
-async def update_estimate_batch_workers(
-    project_id: UUID,
-    estimate_batch_id: UUID,
-    body: EstimateBatchWorkersUpdate,
-    member: ProjectMember = Depends(require_action(Action.EDIT)),
-    db: AsyncSession = Depends(get_db),
-):
-    if body.workers_count < 1 or body.workers_count > 500:
+async def _update_estimate_batch_schedule(
+    project_id: str,
+    estimate_batch_id: str,
+    workers_count: int | None,
+    hours_per_day: float | None,
+    db: AsyncSession,
+) -> dict:
+    if workers_count is None and hours_per_day is None:
+        raise HTTPException(422, "At least one of workers_count or hours_per_day is required")
+    if workers_count is not None and (workers_count < 1 or workers_count > 500):
         raise HTTPException(422, "workers_count must be between 1 and 500")
+    if hours_per_day is not None and (hours_per_day <= 0 or hours_per_day > 24):
+        raise HTTPException(422, "hours_per_day must be between 0 and 24")
 
     batch = await db.get(EstimateBatch, str(estimate_batch_id))
     if not batch or batch.project_id != str(project_id) or batch.deleted_at:
         raise HTTPException(404, "Блок сметы не найден")
 
-    batch.workers_count = body.workers_count
+    current_hours_per_day = getattr(batch, "hours_per_day", None)
+    next_workers_count = workers_count if workers_count is not None else int(batch.workers_count or 1)
+    next_hours_per_day = float(hours_per_day if hours_per_day is not None else current_hours_per_day or DEFAULT_HOURS_PER_DAY)
+
+    batch.workers_count = next_workers_count
+    batch.hours_per_day = next_hours_per_day
     gantt_tasks = list(
         await db.scalars(
             select(GanttTask)
@@ -279,22 +293,63 @@ async def update_estimate_batch_workers(
         )
     )
     for task in gantt_tasks:
-        task.workers_count = body.workers_count
+        task.workers_count = next_workers_count
+        task.hours_per_day = next_hours_per_day
         if task.labor_hours is not None:
             task.working_days = calculate_working_days(
                 task.labor_hours,
-                body.workers_count,
-                float(task.hours_per_day or DEFAULT_HOURS_PER_DAY),
+                next_workers_count,
+                next_hours_per_day,
             ) or 1
 
     await db.flush()
-    await resolve_project_dates(str(project_id), db)
+    await resolve_project_dates(project_id, db)
     await db.commit()
     return {
         "id": batch.id,
         "workers_count": batch.workers_count,
+        "hours_per_day": float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY),
         "updated_gantt_tasks_count": len(gantt_tasks),
     }
+
+
+@router.patch("/estimate-batches/{estimate_batch_id}/workers")
+async def update_estimate_batch_workers(
+    project_id: UUID,
+    estimate_batch_id: UUID,
+    body: EstimateBatchWorkersUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await _update_estimate_batch_schedule(
+        project_id=str(project_id),
+        estimate_batch_id=str(estimate_batch_id),
+        workers_count=body.workers_count,
+        hours_per_day=None,
+        db=db,
+    )
+    return {
+        "id": result["id"],
+        "workers_count": result["workers_count"],
+        "updated_gantt_tasks_count": result["updated_gantt_tasks_count"],
+    }
+
+
+@router.patch("/estimate-batches/{estimate_batch_id}/schedule")
+async def update_estimate_batch_schedule(
+    project_id: UUID,
+    estimate_batch_id: UUID,
+    body: EstimateBatchScheduleUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _update_estimate_batch_schedule(
+        project_id=str(project_id),
+        estimate_batch_id=str(estimate_batch_id),
+        workers_count=body.workers_count,
+        hours_per_day=body.hours_per_day,
+        db=db,
+    )
 
 
 @router.post("/estimate-batches/{estimate_batch_id}/build-gantt")

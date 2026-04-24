@@ -32,7 +32,7 @@ from datetime import date, datetime
 from uuid import uuid4
 
 from fastapi import UploadFile, HTTPException
-from sqlalchemy import select, delete, func, or_
+from sqlalchemy import bindparam, select, delete, func, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.date_utils             import working_days_between, task_end_date
@@ -44,6 +44,7 @@ from app.services.excel_parser       import (
     is_subtotal_row,
 )
 from app.services.gantt_builder      import GanttBuilder, GanttTaskDTO
+from app.services.gantt_calculations import DEFAULT_HOURS_PER_DAY
 
 
 _parser = ExcelEstimateParser()
@@ -257,6 +258,7 @@ async def _process_upload(job_id: str) -> None:
                 estimate_kind=estimate_kind,
                 start_date=start_date,
                 workers_count=workers,
+                hours_per_day=DEFAULT_HOURS_PER_DAY,
                 source_filename=job.input.get("filename"),
             )
             db.add(batch)
@@ -351,6 +353,7 @@ async def build_gantt_for_estimate_batch(
 
     effective_start_date = start_date or batch.start_date or date.today()
     workers = int(batch.workers_count or 1)
+    hours_per_day = float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY)
 
     estimates = list(
         await db.scalars(
@@ -394,6 +397,8 @@ async def build_gantt_for_estimate_batch(
         estimates=estimates,
         start_date=effective_start_date,
         workers=workers,
+        hours_per_day=hours_per_day,
+        fer_hours_by_table_id=await _load_fer_human_hours_by_table_ids(estimates, db),
     )
     task_dtos = _wrap_batch_tasks(
         batch_id=batch.id,
@@ -432,6 +437,31 @@ async def build_gantt_for_estimate_batch(
         "id": batch.id,
         "start_date": str(effective_start_date),
         "gantt_tasks_count": len(task_dtos),
+    }
+
+
+async def _load_fer_human_hours_by_table_ids(
+    estimates: list[Estimate],
+    db: AsyncSession,
+) -> dict[int, float]:
+    table_ids = sorted({int(estimate.fer_table_id) for estimate in estimates if getattr(estimate, "fer_table_id", None) is not None})
+    if not table_ids:
+        return {}
+
+    stmt = text(
+        """
+        SELECT
+            table_id,
+            COALESCE(SUM(h_hour), 0)::double precision AS human_hours
+        FROM fer.fer_rows
+        WHERE table_id IN :table_ids
+        GROUP BY table_id
+        """
+    ).bindparams(bindparam("table_ids", expanding=True))
+    result = await db.execute(stmt, {"table_ids": table_ids})
+    return {
+        int(row["table_id"]): float(row["human_hours"])
+        for row in result.mappings().all()
     }
 
 

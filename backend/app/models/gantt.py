@@ -20,7 +20,6 @@ class GanttTask(Base, TimestampMixin, SoftDeleteMixin):
 
     name:         Mapped[str]       = mapped_column(Text, nullable=False)
     start_date:   Mapped[date]      = mapped_column(Date, nullable=False)
-    # Fix 10: working_days — РАБОЧИЕ дни (пн–пт, без праздников)
     working_days: Mapped[int]       = mapped_column(Integer, nullable=False)
     workers_count: Mapped[int|None] = mapped_column(SmallInteger)
     labor_hours: Mapped[float|None] = mapped_column(Numeric(10, 2))

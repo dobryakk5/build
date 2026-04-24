@@ -22,6 +22,8 @@ def _estimate(
         quantity=1,
         total_price=1000,
         labor_hours=None,
+        fer_table_id=None,
+        fer_multiplier=1,
     )
 
 
@@ -110,3 +112,34 @@ def test_build_uses_group_path_for_nested_gantt_groups():
     assert [task.name for task in group_tasks] == ["6. Потолки", "Штукатурные работы (потолок)"]
     assert group_tasks[1].parent_id == group_tasks[0].id
     assert all(task.parent_id == group_tasks[1].id for task in leaf_tasks)
+
+
+def test_build_uses_fer_person_days_for_gantt_duration():
+    builder = GanttBuilder()
+    estimates = [
+        SimpleNamespace(
+            id="est-1",
+            row_order=0,
+            section="Фундамент",
+            work_name="Бетонирование",
+            quantity=20,
+            total_price=1000,
+            labor_hours=None,
+            fer_table_id=101,
+            fer_multiplier=1.5,
+        ),
+    ]
+
+    tasks = builder.build(
+        project_id="project-1",
+        estimates=estimates,
+        start_date=date(2026, 4, 15),
+        workers=3,
+        hours_per_day=8,
+        fer_hours_by_table_id={101: 0.4},
+    )
+
+    leaf_task = next(task for task in tasks if not task.is_group)
+
+    assert leaf_task.labor_hours == 12.0
+    assert leaf_task.working_days == 1
