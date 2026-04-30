@@ -57,6 +57,31 @@ type FerHoursInfo = {
   loading?: boolean;
 };
 
+type EstimateTab = "works" | "materials" | "mechanisms";
+
+type MaterialTableRow = EstimateMaterial & {
+  key: string;
+  section: string;
+};
+
+type MaterialGroupRow = {
+  key: string;
+  section: string;
+  name: string;
+  unit: string | null;
+  quantity: number | null;
+  total_price: number;
+};
+
+type MechanismDraft = {
+  section: string;
+  name: string;
+  unit: string;
+  quantity: string;
+  unit_price: string;
+  total_price: string;
+};
+
 const DEFAULT_HOURS_PER_DAY = 8;
 const BATCH_SETTINGS_AUTOSAVE_MS = 700;
 const ESTIMATE_COLUMN_WIDTHS: Record<string, number> = {
@@ -64,13 +89,12 @@ const ESTIMATE_COLUMN_WIDTHS: Record<string, number> = {
   "Цена за ед., ₽": 96,
 };
 
-const tableHeaders = [
+const WORK_TABLE_HEADERS = [
   "Наименование работ",
   "Ед.",
   "Кол-во",
   "Цена за ед., ₽",
   "Сумма, ₽",
-  "Материалы",
   "Акты",
   "Тип работ ФЕР",
   "Номер ФЕР",
@@ -80,6 +104,21 @@ const tableHeaders = [
   "Человеко-дни",
   "ИИ",
 ];
+
+const ESTIMATE_TABS: Array<{ id: EstimateTab; label: string }> = [
+  { id: "works", label: "Работы" },
+  { id: "materials", label: "Материалы" },
+  { id: "mechanisms", label: "Механизмы" },
+];
+
+const EMPTY_MECHANISM_DRAFT: MechanismDraft = {
+  section: "",
+  name: "",
+  unit: "",
+  quantity: "",
+  unit_price: "",
+  total_price: "",
+};
 
 function fmtQuantity(value?: number | null) {
   return value == null ? "—" : value.toLocaleString("ru-RU");
@@ -94,6 +133,25 @@ function fmtFerHours(value?: number | null) {
       });
 }
 
+function parseOptionalNumber(value: string) {
+  const normalized = value.trim().replace(",", ".");
+  if (!normalized) {
+    return null;
+  }
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function calcLineTotal(values: { quantity?: number | null; unit_price?: number | null; total_price?: number | null }) {
+  if (values.total_price != null) {
+    return values.total_price;
+  }
+  if (values.quantity != null && values.unit_price != null) {
+    return values.quantity * values.unit_price;
+  }
+  return 0;
+}
+
 function sumFerHours(rows: FerTableDetail["rows"]) {
   let total = 0;
   let hasValue = false;
@@ -105,6 +163,27 @@ function sumFerHours(rows: FerTableDetail["rows"]) {
     }
   }
   return hasValue ? total : null;
+}
+
+function extractFerCompositeNumber(tableUrl?: string | null, tableId?: number | null) {
+  if (!tableUrl) {
+    return tableId ? `#${tableId}` : "—";
+  }
+
+  const decoded = decodeURIComponent(tableUrl);
+  const slug = decoded
+    .split(/[/?#]/)
+    .filter(Boolean)
+    .at(-1)
+    ?.trim() ?? "";
+
+  const codeMatch = slug.match(/(?:^|[^0-9])([0-9]{1,2}(?:[-._][0-9]{1,3}){2,}(?:[-._][0-9]{1,3})?)(?:$|[^0-9])/i);
+  if (codeMatch?.[1]) {
+    return codeMatch[1].replace(/[._]/g, "-");
+  }
+
+  const normalizedSlug = slug.replace(/^(fer|gesn|fsnfer|fssfer|fer2020)[-_]?/i, "");
+  return normalizedSlug || (tableId ? `#${tableId}` : "—");
 }
 
 function calcNormHours(row: EstimateRow, ferHours?: FerHoursInfo) {
@@ -657,9 +736,11 @@ function FerCell({
 
 function FerNumberCell({
   tableId,
+  tableNumber,
   onOpen,
 }: {
   tableId?: number | null;
+  tableNumber?: string | null;
   onOpen: (tableId: number) => void;
 }) {
   return (
@@ -680,7 +761,7 @@ function FerNumberCell({
             textDecoration: "underline",
           }}
         >
-          #{tableId}
+          {tableNumber || `#${tableId}`}
         </button>
       ) : (
         <span style={{ color: "var(--muted)" }}>—</span>
@@ -1398,6 +1479,7 @@ export default function EstimatePage() {
 
   const [rows, setRows] = useState<EstimateRow[]>([]);
   const [summary, setSummary] = useState<EstimateSummary | null>(null);
+  const [activeTab, setActiveTab] = useState<EstimateTab>("works");
   const [batches, setBatches] = useState<EstimateBatch[]>([]);
   const [activeBatchId, setActiveBatchId] = useState<string | null>(batchFromUrl);
   const [loading, setLoading] = useState(true);
@@ -1409,6 +1491,7 @@ export default function EstimatePage() {
   const [savingActsId, setSavingActsId] = useState<string | null>(null);
   const [ferModalRow, setFerModalRow] = useState<EstimateRow | null>(null);
   const [ferHoursByTableId, setFerHoursByTableId] = useState<Record<number, FerHoursInfo>>({});
+  const [ferNumberByTableId, setFerNumberByTableId] = useState<Record<number, string>>({});
   const [runningAiRowId, setRunningAiRowId] = useState<string | null>(null);
   const [runningGroupSectionKey, setRunningGroupSectionKey] = useState<string | null>(null);
   const [confirmingGroupSectionKey, setConfirmingGroupSectionKey] = useState<string | null>(null);
@@ -1421,6 +1504,9 @@ export default function EstimatePage() {
   const [hoursPerDay, setHoursPerDay] = useState(DEFAULT_HOURS_PER_DAY);
   const [savingWorkers, setSavingWorkers] = useState(false);
   const [buildingGanttBatchId, setBuildingGanttBatchId] = useState<string | null>(null);
+  const [mechanismDraft, setMechanismDraft] = useState<MechanismDraft>(EMPTY_MECHANISM_DRAFT);
+  const [savingMechanism, setSavingMechanism] = useState(false);
+  const [deletingMechanismId, setDeletingMechanismId] = useState<string | null>(null);
   const batchSettingsDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchSettingsRequestSeq = useRef(0);
   const multiplierRequestSeq = useRef<Record<string, number>>({});
@@ -1509,6 +1595,10 @@ export default function EstimatePage() {
             [tableId]: {
               humanHours: sumFerHours(detail.rows),
             },
+          }));
+          setFerNumberByTableId((current) => ({
+            ...current,
+            [tableId]: extractFerCompositeNumber(detail.table_url, tableId),
           }));
         })
         .catch(() => {
@@ -1865,6 +1955,123 @@ export default function EstimatePage() {
     }
   };
 
+  const workRows = useMemo(
+    () => rows.filter((row) => (row.item_type ?? "work") !== "mechanism"),
+    [rows],
+  );
+  const mechanismRows = useMemo(
+    () => rows.filter((row) => (row.item_type ?? "work") === "mechanism"),
+    [rows],
+  );
+  const materialRows = useMemo<MaterialTableRow[]>(
+    () =>
+      workRows.flatMap((row) =>
+        (row.materials ?? []).map((material, index) => ({
+          ...material,
+          key: `${row.id}-${index}`,
+          section: row.section ?? "Без раздела",
+        })),
+      ),
+    [workRows],
+  );
+  const groupedMaterialRows = useMemo<MaterialGroupRow[]>(
+    () =>
+      Array.from(
+        materialRows.reduce((map, row) => {
+          const section = row.section;
+          const name = (row.name ?? "").trim();
+          const unit = row.unit?.trim() || null;
+          const key = `${section.toLocaleLowerCase("ru-RU")}::${name.toLocaleLowerCase("ru-RU")}::${unit ?? ""}`;
+          const current = map.get(key) ?? {
+            key,
+            section,
+            name,
+            unit,
+            quantity: null as number | null,
+            total_price: 0,
+          };
+
+          if (row.quantity != null) {
+            current.quantity = (current.quantity ?? 0) + row.quantity;
+          }
+          current.total_price += calcLineTotal(row);
+          map.set(key, current);
+          return map;
+        }, new Map<string, MaterialGroupRow>()),
+      )
+        .map(([, row]) => row)
+        .sort((a, b) => a.section.localeCompare(b.section, "ru-RU") || a.name.localeCompare(b.name, "ru-RU")),
+    [materialRows],
+  );
+
+  const handleMechanismDraftChange = (field: keyof MechanismDraft, value: string) => {
+    setMechanismDraft((current) => ({ ...current, [field]: value }));
+  };
+
+  const handleCreateMechanism = async () => {
+    if (!activeBatch) {
+      return;
+    }
+    const name = mechanismDraft.name.trim();
+    if (!name) {
+      alert("Укажите наименование механизма.");
+      return;
+    }
+
+    const quantity = parseOptionalNumber(mechanismDraft.quantity);
+    const unitPrice = parseOptionalNumber(mechanismDraft.unit_price);
+    const totalPrice = parseOptionalNumber(mechanismDraft.total_price);
+
+    if (mechanismDraft.quantity.trim() && quantity == null) {
+      alert("Количество должно быть числом.");
+      return;
+    }
+    if (mechanismDraft.unit_price.trim() && unitPrice == null) {
+      alert("Цена за единицу должна быть числом.");
+      return;
+    }
+    if (mechanismDraft.total_price.trim() && totalPrice == null) {
+      alert("Сумма должна быть числом.");
+      return;
+    }
+
+    try {
+      setSavingMechanism(true);
+      await estimates.createMechanism(id, {
+        estimate_batch_id: activeBatch.id,
+        section: mechanismDraft.section.trim() || null,
+        name,
+        unit: mechanismDraft.unit.trim() || null,
+        quantity,
+        unit_price: unitPrice,
+        total_price: totalPrice,
+      });
+      setMechanismDraft(EMPTY_MECHANISM_DRAFT);
+      await loadEstimateData(activeBatch.id);
+      loadBatches().catch(() => {});
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setSavingMechanism(false);
+    }
+  };
+
+  const handleDeleteMechanism = async (estimateId: string) => {
+    if (!activeBatch || !window.confirm("Удалить строку механизма?")) {
+      return;
+    }
+    try {
+      setDeletingMechanismId(estimateId);
+      await estimates.deleteMechanism(id, estimateId);
+      await loadEstimateData(activeBatch.id);
+      loadBatches().catch(() => {});
+    } catch (error: any) {
+      alert(error.message);
+    } finally {
+      setDeletingMechanismId(null);
+    }
+  };
+
   if (loading) {
     return <div style={{ padding: 24, color: "var(--muted)" }}>Загрузка сметы...</div>;
   }
@@ -1888,40 +2095,14 @@ export default function EstimatePage() {
     );
   }
 
-  if (!rows.length) {
-    return (
-      <div style={{ padding: 16 }}>
-        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-          {batches.map((batch) => (
-            <button
-              key={batch.id}
-              onClick={() => selectBatch(batch.id)}
-              style={{
-                padding: "8px 12px",
-                borderRadius: 999,
-                border: activeBatchId === batch.id ? "1px solid var(--blue)" : "1px solid var(--border)",
-                background: activeBatchId === batch.id ? "rgba(59,130,246,.08)" : "var(--surface)",
-                cursor: "pointer",
-                fontSize: 12,
-              }}
-            >
-              {batch.name}
-            </button>
-          ))}
-        </div>
-        <div style={{ padding: 48, textAlign: "center", color: estimateError ? "var(--red)" : "var(--muted)" }}>{estimateError ?? "В выбранном блоке нет строк сметы."}</div>
-      </div>
-    );
-  }
-
   const sections: Record<string, EstimateRow[]> = {};
-  for (const row of rows) {
+  for (const row of workRows) {
     const section = row.section ?? "Без раздела";
     (sections[section] ??= []).push(row);
   }
 
   const matchStatus = matchJob?.status;
-  const popupRow = popup ? rows.find((row) => row.id === popup.estimateId) ?? null : null;
+  const popupRow = popup ? workRows.find((row) => row.id === popup.estimateId) ?? null : null;
   const groupCandidatesRow = groupCandidatesModal ? sections[groupCandidatesModal.sectionKey]?.[0] ?? null : null;
   const groupManualRow = groupManualModal ? sections[groupManualModal.sectionKey]?.[0] ?? null : null;
   const activeBatchWorkers = activeBatch?.workers_count ?? 1;
@@ -1932,6 +2113,42 @@ export default function EstimatePage() {
   const batchSettingsChanged = workersChanged || hoursChanged;
   const calculationWorkers = Number.isInteger(workersDraftNumber) && workersDraftNumber > 0 ? workersDraftNumber : activeBatchWorkers;
   const calculationHoursPerDay = Number.isFinite(hoursPerDay) && hoursPerDay > 0 ? hoursPerDay : activeBatchHoursPerDay;
+  const materialsSummary = {
+    total: materialRows.reduce((sum, row) => sum + calcLineTotal(row), 0),
+    sections: Array.from(
+      materialRows.reduce((map, row) => {
+        const next = map.get(row.section) ?? { name: row.section, subtotal: 0, items: 0 };
+        next.subtotal += calcLineTotal(row);
+        next.items += 1;
+        map.set(row.section, next);
+        return map;
+      }, new Map<string, { name: string; subtotal: number; items: number }>()),
+    )
+      .map(([, value]) => value)
+      .sort((a, b) => b.subtotal - a.subtotal),
+  };
+  const mechanismsSummary = {
+    total: mechanismRows.reduce((sum, row) => sum + calcLineTotal(row), 0),
+    sections: Array.from(
+      mechanismRows.reduce((map, row) => {
+        const sectionName = row.section ?? "Без раздела";
+        const next = map.get(sectionName) ?? { name: sectionName, subtotal: 0, items: 0 };
+        next.subtotal += calcLineTotal(row);
+        next.items += 1;
+        map.set(sectionName, next);
+        return map;
+      }, new Map<string, { name: string; subtotal: number; items: number }>()),
+    )
+      .map(([, value]) => value)
+      .sort((a, b) => b.subtotal - a.subtotal),
+  };
+  const visibleSummary =
+    activeTab === "works"
+      ? summary
+      : activeTab === "materials"
+        ? materialsSummary
+        : mechanismsSummary;
+  const matchableRowsCount = workRows.length;
 
   return (
     <div style={{ padding: 16, height: "100%", overflow: "auto" }}>
@@ -2003,7 +2220,7 @@ export default function EstimatePage() {
       {activeBatch && (
         <div style={{ marginBottom: 12, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", fontSize: 12, color: "var(--muted)" }}>
           <div>
-            ФЕР размечено: <b style={{ color: "var(--text)" }}>{activeBatch.fer_matched_count}</b> из <b style={{ color: "var(--text)" }}>{activeBatch.estimates_count}</b>
+            ФЕР размечено: <b style={{ color: "var(--text)" }}>{activeBatch.fer_matched_count}</b> из <b style={{ color: "var(--text)" }}>{matchableRowsCount}</b>
             <span style={{ marginLeft: 10 }}>
               · Гант: <b style={{ color: "var(--text)" }}>{activeBatch.gantt_tasks_count}</b> задач
             </span>
@@ -2101,13 +2318,35 @@ export default function EstimatePage() {
         </div>
       )}
 
-      {summary && (
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {ESTIMATE_TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveTab(tab.id)}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 999,
+              border: activeTab === tab.id ? "1px solid var(--blue)" : "1px solid var(--border)",
+              background: activeTab === tab.id ? "rgba(59,130,246,.08)" : "var(--surface)",
+              color: activeTab === tab.id ? "var(--blue-dark)" : "var(--text)",
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: activeTab === tab.id ? 700 : 500,
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {visibleSummary && (
         <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
           <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "12px 16px" }}>
             <div style={{ fontSize: 10, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>Итого по блоку</div>
-            <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "var(--mono)", color: "var(--blue-dark)" }}>{fmtMoney(summary.total)} ₽</div>
+            <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "var(--mono)", color: "var(--blue-dark)" }}>{fmtMoney(visibleSummary.total)} ₽</div>
           </div>
-          {summary.sections?.map((section) => (
+          {visibleSummary.sections?.map((section) => (
             <div key={section.name} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "12px 16px" }}>
               <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 4 }}>{section.name}</div>
               <div style={{ fontSize: 14, fontWeight: 600, fontFamily: "var(--mono)" }}>{fmtMoney(section.subtotal)} ₽</div>
@@ -2117,184 +2356,259 @@ export default function EstimatePage() {
         </div>
       )}
 
-      <div style={{ position: "relative", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, overflowX: "auto", overflowY: "hidden" }}>
-        <table style={{ width: "max-content", minWidth: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-          <thead>
-            <tr style={{ background: "#1e293b" }}>
-              {tableHeaders.map((header) => (
-                <th
-                  key={header}
-                  style={{
-                    padding: "9px 12px",
-                    textAlign: ["Наименование работ", "Материалы", "Тип работ ФЕР", "ИИ"].includes(header) ? "left" : "right",
-                    width: header === "Наименование работ" ? "1%" : ESTIMATE_COLUMN_WIDTHS[header],
-                    minWidth: ESTIMATE_COLUMN_WIDTHS[header],
-                    fontSize: 10,
-                    color: "#94a3b8",
-                    textTransform: "uppercase",
-                    letterSpacing: ".06em",
-                    fontFamily: "var(--mono)",
-                    fontWeight: 400,
-                    borderRight: "1px solid #334155",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {header}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {Object.entries(sections).map(([sectionName, sectionRows]) => [
-              <tr key={`s-${sectionName}`}>
-                <td
-                  style={{
-                    padding: "8px 12px",
-                    fontWeight: 700,
-                    fontSize: 11,
-                    width: "1%",
-                    whiteSpace: "nowrap",
-                    background: "rgba(59,130,246,.06)",
-                    color: "var(--blue-dark)",
-                    letterSpacing: ".03em",
-                    borderBottom: "1px solid var(--border)",
-                  }}
-                >
-                  {sectionName}
-                </td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
-                <td
-                  style={{
-                    padding: "8px 12px",
-                    textAlign: "right",
-                    fontFamily: "var(--mono)",
-                    fontSize: 11,
-                    background: "rgba(59,130,246,.06)",
-                    fontWeight: 600,
-                    borderBottom: "1px solid var(--border)",
-                  }}
-                >
-                  {fmtMoney(sectionRows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))}
-                </td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", color: "var(--muted)" }}>—</td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)" }}>—</td>
-                <td
-                  style={{
-                    padding: "8px 12px",
-                    borderBottom: "1px solid var(--border)",
-                    background: "rgba(59,130,246,.06)",
-                    verticalAlign: "top",
-                  }}
-                >
-                  <GroupFerCell row={sectionRows[0]} onOpenManual={openManualGroupModal} />
-                </td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
-                <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
-                <td
-                  style={{
-                    padding: "8px 12px",
-                    borderBottom: "1px solid var(--border)",
-                    background: "rgba(59,130,246,.06)",
-                    verticalAlign: "top",
-                  }}
-                >
-                  <SectionGroupAiControls
-                    representativeRow={sectionRows[0]}
-                    running={runningGroupSectionKey === sectionName}
-                    onRun={handleAIGroupMatch}
-                    onOpenCandidates={(row) => setGroupCandidatesModal({ sectionKey: row.section ?? "Без раздела" })}
-                  />
-                </td>
-              </tr>,
-              ...sectionRows.map((row, index) => (
-                <tr key={row.id} style={{ background: index % 2 ? "var(--stripe)" : "" }}>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", width: "1%", whiteSpace: "nowrap" }}>{row.work_name}</td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
-                  <td
-                    style={{
-                      padding: "8px 12px",
-                      borderBottom: "1px solid var(--border)",
-                      textAlign: "right",
-                      fontFamily: "var(--mono)",
-                      width: ESTIMATE_COLUMN_WIDTHS["Кол-во"],
-                      minWidth: ESTIMATE_COLUMN_WIDTHS["Кол-во"],
-                    }}
-                  >
-                    {fmtQuantity(row.quantity)}
-                  </td>
-                  <td
-                    style={{
-                      padding: "8px 12px",
-                      borderBottom: "1px solid var(--border)",
-                      textAlign: "right",
-                      fontFamily: "var(--mono)",
-                      width: ESTIMATE_COLUMN_WIDTHS["Цена за ед., ₽"],
-                      minWidth: ESTIMATE_COLUMN_WIDTHS["Цена за ед., ₽"],
-                    }}
-                  >
-                    {fmtMoney(row.unit_price ?? 0)}
-                  </td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 500 }}>{fmtMoney(row.total_price ?? 0)}</td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", verticalAlign: "top" }}>
-                    {row.materials?.length ? (
-                      <div style={{ display: "grid", gap: 4 }}>
-                        {row.materials.map((material, materialIndex) => (
-                          <div key={`${row.id}-m-${materialIndex}`}>
-                            <div>{material.name}</div>
-                            {materialMeta(material) && <div style={{ marginTop: 2, fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>{materialMeta(material)}</div>}
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <span style={{ color: "var(--muted)" }}>—</span>
-                    )}
-                  </td>
-                  <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
-                    <ActsCell row={row} onOpen={handleOpenActs} />
-                  </td>
-                  <FerCell row={row} onOpenModal={setFerModalRow} />
-                  <FerNumberCell tableId={row.fer_table_id} onOpen={openFerReference} />
-                  <FerHoursCell tableId={row.fer_table_id} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
-                  <FerMultiplierCell row={row} onChange={handleFerMultiplierChange} />
-                  <CalculatedNormHoursCell row={row} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
-                  <PersonDaysCell
-                    row={row}
-                    hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined}
-                    hoursPerDay={calculationHoursPerDay}
-                    workersCount={calculationWorkers}
-                  />
-                  <AIVectorCell row={row} running={runningAiRowId === row.id} onRun={handleAIVectorMatch} />
+      {estimateError ? (
+        <div style={{ padding: 48, textAlign: "center", color: "var(--red)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
+          {estimateError}
+        </div>
+      ) : activeTab === "works" ? (
+        !workRows.length ? (
+          <div style={{ padding: 48, textAlign: "center", color: "var(--muted)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
+            В выбранном блоке нет строк работ.
+          </div>
+        ) : (
+          <div style={{ position: "relative", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, overflowX: "auto", overflowY: "hidden" }}>
+            <table style={{ width: "max-content", minWidth: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "#1e293b" }}>
+                  {WORK_TABLE_HEADERS.map((header) => (
+                    <th
+                      key={header}
+                      style={{
+                        padding: "9px 12px",
+                        textAlign: ["Наименование работ", "Тип работ ФЕР", "ИИ"].includes(header) ? "left" : "right",
+                        width: header === "Наименование работ" ? "1%" : ESTIMATE_COLUMN_WIDTHS[header],
+                        minWidth: ESTIMATE_COLUMN_WIDTHS[header],
+                        fontSize: 10,
+                        color: "#94a3b8",
+                        textTransform: "uppercase",
+                        letterSpacing: ".06em",
+                        fontFamily: "var(--mono)",
+                        fontWeight: 400,
+                        borderRight: "1px solid #334155",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {header}
+                    </th>
+                  ))}
                 </tr>
-              )),
-            ])}
-            <tr style={{ background: "#f1f5f9", fontWeight: 700 }}>
-              <td colSpan={4} style={{ padding: "10px 12px", textAlign: "right", fontSize: 11, color: "var(--muted)", letterSpacing: ".06em" }}>
-                ИТОГО
-              </td>
-              <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 15, color: "var(--blue-dark)" }}>
-                {fmtMoney(summary?.total ?? rows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))} ₽
-              </td>
-              <td colSpan={9} style={{ padding: "10px 12px" }} />
-            </tr>
-          </tbody>
-        </table>
+              </thead>
+              <tbody>
+                {Object.entries(sections).map(([sectionName, sectionRows]) => [
+                  <tr key={`s-${sectionName}`}>
+                    <td
+                      style={{
+                        padding: "8px 12px",
+                        fontWeight: 700,
+                        fontSize: 11,
+                        width: "1%",
+                        whiteSpace: "nowrap",
+                        background: "rgba(59,130,246,.06)",
+                        color: "var(--blue-dark)",
+                        letterSpacing: ".03em",
+                        borderBottom: "1px solid var(--border)",
+                      }}
+                    >
+                      {sectionName}
+                    </td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                    <td style={{ padding: "8px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 11, background: "rgba(59,130,246,.06)", fontWeight: 600, borderBottom: "1px solid var(--border)" }}>
+                      {fmtMoney(sectionRows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))}
+                    </td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", verticalAlign: "top" }}>
+                      <GroupFerCell row={sectionRows[0]} onOpenManual={openManualGroupModal} />
+                    </td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", verticalAlign: "top" }}>
+                      <SectionGroupAiControls
+                        representativeRow={sectionRows[0]}
+                        running={runningGroupSectionKey === sectionName}
+                        onRun={handleAIGroupMatch}
+                        onOpenCandidates={(row) => setGroupCandidatesModal({ sectionKey: row.section ?? "Без раздела" })}
+                      />
+                    </td>
+                  </tr>,
+                  ...sectionRows.map((row, index) => (
+                    <tr key={row.id} style={{ background: index % 2 ? "var(--stripe)" : "" }}>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", width: "1%", whiteSpace: "nowrap" }}>{row.work_name}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", width: ESTIMATE_COLUMN_WIDTHS["Кол-во"], minWidth: ESTIMATE_COLUMN_WIDTHS["Кол-во"] }}>
+                        {fmtQuantity(row.quantity)}
+                      </td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", width: ESTIMATE_COLUMN_WIDTHS["Цена за ед., ₽"], minWidth: ESTIMATE_COLUMN_WIDTHS["Цена за ед., ₽"] }}>
+                        {fmtMoney(row.unit_price ?? 0)}
+                      </td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 500 }}>{fmtMoney(row.total_price ?? 0)}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
+                        <ActsCell row={row} onOpen={handleOpenActs} />
+                      </td>
+                      <FerCell row={row} onOpenModal={setFerModalRow} />
+                      <FerNumberCell tableId={row.fer_table_id} tableNumber={row.fer_table_id ? ferNumberByTableId[row.fer_table_id] : null} onOpen={openFerReference} />
+                      <FerHoursCell tableId={row.fer_table_id} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
+                      <FerMultiplierCell row={row} onChange={handleFerMultiplierChange} />
+                      <CalculatedNormHoursCell row={row} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
+                      <PersonDaysCell
+                        row={row}
+                        hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined}
+                        hoursPerDay={calculationHoursPerDay}
+                        workersCount={calculationWorkers}
+                      />
+                      <AIVectorCell row={row} running={runningAiRowId === row.id} onRun={handleAIVectorMatch} />
+                    </tr>
+                  )),
+                ])}
+                <tr style={{ background: "#f1f5f9", fontWeight: 700 }}>
+                  <td colSpan={4} style={{ padding: "10px 12px", textAlign: "right", fontSize: 11, color: "var(--muted)", letterSpacing: ".06em" }}>
+                    ИТОГО
+                  </td>
+                  <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 15, color: "var(--blue-dark)" }}>
+                    {fmtMoney(summary?.total ?? workRows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))} ₽
+                  </td>
+                  <td colSpan={8} style={{ padding: "10px 12px" }} />
+                </tr>
+              </tbody>
+            </table>
 
-        {popup && popupRow && (
-          <ActsPopup
-            row={popupRow}
-            top={popup.top}
-            left={popup.left}
-            saving={savingActsId === popupRow.id}
-            onClose={() => setPopup(null)}
-            onSave={(patch) => handleActsUpdate(popupRow.id, patch)}
-          />
-        )}
-      </div>
+            {popup && popupRow && (
+              <ActsPopup
+                row={popupRow}
+                top={popup.top}
+                left={popup.left}
+                saving={savingActsId === popupRow.id}
+                onClose={() => setPopup(null)}
+                onSave={(patch) => handleActsUpdate(popupRow.id, patch)}
+              />
+            )}
+          </div>
+        )
+      ) : activeTab === "materials" ? (
+        !groupedMaterialRows.length ? (
+          <div style={{ padding: 48, textAlign: "center", color: "var(--muted)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
+            В этом блоке нет материалов.
+          </div>
+        ) : (
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ background: "#1e293b" }}>
+                  {["Раздел", "Материал", "Ед.", "Кол-во", "Сумма, ₽"].map((header) => (
+                    <th key={header} style={{ padding: "9px 12px", textAlign: ["Раздел", "Материал"].includes(header) ? "left" : "right", fontSize: 10, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".06em", fontFamily: "var(--mono)", fontWeight: 400, borderRight: "1px solid #334155", whiteSpace: "nowrap" }}>
+                      {header}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {groupedMaterialRows.map((row, index) => (
+                  <tr key={row.key} style={{ background: index % 2 ? "var(--stripe)" : "" }}>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>{row.section}</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
+                      <div>{row.name}</div>
+                    </td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit ?? "—"}</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtQuantity(row.quantity)}</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600 }}>{fmtMoney(row.total_price)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      ) : (
+        <div style={{ display: "grid", gap: 16 }}>
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Добавить механизм</div>
+            <div style={{ display: "grid", gap: 10, gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+              <input value={mechanismDraft.section} onChange={(event) => handleMechanismDraftChange("section", event.target.value)} placeholder="Раздел" style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border2)", background: "var(--surface)", fontSize: 12 }} />
+              <input value={mechanismDraft.name} onChange={(event) => handleMechanismDraftChange("name", event.target.value)} placeholder="Наименование механизма" style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border2)", background: "var(--surface)", fontSize: 12 }} />
+              <input value={mechanismDraft.unit} onChange={(event) => handleMechanismDraftChange("unit", event.target.value)} placeholder="Ед." style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border2)", background: "var(--surface)", fontSize: 12 }} />
+              <input value={mechanismDraft.quantity} onChange={(event) => handleMechanismDraftChange("quantity", event.target.value)} placeholder="Кол-во" style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border2)", background: "var(--surface)", fontSize: 12, fontFamily: "var(--mono)" }} />
+              <input value={mechanismDraft.unit_price} onChange={(event) => handleMechanismDraftChange("unit_price", event.target.value)} placeholder="Цена за ед., ₽" style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border2)", background: "var(--surface)", fontSize: 12, fontFamily: "var(--mono)" }} />
+              <input value={mechanismDraft.total_price} onChange={(event) => handleMechanismDraftChange("total_price", event.target.value)} placeholder="Сумма, ₽" style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border2)", background: "var(--surface)", fontSize: 12, fontFamily: "var(--mono)" }} />
+            </div>
+            <div style={{ marginTop: 12, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ fontSize: 11, color: "var(--muted)" }}>Если сумма не указана, она будет рассчитана из количества и цены за единицу.</div>
+              <button
+                type="button"
+                onClick={handleCreateMechanism}
+                disabled={savingMechanism}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 8,
+                  border: "1px solid rgba(59,130,246,.22)",
+                  background: "var(--blue-dark)",
+                  color: "#fff",
+                  cursor: savingMechanism ? "default" : "pointer",
+                  opacity: savingMechanism ? 0.7 : 1,
+                  fontSize: 12,
+                  fontWeight: 700,
+                }}
+              >
+                {savingMechanism ? "Сохраняем..." : "Добавить механизм"}
+              </button>
+            </div>
+          </div>
+
+          {!mechanismRows.length ? (
+            <div style={{ padding: 48, textAlign: "center", color: "var(--muted)", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6 }}>
+              Механизмы ещё не добавлены.
+            </div>
+          ) : (
+            <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: "#1e293b" }}>
+                    {["Раздел", "Наименование механизма", "Ед.", "Кол-во", "Цена за ед., ₽", "Сумма, ₽", ""].map((header) => (
+                      <th key={header || "actions"} style={{ padding: "9px 12px", textAlign: ["Раздел", "Наименование механизма", ""].includes(header) ? "left" : "right", fontSize: 10, color: "#94a3b8", textTransform: "uppercase", letterSpacing: ".06em", fontFamily: "var(--mono)", fontWeight: 400, borderRight: "1px solid #334155", whiteSpace: "nowrap" }}>
+                        {header}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {mechanismRows.map((row, index) => (
+                    <tr key={row.id} style={{ background: index % 2 ? "var(--stripe)" : "" }}>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>{row.section ?? "Без раздела"}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>{row.work_name}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit ?? "—"}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{fmtQuantity(row.quantity)}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)" }}>{row.unit_price != null ? fmtMoney(row.unit_price) : "—"}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600 }}>{fmtMoney(calcLineTotal(row))}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteMechanism(row.id)}
+                          disabled={deletingMechanismId === row.id}
+                          style={{
+                            padding: "6px 10px",
+                            borderRadius: 7,
+                            border: "1px solid rgba(239,68,68,.18)",
+                            background: "rgba(239,68,68,.06)",
+                            color: "var(--red)",
+                            cursor: deletingMechanismId === row.id ? "default" : "pointer",
+                            opacity: deletingMechanismId === row.id ? 0.7 : 1,
+                            fontSize: 12,
+                            fontWeight: 600,
+                          }}
+                        >
+                          {deletingMechanismId === row.id ? "Удаляем..." : "Удалить"}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {ferModalRow && <FerSearchModal row={ferModalRow} onClose={() => setFerModalRow(null)} onSelect={(result) => handleFerSelect(ferModalRow, result)} />}
       {groupCandidatesModal && groupCandidatesRow && (

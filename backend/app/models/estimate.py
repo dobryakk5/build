@@ -56,3 +56,9 @@ class Estimate(Base, SoftDeleteMixin):
     project:        Mapped["Project"]            = relationship(back_populates="estimates")
     estimate_batch: Mapped["EstimateBatch|None"] = relationship(back_populates="estimates")
     gantt_task:     Mapped["GanttTask|None"]     = relationship(back_populates="estimate")
+
+    @property
+    def item_type(self) -> str:
+        raw_data = self.raw_data if isinstance(self.raw_data, dict) else {}
+        item_type = raw_data.get("item_type")
+        return item_type if item_type in {"work", "mechanism"} else "work"

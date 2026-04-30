@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,6 +35,27 @@ from app.services.gantt_service import resolve_project_dates
 from app.services.upload_service import build_gantt_for_estimate_batch, start_upload_job, start_upload_job_with_mapping
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
+
+ESTIMATE_ITEM_TYPE_WORK = "work"
+ESTIMATE_ITEM_TYPE_MECHANISM = "mechanism"
+
+
+def _estimate_item_type(estimate: Estimate) -> str:
+    raw_data = getattr(estimate, "raw_data", None)
+    if isinstance(raw_data, dict):
+        item_type = raw_data.get("item_type")
+        if item_type in {ESTIMATE_ITEM_TYPE_WORK, ESTIMATE_ITEM_TYPE_MECHANISM}:
+            return item_type
+    return ESTIMATE_ITEM_TYPE_WORK
+
+
+def _is_mechanism_estimate(estimate: Estimate) -> bool:
+    return _estimate_item_type(estimate) == ESTIMATE_ITEM_TYPE_MECHANISM
+
+
+def _ensure_work_estimate(estimate: Estimate) -> None:
+    if _is_mechanism_estimate(estimate):
+        raise HTTPException(400, "Для механизма операция недоступна")
 
 
 async def _load_group_estimates(db: AsyncSession, estimate: Estimate) -> list[Estimate]:
@@ -156,25 +177,104 @@ async def estimate_summary(
     db: AsyncSession = Depends(get_db),
 ):
     q = (
-        select(
-            Estimate.section,
-            func.sum(Estimate.total_price).label("subtotal"),
-            func.count().label("items"),
-        )
+        select(Estimate)
         .where(Estimate.project_id == str(project_id))
         .where(Estimate.deleted_at.is_(None))
+        .order_by(Estimate.row_order, Estimate.id)
     )
     if estimate_batch_id:
         q = q.where(Estimate.estimate_batch_id == str(estimate_batch_id))
-    q = q.group_by(Estimate.section).order_by(func.sum(Estimate.total_price).desc())
 
-    rows = await db.execute(q)
-    sections = [
-        {"name": r.section or "Без раздела", "subtotal": float(r.subtotal or 0), "items": r.items}
-        for r in rows
-    ]
-    total = sum(s["subtotal"] for s in sections)
+    rows = list(await db.scalars(q))
+    section_totals: dict[str, dict[str, float | int | str]] = {}
+    total = 0.0
+    for row in rows:
+        if _is_mechanism_estimate(row):
+            continue
+        section_name = row.section or "Без раздела"
+        row_total = float(row.total_price or 0)
+        total += row_total
+        section = section_totals.setdefault(section_name, {"name": section_name, "subtotal": 0.0, "items": 0})
+        section["subtotal"] = float(section["subtotal"]) + row_total
+        section["items"] = int(section["items"]) + 1
+
+    sections = sorted(
+        (
+            {"name": str(section["name"]), "subtotal": float(section["subtotal"]), "items": int(section["items"])}
+            for section in section_totals.values()
+        ),
+        key=lambda item: item["subtotal"],
+        reverse=True,
+    )
     return EstimateSummary(total=total, sections=sections)
+
+
+class MechanismCreateRequest(BaseModel):
+    estimate_batch_id: UUID
+    section: str | None = Field(default=None, max_length=255)
+    name: str = Field(min_length=1, max_length=5000)
+    unit: str | None = Field(default=None, max_length=50)
+    quantity: float | None = Field(default=None, ge=0)
+    unit_price: float | None = Field(default=None, ge=0)
+    total_price: float | None = Field(default=None, ge=0)
+
+
+@router.post("/estimates/mechanisms", response_model=EstimateRow, status_code=201)
+async def create_estimate_mechanism(
+    project_id: UUID,
+    body: MechanismCreateRequest,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    batch = await db.get(EstimateBatch, str(body.estimate_batch_id))
+    if not batch or batch.project_id != str(project_id) or batch.deleted_at:
+        raise HTTPException(404, "Блок сметы не найден")
+
+    next_row_order = await db.scalar(
+        select(func.max(Estimate.row_order))
+        .where(Estimate.project_id == str(project_id))
+        .where(Estimate.estimate_batch_id == str(body.estimate_batch_id))
+        .where(Estimate.deleted_at.is_(None))
+    )
+
+    total_price = body.total_price
+    if total_price is None and body.quantity is not None and body.unit_price is not None:
+        total_price = round(body.quantity * body.unit_price, 2)
+
+    mechanism = Estimate(
+        project_id=str(project_id),
+        estimate_batch_id=str(body.estimate_batch_id),
+        section=(body.section or "").strip() or None,
+        work_name=body.name.strip(),
+        unit=(body.unit or "").strip() or None,
+        quantity=body.quantity,
+        unit_price=body.unit_price,
+        total_price=total_price,
+        materials=None,
+        row_order=int(next_row_order or -1) + 1,
+        raw_data={"item_type": ESTIMATE_ITEM_TYPE_MECHANISM},
+    )
+    db.add(mechanism)
+    await db.commit()
+    await db.refresh(mechanism)
+    return mechanism
+
+
+@router.delete("/estimates/{estimate_id}", status_code=204)
+async def delete_estimate_mechanism(
+    project_id: UUID,
+    estimate_id: UUID,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+    if not _is_mechanism_estimate(est):
+        raise HTTPException(400, "Удалять можно только строки механизмов")
+
+    est.deleted_at = datetime.now(timezone.utc)
+    await db.commit()
 
 
 @router.get("/estimate-batches", response_model=list[EstimateBatchResponse])
@@ -432,6 +532,7 @@ async def update_estimate_acts(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     if body.req_hidden_work_act is not None:
         est.req_hidden_work_act = body.req_hidden_work_act
@@ -460,6 +561,7 @@ async def update_estimate_fer_multiplier(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     if body.fer_multiplier < 0 or body.fer_multiplier > 1000:
         raise HTTPException(400, "Множитель должен быть от 0 до 1000")
@@ -497,6 +599,7 @@ async def update_estimate_fer(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     if body.fer_table_id is None:
         est.fer_table_id = None
@@ -562,6 +665,7 @@ async def match_estimate_fer_vector(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     match = await match_estimate_with_vector(db, est)
     if match is None:
@@ -595,6 +699,7 @@ async def match_estimate_fer_group_vector(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     target_estimates = await _load_group_estimates(db, est)
     matched_at = datetime.now(timezone.utc)
@@ -618,6 +723,7 @@ async def confirm_estimate_fer_group(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     target_estimates = await _load_group_estimates(db, est)
     match = confirm_group_candidate(est, kind=body.kind, ref_id=body.ref_id)
@@ -640,6 +746,7 @@ async def get_estimate_fer_group_options(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     return {
         "collections": await get_manual_group_options(db, est),
@@ -657,6 +764,7 @@ async def update_estimate_fer_group_manual(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     target_estimates = await _load_group_estimates(db, est)
     match = await resolve_manual_group_match(db, est, kind=body.kind, ref_id=body.ref_id)
@@ -684,6 +792,7 @@ async def get_estimate_fer_words_candidates(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     candidates = await get_fer_words_candidates_for_estimate(db, est, limit=limit)
     return [candidate.to_payload() for candidate in candidates]
@@ -700,6 +809,7 @@ async def update_estimate_fer_words(
     est = await db.get(Estimate, str(estimate_id))
     if not est or est.project_id != str(project_id) or est.deleted_at:
         raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
 
     if body.entry_id is None:
         apply_fer_words_choice(est, None, None)

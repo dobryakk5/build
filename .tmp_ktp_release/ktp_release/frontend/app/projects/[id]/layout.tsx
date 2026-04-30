@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useParams, usePathname, useRouter } from "next/navigation";
 
 import EmailVerificationBanner from "@/components/EmailVerificationBanner";
 import { auth, notifications as notifApi, projects as projectsApi } from "@/lib/api";
@@ -13,7 +13,6 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const router = useRouter();
   const { id } = useParams<{ id: string }>();
   const pathname = usePathname();
-  const searchParams = useSearchParams();
   const { user: currentUser, loading: userLoading } = useUser();
 
   const [unread, setUnread] = useState(0);
@@ -71,23 +70,20 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const myRole = currentUser?.projects?.find((project) => project.project_id === id)?.role ?? null;
   const canManage = myRole === "owner" || myRole === "pm";
   const isOwner = myRole === "owner";
-  const activeBatchId = searchParams.get("batch");
-  const withBatch = (path: string) =>
-    activeBatchId && (path.includes("/gantt") || path.includes("/estimate") || path.includes("/ktp"))
-      ? `${path}?batch=${activeBatchId}`
-      : path;
 
   const tabs = [
-    { id: "gantt", label: "📊 Ганта", matchPath: `/projects/${id}/gantt`, href: withBatch(`/projects/${id}/gantt`) },
-    { id: "estimate", label: "📋 Смета", matchPath: `/projects/${id}/estimate`, href: withBatch(`/projects/${id}/estimate`) },
-    { id: "journal", label: "🗒 Журнал", matchPath: `/projects/${id}/journal`, href: `/projects/${id}/journal` },
-    { id: "fer", label: "🧾 ФЕР", matchPath: `/projects/${id}/fer`, href: `/projects/${id}/fer` },
-    { id: "upload", label: "⬆ Загрузка", matchPath: `/projects/${id}/upload`, href: `/projects/${id}/upload` },
-    { id: "ktp", label: "🗂 КТП", matchPath: `/projects/${id}/ktp`, href: withBatch(`/projects/${id}/ktp`) },
-    ...(canManage || isOwner ? [{ id: "settings", label: "⚙ Настройки", matchPath: `/projects/${id}/settings`, href: `/projects/${id}/settings` }] : []),
+    { id: "gantt", label: "📊 Ганта", path: `/projects/${id}/gantt` },
+    { id: "estimate", label: "📋 Смета", path: `/projects/${id}/estimate` },
+    { id: "journal", label: "🗒 Журнал", path: `/projects/${id}/journal` },
+    { id: "fer", label: "🧾 ФЕР", path: `/projects/${id}/fer` },
+    { id: "upload", label: "⬆ Загрузка", path: `/projects/${id}/upload` },
+    { id: "ktp",    label: "🗂 КТП",      path: `/projects/${id}/ktp` },
+    { id: "reports", label: "📝 Отчёты", path: `/projects/${id}/reports` },
+    ...(canManage ? [{ id: "members", label: "👥 Команда", path: `/projects/${id}/members` }] : []),
+    ...(canManage || isOwner ? [{ id: "settings", label: "⚙ Настройки", path: `/projects/${id}/settings` }] : []),
   ];
 
-  const activeTab = tabs.find((tab) => pathname.startsWith(tab.matchPath))?.id ?? "gantt";
+  const activeTab = tabs.find((tab) => pathname.startsWith(tab.path))?.id ?? "gantt";
 
   if (userLoading) {
     return (
@@ -261,10 +257,10 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
         {tabs.map((tab) => (
           <Link
             key={tab.id}
-            href={tab.href}
+            href={tab.path}
             onClick={(event) => {
               const isPlainLeftClick = event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
-              if (isPlainLeftClick && tab.id === "fer" && pathname.startsWith(tab.matchPath)) {
+              if (isPlainLeftClick && tab.id === "fer" && pathname.startsWith(tab.path)) {
                 event.preventDefault();
                 window.dispatchEvent(new Event("fer:navigate-root"));
               }
@@ -288,7 +284,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
         ))}
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: "auto", paddingTop: currentUser && !currentUser.email_verified ? 16 : 0 }}>
+      <div style={{ flex: 1, overflow: "hidden", paddingTop: currentUser && !currentUser.email_verified ? 16 : 0 }}>
         {currentUser && !currentUser.email_verified && (
           <div style={{ padding: "0 16px" }}>
             <EmailVerificationBanner loading={resendingVerification} onResend={handleResendVerification} />

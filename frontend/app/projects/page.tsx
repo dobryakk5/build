@@ -159,7 +159,7 @@ export default function ProjectsPage() {
                 <div style={{display:"flex",gap:16,fontSize:11,color:"var(--muted)"}}>
                   {(p.budget ?? 0) > 0 && <span>💰 {fmtMoney(p.budget ?? 0)} ₽</span>}
                   {(p.tasks_count ?? 0) > 0 && <span>📋 {p.tasks_count} задач</span>}
-                  {(p.members_count ?? 0) > 0 && <span>👥 {p.members_count}</span>}
+                  {p.workers_count != null && <span>👷 {p.workers_count}</span>}
                 </div>
               </div>
             );

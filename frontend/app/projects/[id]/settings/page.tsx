@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import { useParams, useRouter } from "next/navigation";
 
+import ProjectMembersPanel from "@/components/ProjectMembersPanel";
 import { projects as projectsApi } from "@/lib/api";
 
 type ProjectFull = {
@@ -111,7 +112,7 @@ export default function ProjectSettingsPage() {
   const canEdit = project.my_role === "owner" || project.my_role === "pm";
 
   return (
-    <div style={{ padding: 24, maxWidth: 640, overflow: "auto", height: "100%" }}>
+    <div style={{ padding: 24, maxWidth: 1080, overflow: "auto", height: "100%" }}>
       <div style={{ marginBottom: 24 }}>
         <h3 style={{ fontSize: 17, fontWeight: 700, margin: 0 }}>Настройки проекта</h3>
         <p style={{ margin: "4px 0 0", fontSize: 12, color: "var(--muted)" }}>
@@ -119,74 +120,80 @@ export default function ProjectSettingsPage() {
         </p>
       </div>
 
+      {canEdit && <ProjectMembersPanel projectId={id} />}
+
       {canEdit && (
-        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 24, marginBottom: 20 }}>
-          <p style={{ fontSize: 13, fontWeight: 600, margin: "0 0 18px", color: "var(--text)" }}>Основная информация</p>
+        <>
+          <div style={{ fontSize: 16, fontWeight: 700, margin: "0 0 14px", color: "var(--text)" }}>
+            Основная информация
+          </div>
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 24, marginBottom: 20 }}>
 
-          <label style={labelStyle}>Название объекта</label>
-          <input value={name} onChange={(event) => setName(event.target.value)} style={inputStyle} placeholder="Название проекта" />
+            <label style={labelStyle}>Название объекта</label>
+            <input value={name} onChange={(event) => setName(event.target.value)} style={inputStyle} placeholder="Название проекта" />
 
-          <label style={labelStyle}>Адрес</label>
-          <input value={address} onChange={(event) => setAddress(event.target.value)} style={inputStyle} placeholder="Адрес объекта" />
+            <label style={labelStyle}>Адрес</label>
+            <input value={address} onChange={(event) => setAddress(event.target.value)} style={inputStyle} placeholder="Адрес объекта" />
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
-            <div>
-              <label style={labelStyle}>Дата начала</label>
-              <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} style={inputStyle} />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 14 }}>
+              <div>
+                <label style={labelStyle}>Дата начала</label>
+                <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} style={inputStyle} />
+              </div>
+              <div>
+                <label style={labelStyle}>Дата окончания</label>
+                <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} style={inputStyle} />
+              </div>
             </div>
-            <div>
-              <label style={labelStyle}>Дата окончания</label>
-              <input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} style={inputStyle} />
+
+            <label style={labelStyle}>Статус</label>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+              {statuses.map((item) => (
+                <button
+                  key={item.value}
+                  onClick={() => setStatus(item.value)}
+                  style={{
+                    padding: "6px 14px",
+                    borderRadius: 20,
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: "pointer",
+                    transition: "all .15s",
+                    background: status === item.value ? `${item.color}20` : "transparent",
+                    color: status === item.value ? item.color : "var(--muted)",
+                    border: `1.5px solid ${status === item.value ? item.color : "var(--border2)"}`,
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
             </div>
+
+            <label style={labelStyle}>Цвет проекта</label>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+              {colors.map((value) => (
+                <button
+                  key={value}
+                  onClick={() => setColor(value)}
+                  style={{
+                    width: 26,
+                    height: 26,
+                    borderRadius: "50%",
+                    background: value,
+                    border: color === value ? "3px solid var(--text)" : "3px solid transparent",
+                    cursor: "pointer",
+                    outline: "none",
+                    padding: 0,
+                    boxShadow: color === value ? `0 0 0 2px #fff, 0 0 0 4px ${value}` : "none",
+                    transition: "all .15s",
+                  }}
+                />
+              ))}
+            </div>
+
+            {error && <p style={{ fontSize: 12, color: "#ef4444", margin: "0 0 12px" }}>{error}</p>}
+
           </div>
-
-          <label style={labelStyle}>Статус</label>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
-            {statuses.map((item) => (
-              <button
-                key={item.value}
-                onClick={() => setStatus(item.value)}
-                style={{
-                  padding: "6px 14px",
-                  borderRadius: 20,
-                  fontSize: 12,
-                  fontWeight: 600,
-                  cursor: "pointer",
-                  transition: "all .15s",
-                  background: status === item.value ? `${item.color}20` : "transparent",
-                  color: status === item.value ? item.color : "var(--muted)",
-                  border: `1.5px solid ${status === item.value ? item.color : "var(--border2)"}`,
-                }}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
-
-          <label style={labelStyle}>Цвет проекта</label>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
-            {colors.map((value) => (
-              <button
-                key={value}
-                onClick={() => setColor(value)}
-                style={{
-                  width: 26,
-                  height: 26,
-                  borderRadius: "50%",
-                  background: value,
-                  border: color === value ? "3px solid var(--text)" : "3px solid transparent",
-                  cursor: "pointer",
-                  outline: "none",
-                  padding: 0,
-                  boxShadow: color === value ? `0 0 0 2px #fff, 0 0 0 4px ${value}` : "none",
-                  transition: "all .15s",
-                }}
-              />
-            ))}
-          </div>
-
-          {error && <p style={{ fontSize: 12, color: "#ef4444", margin: "0 0 12px" }}>{error}</p>}
-
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <button
               onClick={handleSave}
@@ -207,7 +214,7 @@ export default function ProjectSettingsPage() {
             </button>
             {saved && <span style={{ fontSize: 12, color: "#22c55e", fontWeight: 600 }}>✓ Сохранено</span>}
           </div>
-        </div>
+        </>
       )}
 
       {isOwner && (

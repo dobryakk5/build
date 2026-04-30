@@ -17,9 +17,6 @@ import type {
   EstimateBatch,
   EstimateRow,
   EstimateSummary,
-  KtpCard,
-  KtpGenerateResponse,
-  KtpGroup,
   Project,
   User,
 } from "./types";
@@ -178,21 +175,6 @@ export const estimates = {
     request<EstimateRow[]>(`/projects/${pid}/estimates${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
   summary: (pid: string, estimateBatchId?: string | null) =>
     request<EstimateSummary>(`/projects/${pid}/estimates/summary${estimateBatchId ? `?estimate_batch_id=${estimateBatchId}` : ""}`),
-  createMechanism: (pid: string, body: {
-    estimate_batch_id: string;
-    section?: string | null;
-    name: string;
-    unit?: string | null;
-    quantity?: number | null;
-    unit_price?: number | null;
-    total_price?: number | null;
-  }) =>
-    request<EstimateRow>(`/projects/${pid}/estimates/mechanisms`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    }),
-  deleteMechanism: (pid: string, estimateId: string) =>
-    request<void>(`/projects/${pid}/estimates/${estimateId}`, { method: "DELETE" }),
   batches: (pid: string) => request<EstimateBatch[]>(`/projects/${pid}/estimate-batches`),
   updateBatchSchedule: (pid: string, batchId: string, body: { workers_count?: number; hours_per_day?: number }) =>
     request<{ id: string; workers_count: number; hours_per_day: number; updated_gantt_tasks_count: number }>(`/projects/${pid}/estimate-batches/${batchId}/schedule`, {
@@ -462,19 +444,25 @@ export const admin = {
 
 export const ktp = {
   groups: (projectId: string, batchId: string) =>
-    request<KtpGroup[]>(`/projects/${projectId}/ktp/groups?estimate_batch_id=${batchId}`),
+    request<any[]>(`/projects/${projectId}/ktp/groups?estimate_batch_id=${batchId}`),
+
   buildGroups: (projectId: string, batchId: string, force = false) =>
-    request<KtpGroup[]>(`/projects/${projectId}/ktp/groups/build`, {
+    request<any[]>(`/projects/${projectId}/ktp/groups/build`, {
       method: "POST",
       body: JSON.stringify({ estimate_batch_id: batchId, force }),
     }),
+
   group: (projectId: string, groupId: string) =>
-    request<{ group: KtpGroup; card: KtpCard | null }>(`/projects/${projectId}/ktp/groups/${groupId}`),
+    request<{ group: any; card: any | null }>(
+      `/projects/${projectId}/ktp/groups/${groupId}`
+    ),
+
   generate: (projectId: string, groupId: string, answers: Record<string, string> = {}) =>
-    request<KtpGenerateResponse>(`/projects/${projectId}/ktp/groups/${groupId}/generate`, {
+    request<any>(`/projects/${projectId}/ktp/groups/${groupId}/generate`, {
       method: "POST",
       body: JSON.stringify({ answers }),
     }),
+
   card: (projectId: string, groupId: string) =>
-    request<KtpCard>(`/projects/${projectId}/ktp/groups/${groupId}/card`),
+    request<any>(`/projects/${projectId}/ktp/groups/${groupId}/card`),
 };

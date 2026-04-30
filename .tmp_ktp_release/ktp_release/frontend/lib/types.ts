@@ -35,7 +35,6 @@ export interface Project {
   end_date?: string | null;
   tasks_count?: number;
   members_count?: number;
-  workers_count?: number | null;
   my_role?: string | null;
   created_at?: string;
 }
@@ -68,7 +67,6 @@ export interface EstimateMaterial {
 export interface EstimateRow {
   id: string;
   estimate_batch_id?: string | null;
-  item_type?: "work" | "mechanism";
   section?: string | null;
   work_name: string;
   unit?: string | null;
@@ -528,6 +526,8 @@ export interface FerWordsCandidate {
   matched_words: string[];
 }
 
+// ── КТП ──────────────────────────────────────────────────────────────────────
+
 export interface KtpGroup {
   id: string;
   project_id: string;
@@ -567,15 +567,5 @@ export interface KtpCard {
 }
 
 export type KtpGenerateResponse =
-  | {
-      sufficient: false;
-      questions: KtpQuestion[];
-      ktp_card_id: null;
-      ktp: null;
-    }
-  | {
-      sufficient: true;
-      questions: [];
-      ktp_card_id: string;
-      ktp: KtpCard;
-    };
+  | { sufficient: false; questions: KtpQuestion[]; ktp_card_id: null; ktp: null }
+  | { sufficient: true; questions: []; ktp_card_id: string; ktp: KtpCard };

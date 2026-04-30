@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps         import get_current_user, get_project_member, require_action, get_db, require_verified_user
 from app.core.permissions import Action
-from app.models           import Project, ProjectMember, User, GanttTask, Estimate
+from app.models           import Project, ProjectMember, User, GanttTask, Estimate, EstimateBatch
 from app.services.auth_service import is_effectively_email_verified
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -93,6 +93,19 @@ async def list_projects(
     )
     budgets = {row.project_id: float(row.total or 0) for row in budget_agg}
 
+    batches_agg = await db.execute(
+        select(
+            EstimateBatch.project_id,
+            EstimateBatch.workers_count,
+        )
+        .where(EstimateBatch.project_id.in_(fetched_ids))
+        .where(EstimateBatch.deleted_at.is_(None))
+        .order_by(EstimateBatch.project_id, EstimateBatch.created_at, EstimateBatch.id)
+    )
+    workers_count: dict[str, int | None] = {}
+    for row in batches_agg:
+        workers_count[row.project_id] = row.workers_count
+
     result = []
     for p in projects:
         result.append({
@@ -106,6 +119,7 @@ async def list_projects(
             "end_date":         str(p.end_date)   if p.end_date   else None,
             "my_role":          member_roles.get(p.id),
             "members_count":    members_count.get(p.id, 0),
+            "workers_count":    workers_count.get(p.id),
             "tasks_count":      tasks_count.get(p.id, 0),
             "budget":           budgets.get(p.id, 0.0),
             "created_at":       p.created_at.isoformat(),

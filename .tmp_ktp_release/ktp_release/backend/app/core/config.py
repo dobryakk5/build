@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     FER_GROUP_SECTION_GAP_THRESHOLD: float = 0.05
     FER_GROUP_COLLECTION_CONFIDENT_THRESHOLD: float = 0.65
     FER_GROUP_COLLECTION_AMBIGUOUS_THRESHOLD: float = 0.40
+
+    # КТП — Карты Технологического Процесса
+    KTP_GENERATION_MODEL: str = "openai/gpt-4o-mini"
+    KTP_MAX_TOKENS: int = 3000
+
+    # КТП — Карты Технологического Процесса
     KTP_GENERATION_MODEL: str = "openai/gpt-4o-mini"
     KTP_MAX_TOKENS: int = 3000
 

@@ -16,6 +16,14 @@ def _mapping_result(row):
     return result
 
 
+def _scalar_list(items):
+    class _ScalarResult:
+        def __iter__(self):
+            return iter(items)
+
+    return _ScalarResult()
+
+
 @pytest.mark.asyncio
 async def test_update_estimate_batch_workers_saves_count(monkeypatch):
     from app.api.routes.estimates import EstimateBatchWorkersUpdate, update_estimate_batch_workers
@@ -228,3 +236,83 @@ async def test_update_estimate_fer_rejects_ignored_table():
         await update_estimate_fer("project-1", "est-1", FerMappingUpdate(fer_table_id=77), member=object(), db=db)
 
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_create_estimate_mechanism_creates_manual_row():
+    from app.api.routes.estimates import MechanismCreateRequest, create_estimate_mechanism
+
+    batch_id = "00000000-0000-0000-0000-000000000001"
+    batch = SimpleNamespace(
+        id=batch_id,
+        project_id="project-1",
+        deleted_at=None,
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=batch)
+    db.scalar = AsyncMock(return_value=4)
+    db.add = MagicMock()
+
+    result = await create_estimate_mechanism(
+        "project-1",
+        MechanismCreateRequest(
+            estimate_batch_id=batch_id,
+            section="Кровля",
+            name="Автовышка",
+            unit="смена",
+            quantity=2,
+            unit_price=15000,
+        ),
+        member=object(),
+        db=db,
+    )
+
+    created = db.add.call_args.args[0]
+    assert created.estimate_batch_id == batch_id
+    assert created.section == "Кровля"
+    assert created.work_name == "Автовышка"
+    assert created.raw_data == {"item_type": "mechanism"}
+    assert float(created.total_price) == 30000
+    db.commit.assert_awaited_once()
+    db.refresh.assert_awaited_once_with(created)
+    assert result is created
+
+
+@pytest.mark.asyncio
+async def test_delete_estimate_mechanism_soft_deletes_row():
+    from app.api.routes.estimates import delete_estimate_mechanism
+
+    mechanism = SimpleNamespace(
+        id="est-1",
+        project_id="project-1",
+        deleted_at=None,
+        raw_data={"item_type": "mechanism"},
+    )
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=mechanism)
+
+    await delete_estimate_mechanism("project-1", "est-1", member=object(), db=db)
+
+    assert mechanism.deleted_at is not None
+    db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_estimate_summary_ignores_mechanism_rows():
+    from app.api.routes.estimates import estimate_summary
+
+    db = AsyncMock()
+    db.scalars = AsyncMock(
+        return_value=_scalar_list(
+            [
+                SimpleNamespace(section="Кровля", total_price=1000, raw_data=None),
+                SimpleNamespace(section="Кровля", total_price=500, raw_data={"item_type": "mechanism"}),
+                SimpleNamespace(section="Кровля", total_price=2000, raw_data=None),
+            ]
+        )
+    )
+
+    result = await estimate_summary("project-1", estimate_batch_id=None, member=object(), db=db)
+
+    assert result.total == 3000
+    assert result.sections == [{"name": "Кровля", "subtotal": 3000.0, "items": 2}]

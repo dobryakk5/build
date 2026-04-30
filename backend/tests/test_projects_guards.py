@@ -102,7 +102,14 @@ async def test_list_projects_query_count():
         nonlocal call_count
         call_count += 1
         mock_result = MagicMock()
-        mock_result.__iter__ = MagicMock(return_value=iter([]))
+        if call_count == 6:
+            rows = [
+                SimpleNamespace(project_id="p1", workers_count=4),
+                SimpleNamespace(project_id="p2", workers_count=7),
+            ]
+        else:
+            rows = []
+        mock_result.__iter__ = MagicMock(return_value=iter(rows))
         return mock_result
 
     db = MagicMock()
@@ -111,8 +118,11 @@ async def test_list_projects_query_count():
 
     result = await list_projects(current_user=current_user, db=db)
 
-    assert call_count == 5
+    assert call_count == 6
     assert len(result) == 3
+    assert result[0]["workers_count"] == 4
+    assert result[1]["workers_count"] == 7
+    assert result[2]["workers_count"] is None
 
 
 @pytest.mark.asyncio

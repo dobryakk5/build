@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import { estimates } from "@/lib/api";
@@ -45,7 +45,6 @@ export default function UploadPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
-  const redirectedRef = useRef(false);
 
   const [file, setFile] = useState<File | null>(null);
   const [drag, setDrag] = useState(false);
@@ -85,15 +84,6 @@ export default function UploadPage() {
 
   const status = job?.status;
   const result = job?.result;
-
-  useEffect(() => {
-    if (status !== "done" || !result?.estimate_batch_id || redirectedRef.current) {
-      return;
-    }
-
-    redirectedRef.current = true;
-    router.replace(`/projects/${id}/ktp?batch=${result.estimate_batch_id}`);
-  }, [id, result?.estimate_batch_id, router, status]);
 
   return (
     <div
@@ -315,8 +305,19 @@ export default function UploadPage() {
               </span>
             ))}
           </div>
-          <div style={{ marginTop: 14, fontSize: 13, color: "#15803d", fontWeight: 600 }}>
-            Переходим к группам работ для создания КТП...
+          <div style={{ display: "flex", gap: 10, marginTop: 14, flexWrap: "wrap" }}>
+            <button
+              onClick={() => router.push(`/projects/${id}/ktp?batch=${result.estimate_batch_id}`)}
+              style={{ padding: "8px 18px", background: "var(--blue-dark)", color: "#fff", border: "none", borderRadius: 5, fontSize: 13, fontWeight: 600, cursor: "pointer" }}
+            >
+              Далее: создать КТП →
+            </button>
+            <button
+              onClick={() => router.push(`/projects/${id}/estimate${result.estimate_batch_id ? `?batch=${result.estimate_batch_id}` : ""}`)}
+              style={{ padding: "8px 18px", background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border2)", borderRadius: 5, fontSize: 13, cursor: "pointer" }}
+            >
+              Открыть смету
+            </button>
           </div>
         </div>
       )}

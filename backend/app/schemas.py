@@ -162,6 +162,7 @@ class EstimateRow(BaseModel):
 
     id:          str
     estimate_batch_id: str | None
+    item_type:   str = "work"
     section:     str | None
     work_name:   str
     unit:        str | None

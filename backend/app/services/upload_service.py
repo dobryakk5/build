@@ -54,6 +54,15 @@ _parser = ExcelEstimateParser()
 TMP_TTL_SECONDS = 3600
 
 
+def _estimate_item_type(estimate: Estimate) -> str:
+    raw_data = getattr(estimate, "raw_data", None)
+    if isinstance(raw_data, dict):
+        item_type = raw_data.get("item_type")
+        if item_type in {"work", "mechanism"}:
+            return item_type
+    return "work"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ЗАПУСК JOB (авто-парсинг)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -364,6 +373,7 @@ async def build_gantt_for_estimate_batch(
             .order_by(Estimate.row_order, Estimate.created_at, Estimate.id)
         )
     )
+    estimates = [estimate for estimate in estimates if _estimate_item_type(estimate) == "work"]
     if not estimates:
         raise HTTPException(422, "В выбранном блоке нет строк сметы для построения Ганта")
 

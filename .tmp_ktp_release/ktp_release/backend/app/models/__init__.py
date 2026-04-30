@@ -11,6 +11,7 @@ from .schedule_baseline import ScheduleBaseline, ScheduleBaselineTask
 from .gantt        import GanttTask, TaskDependency
 from .ktp          import KtpGroup, KtpCard
 from .foreman_task_report import ForemanTaskReport
+from .ktp          import KtpGroup, KtpCard
 from .other        import (
     Comment,
     TaskHistory,
@@ -58,6 +59,7 @@ __all__ = [
     "GanttTask", "TaskDependency",
     "KtpGroup", "KtpCard",
     "ForemanTaskReport",
+    "KtpGroup", "KtpCard",
     "Comment", "TaskHistory", "Job",
     "DailyReport", "DailyReportItem",
     "Material", "Escalation", "Notification",
