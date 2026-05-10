@@ -92,7 +92,7 @@ export default function UploadPage() {
     }
 
     redirectedRef.current = true;
-    router.replace(`/projects/${id}/ktp?batch=${result.estimate_batch_id}`);
+    router.replace(`/projects/${id}/work-plan?batch=${result.estimate_batch_id}`);
   }, [id, result?.estimate_batch_id, router, status]);
 
   return (

@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import EmailVerificationBanner from "@/components/EmailVerificationBanner";
-import { auth, notifications as notifApi, projects as projectsApi } from "@/lib/api";
+import { auth, notifications as notifApi } from "@/lib/api";
 import { useUser } from "@/lib/UserContext";
 
 export default function ProjectLayout({ children }: { children: ReactNode }) {
@@ -20,7 +20,6 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const [showNotif, setShowNotif] = useState(false);
   const [notifs, setNotifs] = useState<any[]>([]);
   const [resendingVerification, setResendingVerification] = useState(false);
-  const [deletingProject, setDeletingProject] = useState(false);
 
   useEffect(() => {
     if (!userLoading && !currentUser) {
@@ -44,21 +43,6 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
     await auth.logout();
   }
 
-  async function handleDeleteProject() {
-    if (!window.confirm("Удалить объект? Это действие нельзя отменить.")) {
-      return;
-    }
-
-    setDeletingProject(true);
-    try {
-      await projectsApi.delete(id);
-      router.replace("/projects");
-    } catch (error: unknown) {
-      alert(error instanceof Error ? error.message : "Не удалось удалить объект");
-      setDeletingProject(false);
-    }
-  }
-
   async function handleResendVerification() {
     setResendingVerification(true);
     try {
@@ -70,21 +54,21 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
 
   const myRole = currentUser?.projects?.find((project) => project.project_id === id)?.role ?? null;
   const canManage = myRole === "owner" || myRole === "pm";
-  const isOwner = myRole === "owner";
   const activeBatchId = searchParams.get("batch");
   const withBatch = (path: string) =>
-    activeBatchId && (path.includes("/gantt") || path.includes("/estimate") || path.includes("/ktp"))
+    activeBatchId && (path.includes("/gantt") || path.includes("/estimate") || path.includes("/ktp") || path.includes("/work-plan"))
       ? `${path}?batch=${activeBatchId}`
       : path;
 
   const tabs = [
     { id: "gantt", label: "📊 Ганта", matchPath: `/projects/${id}/gantt`, href: withBatch(`/projects/${id}/gantt`) },
     { id: "estimate", label: "📋 Смета", matchPath: `/projects/${id}/estimate`, href: withBatch(`/projects/${id}/estimate`) },
+    { id: "work-plan", label: "📐 План", matchPath: `/projects/${id}/work-plan`, href: withBatch(`/projects/${id}/work-plan`) },
     { id: "journal", label: "🗒 Журнал", matchPath: `/projects/${id}/journal`, href: `/projects/${id}/journal` },
     { id: "fer", label: "🧾 ФЕР", matchPath: `/projects/${id}/fer`, href: `/projects/${id}/fer` },
     { id: "upload", label: "⬆ Загрузка", matchPath: `/projects/${id}/upload`, href: `/projects/${id}/upload` },
     { id: "ktp", label: "🗂 КТП", matchPath: `/projects/${id}/ktp`, href: withBatch(`/projects/${id}/ktp`) },
-    ...(canManage || isOwner ? [{ id: "settings", label: "⚙ Настройки", matchPath: `/projects/${id}/settings`, href: `/projects/${id}/settings` }] : []),
+    ...(canManage ? [{ id: "settings", label: "⚙ Настройки", matchPath: `/projects/${id}/settings`, href: `/projects/${id}/settings` }] : []),
   ];
 
   const activeTab = tabs.find((tab) => pathname.startsWith(tab.matchPath))?.id ?? "gantt";
@@ -218,26 +202,6 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
               </>
             )}
           </div>
-
-          {isOwner && (
-            <button
-              onClick={handleDeleteProject}
-              disabled={deletingProject}
-              style={{
-                background: "rgba(239, 68, 68, .04)",
-                border: "1px solid rgba(239, 68, 68, .16)",
-                borderRadius: 4,
-                cursor: deletingProject ? "default" : "pointer",
-                color: "#b91c1c",
-                fontSize: 12,
-                fontWeight: 400,
-                padding: "4px 10px",
-                opacity: deletingProject ? 0.45 : 0.72,
-              }}
-            >
-              {deletingProject ? "Удаление..." : "Удалить объект"}
-            </button>
-          )}
 
           <button
             onClick={handleLogout}

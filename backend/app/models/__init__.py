@@ -21,6 +21,19 @@ from .other        import (
     Escalation,
     Notification,
 )
+from .nw           import (
+    NwWorkType,
+    NwObjectType,
+    NwBuildingTechnology,
+    NwLocationScope,
+    NwStage,
+    NwRepairClass,
+    NwItem,
+    NwFerMapping,
+    NwFerTableMapping,
+    ProjectWorkPlan,
+    ProjectWorkPlanEstimateLink,
+)
 from .enir         import (
     EnirCollection,
     EnirSection,
@@ -72,4 +85,9 @@ __all__ = [
     "EnirNormTable", "EnirNormColumn", "EnirNormRow", "EnirNormValue",
     "EnirTechnicalCoefficient",
     "EnirTechnicalCoefficientParagraph",
+    # NW (нормализованные виды работ)
+    "NwWorkType", "NwObjectType", "NwBuildingTechnology",
+    "NwLocationScope", "NwStage", "NwRepairClass", "NwItem",
+    "NwFerMapping", "NwFerTableMapping",
+    "ProjectWorkPlan", "ProjectWorkPlanEstimateLink",
 ]

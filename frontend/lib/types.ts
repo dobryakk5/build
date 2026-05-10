@@ -579,3 +579,195 @@ export type KtpGenerateResponse =
       ktp_card_id: string;
       ktp: KtpCard;
     };
+
+// ─────────────── NW (нормализованные виды работ) ───────────────
+
+export interface NwWorkType {
+  code: string;
+  name: string;
+  description: string | null;
+  sort_order: number;
+  items_count: number;
+}
+
+export interface NwDictEntry {
+  code: string;
+  name?: string;
+  description?: string;
+  sort_order: number;
+}
+
+export interface NwDictionaries {
+  object_types: NwDictEntry[];
+  building_technologies: NwDictEntry[];
+  location_scopes: NwDictEntry[];
+  stages: NwDictEntry[];
+  repair_classes: NwDictEntry[];
+}
+
+export interface NwItem {
+  code: string;
+  unique_label: string;
+  work_type_code: string;
+  work_type_name: string;
+  subtype: string | null;
+  object_type_codes: string[];
+  building_technology_codes: string[];
+  location_scope_codes: string[];
+  stage_codes: string[];
+  repair_class_codes: string[];
+  is_capital_repair: boolean | null;
+  requires_permit_review: boolean;
+  notes: string | null;
+  sort_order: number;
+  primary_fer_refs: string[] | null;
+}
+
+export interface NwItemDetail extends NwItem {
+  work_type_description: string | null;
+  fer_mappings: NwFerMapping[];
+}
+
+export interface NwFerMapping {
+  fer_collection_num: number;
+  fer_section_num: number;
+  mapping_type: "direct" | "partial" | "composite_part" | "out_of_scope_subscope";
+  confidence: "high" | "medium" | "low";
+  is_primary: boolean;
+  notes: string | null;
+  // в /nw/items/{code}.fer_mappings подтягиваются названия из fer.collections/sections:
+  collection_name?: string | null;
+  section_title?: string | null;
+  // в /nw/mapping добавляются поля:
+  id?: number;
+  nw_item_code?: string;
+  nw_label?: string;
+  nw_work_type?: string;
+}
+
+// ─────────── ProjectWorkPlan (КТП проекта) ───────────
+
+export type WorkPlanStatus =
+  | "auto_proposed"
+  | "confirmed"
+  | "removed"
+  | "custom_added"
+  | "fer_mapped"
+  | "scheduled"
+  | "needs_volume"
+  | "needs_review";
+
+export interface WorkPlanCard {
+  id: number;
+  parent_id: number | null;
+  nw_item_code: string;
+  nw_label: string;
+  work_type_code: string;
+  work_type_name: string;
+  unit: string | null;
+  quantity: number | null;
+  status: WorkPlanStatus;
+  object_type_code: string | null;
+  building_technology_code: string | null;
+  location_scope_code: string | null;
+  stage_code: string | null;
+  is_capital_repair: boolean | null;
+  fer_table_id: number | null;
+  fer_table_title: string | null;
+  fer_table_code: string | null;
+  fer_match_score: number | null;
+  fer_match_source: string | null;
+  fer_candidates: WorkPlanFerCandidate[] | null;
+  fer_row_id: number | null;
+  fer_row_clarification: string | null;
+  fer_row_h_hour: number | null;
+  human_hours_per_unit: number | null;
+  workers_count: number | null;
+  duration_days: number | null;
+  notes: string | null;
+  source_label: string | null;
+  source_section: string | null;
+  created_at: string;
+  confirmed_at: string | null;
+  estimate_links_count: number;
+}
+
+export interface WorkPlanFerCandidate {
+  id: number;
+  title: string;
+  coll_num: string | number | null;
+  section_title: string | null;
+  mapping_type: string;
+  confidence: string;
+  is_primary: boolean;
+}
+
+export interface WorkPlanEstimateRow {
+  id: string;
+  row_order: number | null;
+  section: string | null;
+  work_name: string;
+  unit: string | null;
+  quantity: number | null;
+  unit_price: number | null;
+  total_price: number | null;
+  labor_hours: number | null;
+  share: number;
+}
+
+export interface WorkPlanCardDetail {
+  card: WorkPlanCard;
+  estimate_rows: WorkPlanEstimateRow[];
+}
+
+export interface FerRowOption {
+  id: number;
+  clarification: string;
+  h_hour: number | null;
+  m_hour: number | null;
+  row_slug: string | null;
+}
+
+export interface WorkPlanResponse {
+  items: WorkPlanCard[];
+  total: number;
+}
+
+export interface WorkPlanPalette {
+  estimate_kind: number;
+  wt_codes: string[];
+  nw_items: Array<{
+    nw_item_code: string;
+    unique_label: string;
+    subtype: string | null;
+    work_type_code: string;
+    work_type_name: string;
+    stage_code: string | null;
+  }>;
+}
+
+export interface WorkPlanAutoSummary {
+  batch_id: string;
+  estimate_kind: number;
+  estimate_rows_total: number;
+  matched_rows: number;
+  unmatched_rows: number;
+  unmatched_examples: Array<{ id: string; work_name: string; section: string | null }>;
+  cards_created: number;
+  expected_added: number;
+  aggregate_decomposed: Array<{ parent_id: number; children: number[] }>;
+  palette_size: number;
+}
+
+export type WorkPlanCardPatch = Partial<{
+  object_type_code: string | null;
+  building_technology_code: string | null;
+  location_scope_code: string | null;
+  stage_code: string | null;
+  is_capital_repair: boolean | null;
+  unit: string | null;
+  quantity: number | null;
+  workers_count: number | null;
+  status: WorkPlanStatus;
+  notes: string | null;
+}>;

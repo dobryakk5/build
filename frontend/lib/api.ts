@@ -20,6 +20,17 @@ import type {
   KtpCard,
   KtpGenerateResponse,
   KtpGroup,
+  NwDictionaries,
+  NwFerMapping,
+  NwItem,
+  NwItemDetail,
+  NwWorkType,
+  WorkPlanAutoSummary,
+  WorkPlanCard,
+  WorkPlanCardPatch,
+  WorkPlanCardDetail,
+  WorkPlanPalette,
+  WorkPlanResponse,
   Project,
   User,
 } from "./types";
@@ -477,4 +488,129 @@ export const ktp = {
     }),
   card: (projectId: string, groupId: string) =>
     request<KtpCard>(`/projects/${projectId}/ktp/groups/${groupId}/card`),
+};
+
+export const nw = {
+  workTypes: () => request<NwWorkType[]>("/nw/work-types"),
+  dictionaries: () => request<NwDictionaries>("/nw/dictionaries"),
+  items: (filters: {
+    work_type?: string;
+    q?: string;
+    object_type?: string;
+    location_scope?: string;
+    stage?: string;
+    repair_class?: string;
+  } = {}) => {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([k, v]) => {
+      if (v) params.set(k, v);
+    });
+    const qs = params.toString();
+    return request<NwItem[]>(`/nw/items${qs ? `?${qs}` : ""}`);
+  },
+  item: (code: string) => request<NwItemDetail>(`/nw/items/${code}`),
+  mapping: (filters: {
+    nw_code?: string;
+    fer_collection_num?: number;
+    fer_section_num?: number;
+    mapping_type?: string;
+    confidence?: string;
+    primary_only?: boolean;
+  } = {}) => {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
+    });
+    const qs = params.toString();
+    return request<NwFerMapping[]>(`/nw/mapping${qs ? `?${qs}` : ""}`);
+  },
+};
+
+export const workPlan = {
+  base: (pid: string, bid: string) => `/projects/${pid}/batches/${bid}/work-plan`,
+  list: (pid: string, bid: string) =>
+    request<WorkPlanResponse>(`/projects/${pid}/batches/${bid}/work-plan`),
+  palette: (pid: string, bid: string) =>
+    request<WorkPlanPalette>(`/projects/${pid}/batches/${bid}/work-plan/palette`),
+  autoCreate: (pid: string, bid: string, force = false) =>
+    request<WorkPlanAutoSummary>(`/projects/${pid}/batches/${bid}/work-plan/auto?force=${force}`, {
+      method: "POST",
+    }),
+  update: (pid: string, bid: string, planId: number, body: WorkPlanCardPatch) =>
+    request<{ id: number; updated: string[] }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  confirm: (pid: string, bid: string, planId: number) =>
+    request<{ id: number; status: string }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}/confirm`,
+      { method: "POST" },
+    ),
+  confirmAll: (pid: string, bid: string) =>
+    request<{ confirmed: number }>(`/projects/${pid}/batches/${bid}/work-plan/confirm-all`, {
+      method: "POST",
+    }),
+  add: (pid: string, bid: string, body: { nw_item_code: string; unit?: string; quantity?: number; notes?: string }) =>
+    request<{ id: number; status: string }>(`/projects/${pid}/batches/${bid}/work-plan`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  remove: (pid: string, bid: string, planId: number, hard = false) =>
+    request<{ id: number; deleted: boolean; hard: boolean }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}?hard=${hard}`,
+      { method: "DELETE" },
+    ),
+  llmResolve: (pid: string, bid: string) =>
+    request<{
+      unmatched_before: number;
+      matched_by_llm: number;
+      still_unmatched: number;
+      new_cards: number;
+      linked_to_existing: number;
+    }>(`/projects/${pid}/batches/${bid}/work-plan/llm-resolve`, { method: "POST" }),
+  unmatched: (pid: string, bid: string) =>
+    request<{ items: Array<{ id: string; section: string | null; work_name: string; unit: string | null; quantity: number | null; total_price: number | null }>; total: number }>(
+      `/projects/${pid}/batches/${bid}/work-plan/unmatched`,
+    ),
+  linkEstimates: (pid: string, bid: string, planId: number, estimateIds: string[]) =>
+    request<{ plan_id: number; linked: number }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}/link-estimates`,
+      { method: "POST", body: JSON.stringify({ estimate_ids: estimateIds }) },
+    ),
+  detail: (pid: string, bid: string, planId: number) =>
+    request<WorkPlanCardDetail>(`/projects/${pid}/batches/${bid}/work-plan/${planId}/details`),
+  matchFer: (pid: string, bid: string, planId: number) =>
+    request<{ plan_id: number; fer_table_id: number | null; score: number; candidates_count: number; reason: string | null; source: string }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}/match-fer`,
+      { method: "POST" },
+    ),
+  matchFerAll: (pid: string, bid: string) =>
+    request<{ total_processed: number; fer_mapped: number; needs_review: number; no_candidates: number; errors: number }>(
+      `/projects/${pid}/batches/${bid}/work-plan/match-fer-all`,
+      { method: "POST" },
+    ),
+  computeDurations: (pid: string, bid: string) =>
+    request<{ total: number; computed: number; skipped: number }>(
+      `/projects/${pid}/batches/${bid}/work-plan/compute-durations`,
+      { method: "POST" },
+    ),
+  buildGantt: (pid: string, bid: string, body: { start_date: string; hours_per_day?: number; replace?: boolean }) =>
+    request<{ created: number; deps: number; stages: number; warning?: string; fallback_used?: number; fallback_note?: string | null }>(
+      `/projects/${pid}/batches/${bid}/work-plan/build-gantt`,
+      { method: "POST", body: JSON.stringify(body) },
+    ),
+  ferRows: (pid: string, bid: string, planId: number) =>
+    request<{ items: import("./types").FerRowOption[]; total: number }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}/fer-rows`,
+    ),
+  setFerRow: (pid: string, bid: string, planId: number, ferRowId: number | null) =>
+    request<{ plan_id: number; fer_row_id: number | null; duration_recomputed: any }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}/set-fer-row`,
+      { method: "POST", body: JSON.stringify({ fer_row_id: ferRowId }) },
+    ),
+  autoPickFerRow: (pid: string, bid: string, planId: number) =>
+    request<{ plan_id: number; fer_row_id: number | null; score?: number; reason?: string; duration?: any; skipped?: string }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}/auto-pick-fer-row`,
+      { method: "POST" },
+    ),
 };
