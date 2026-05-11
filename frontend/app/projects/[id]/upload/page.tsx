@@ -294,7 +294,7 @@ export default function UploadPage() {
       {(status === "pending" || status === "processing") && (
         <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.2)", borderRadius: 6 }}>
           <div style={{ fontSize: 13, color: "var(--blue-dark)", fontWeight: 500 }}>
-            ⏳ {status === "pending" ? "В очереди..." : "Парсим смету и строим Ганта..."}
+            ⏳ {status === "pending" ? "В очереди..." : "Парсим смету ..."}
           </div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Это займёт несколько секунд</div>
         </div>

@@ -65,7 +65,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
     { id: "estimate", label: "📋 Смета", matchPath: `/projects/${id}/estimate`, href: withBatch(`/projects/${id}/estimate`) },
     { id: "work-plan", label: "📐 План", matchPath: `/projects/${id}/work-plan`, href: withBatch(`/projects/${id}/work-plan`) },
     { id: "journal", label: "🗒 Журнал", matchPath: `/projects/${id}/journal`, href: `/projects/${id}/journal` },
-    { id: "fer", label: "🧾 ФЕР", matchPath: `/projects/${id}/fer`, href: `/projects/${id}/fer` },
+    { id: "references", label: "🧾 Справочники", matchPath: `/projects/${id}/fer`, href: `/projects/${id}/fer` },
     { id: "upload", label: "⬆ Загрузка", matchPath: `/projects/${id}/upload`, href: `/projects/${id}/upload` },
     { id: "ktp", label: "🗂 КТП", matchPath: `/projects/${id}/ktp`, href: withBatch(`/projects/${id}/ktp`) },
     ...(canManage ? [{ id: "settings", label: "⚙ Настройки", matchPath: `/projects/${id}/settings`, href: `/projects/${id}/settings` }] : []),
@@ -228,7 +228,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
             href={tab.href}
             onClick={(event) => {
               const isPlainLeftClick = event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
-              if (isPlainLeftClick && tab.id === "fer" && pathname.startsWith(tab.matchPath)) {
+              if (isPlainLeftClick && tab.id === "references" && pathname.startsWith(tab.matchPath) && !searchParams.get("tab") && !searchParams.get("table")) {
                 event.preventDefault();
                 window.dispatchEvent(new Event("fer:navigate-root"));
               }

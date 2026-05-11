@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
-import { workPlan as wpApi, nw as nwApi } from "@/lib/api";
+import { estimates, workPlan as wpApi, nw as nwApi, fer as ferApi } from "@/lib/api";
 import type {
   FerRowOption,
+  FerSearchResult,
   NwDictionaries,
   NwItem,
   WorkPlanCard,
@@ -122,8 +123,40 @@ export default function WorkPlanPage() {
   const [detailCard, setDetailCard] = useState<WorkPlanCard | null>(null);
   const [openWtCodes, setOpenWtCodes] = useState<Set<string> | null>(null);
   const [matchingFerCardIds, setMatchingFerCardIds] = useState<Set<number>>(new Set());
+  const [manualFerCard, setManualFerCard] = useState<WorkPlanCard | null>(null);
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [resolvingBatch, setResolvingBatch] = useState(!batchId);
   const autoTriggeredRef = useRef(false);
+
+  useEffect(() => {
+    if (batchId) {
+      setResolvingBatch(false);
+      return;
+    }
+
+    let cancelled = false;
+    setResolvingBatch(true);
+    estimates
+      .batches(projectId)
+      .then((batches) => {
+        if (cancelled) return;
+        const latestBatchId = batches.length ? batches[batches.length - 1]?.id ?? null : null;
+        if (latestBatchId) {
+          router.replace(`/projects/${projectId}/work-plan?batch=${latestBatchId}`);
+          return;
+        }
+        setResolvingBatch(false);
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        setError(e.message ?? "Не удалось найти загруженную смету.");
+        setResolvingBatch(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [batchId, projectId, router]);
 
   const reload = useCallback(async () => {
     if (!batchId) return;
@@ -322,6 +355,13 @@ export default function WorkPlanPage() {
     }
   }
 
+  async function handleManualFerSelect(card: WorkPlanCard, result: FerSearchResult | null) {
+    if (!batchId) return;
+    await wpApi.setFerTable(projectId, batchId, card.id, result?.table_id ?? null);
+    setManualFerCard(null);
+    await reload();
+  }
+
   async function handleLinkSelected() {
     if (!batchId || !linkTarget) {
       alert("Выберите карточку для привязки");
@@ -390,6 +430,10 @@ export default function WorkPlanPage() {
     const next = new Set(unmatchedSelected);
     if (next.has(id)) next.delete(id); else next.add(id);
     setUnmatchedSelected(next);
+  }
+
+  if (resolvingBatch) {
+    return <div style={{ padding: 40, color: COLORS.muted, fontSize: 14 }}>Открываю последний план работ…</div>;
   }
 
   if (!batchId) {
@@ -681,25 +725,53 @@ export default function WorkPlanPage() {
                   </span>
                 </button>
                 {isOpen && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                    {group.cards.map((c) => (
-                      <CardItem
-                        key={c.id}
-                        card={c}
-                        children={childrenOf(c.id)}
-                        isEditing={editingId === c.id}
-                        onEdit={() => setEditingId(c.id)}
-                        onClose={() => setEditingId(null)}
-                        onPatch={(p) => patchCard(c.id, p)}
-                        onConfirm={() => confirmCard(c.id)}
-                        onRemove={() => removeCard(c.id)}
-                        onMatchFer={() => handleMatchFerCard(c.id)}
-                        isMatchingFer={matchingFerCardIds.has(c.id)}
-                        onPickRow={() => setFerRowDialogCard(c)}
-                        onOpenDetails={() => setDetailCard(c)}
-                        dicts={{ otMap, btMap, lsMap, stMap }}
-                      />
-                    ))}
+                  <div style={{ background: COLORS.cardBg, border: `1px solid ${COLORS.border}`, borderRadius: 6, overflowX: "auto" }}>
+                    <table style={{ width: "max-content", minWidth: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ background: "#1e293b" }}>
+                          {["Работа", "Ед.", "Кол-во", "Статус", "ФЕР", "Трудоемкость", "Действия"].map((header) => (
+                            <th
+                              key={header}
+                              style={{
+                                ...planThStyle,
+                                textAlign: ["Ед.", "Кол-во", "Трудоемкость"].includes(header) ? "right" : "left",
+                                minWidth:
+                                  header === "Работа" ? 420 :
+                                  header === "ФЕР" ? 85 :
+                                  header === "Трудоемкость" ? 75 :
+                                  header === "Действия" ? 140 : 86,
+                              }}
+                            >
+                              {header}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {group.cards.map((c, index) => (
+                          <PlanTableRow
+                            key={c.id}
+                            projectId={projectId}
+                            batchId={batchId}
+                            card={c}
+                            children={childrenOf(c.id)}
+                            index={index}
+                            isEditing={editingId === c.id}
+                            onEdit={() => setEditingId(c.id)}
+                            onClose={() => setEditingId(null)}
+                            onPatch={(p) => patchCard(c.id, p)}
+                            onConfirm={() => confirmCard(c.id)}
+                            onRemove={() => removeCard(c.id)}
+                            onMatchFer={() => handleMatchFerCard(c.id)}
+                            isMatchingFer={matchingFerCardIds.has(c.id)}
+                            onManualFer={() => setManualFerCard(c)}
+                            onPickRow={() => setFerRowDialogCard(c)}
+                            onOpenDetails={() => setDetailCard(c)}
+                            dicts={{ otMap, btMap, lsMap, stMap }}
+                          />
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </section>
@@ -747,6 +819,20 @@ export default function WorkPlanPage() {
             setFerRowDialogCard(detailCard);
             setDetailCard(null);
           }}
+          onReplaceFer={(cardToReplace) => {
+            setManualFerCard(cardToReplace);
+            setDetailCard(null);
+          }}
+        />
+      )}
+
+      {manualFerCard && (
+        <WorkPlanFerSearchModal
+          card={manualFerCard}
+          projectId={projectId}
+          batchId={batchId}
+          onClose={() => setManualFerCard(null)}
+          onSelect={(result) => handleManualFerSelect(manualFerCard, result)}
         />
       )}
     </div>
@@ -808,7 +894,8 @@ function FerRowDialog({
       const res = await wpApi.autoPickFerRow(projectId, batchId, card.id);
       if (res.fer_row_id) {
         setSelected(res.fer_row_id);
-        alert(`LLM выбрал строку #${res.fer_row_id}\nUverennost: ${res.score?.toFixed(2)}\nОбоснование: ${res.reason ?? "—"}`);
+        const pickedPosition = rows?.find((row) => row.id === res.fer_row_id)?.position;
+        alert(`LLM выбрал строку ${formatFerRowPosition(pickedPosition)}\nUverennost: ${res.score?.toFixed(2)}\nОбоснование: ${res.reason ?? "—"}`);
       } else {
         alert(`LLM не смог подобрать: ${res.skipped ?? "?"}`);
       }
@@ -884,7 +971,7 @@ function FerRowDialog({
                       <input type="radio" checked={selected === r.id} onChange={() => setSelected(r.id)} />
                     </td>
                     <td style={{ padding: "6px 10px", lineHeight: 1.3 }}>
-                      <code style={{ fontSize: 10, color: COLORS.muted, marginRight: 4 }}>#{r.id}</code>
+                      <code style={{ fontSize: 10, color: COLORS.muted, marginRight: 4 }}>с{r.position}</code>
                       {r.clarification}
                     </td>
                     <td style={{ padding: "6px 10px", textAlign: "right", fontFamily: "var(--mono, monospace)" }}>
@@ -921,18 +1008,353 @@ function FerRowDialog({
   );
 }
 
+function WorkPlanFerSearchModal({
+  card,
+  projectId,
+  batchId,
+  onClose,
+  onSelect,
+}: {
+  card: WorkPlanCard;
+  projectId: string;
+  batchId: string;
+  onClose: () => void;
+  onSelect: (result: FerSearchResult | null) => Promise<void>;
+}) {
+  const [q, setQ] = useState(card.source_label ?? card.nw_label);
+  const [results, setResults] = useState<FerSearchResult[]>([]);
+  const [ferScopes, setFerScopes] = useState<Array<{ key: string; label: string; collectionId?: number; sectionId?: number }>>([]);
+  const [allFerScopes, setAllFerScopes] = useState<Array<{ key: string; label: string; collectionId?: number; sectionId?: number }>>([]);
+  const [scopeSource, setScopeSource] = useState<"nw" | "wt">("nw");
+  const [scopeMode, setScopeMode] = useState<"mapped" | "all">("mapped");
+  const [scopeLoading, setScopeLoading] = useState(true);
+  const [searching, setSearching] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setScopeLoading(true);
+    setError(null);
+    Promise.all([nwApi.item(card.nw_item_code), wpApi.ferScopes(projectId, batchId)])
+      .then(([item, projectFer]) => {
+        if (cancelled) return;
+        const mappings = item.fer_mappings.length > 0 ? item.fer_mappings : item.work_type_fer_mappings ?? [];
+        setScopeSource(item.fer_mappings.length > 0 ? "nw" : "wt");
+        const seen = new Set<string>();
+        const scopes: Array<{ key: string; label: string; collectionId?: number; sectionId?: number }> = [];
+        for (const mapping of mappings) {
+          const collectionId = mapping.collection_id ?? undefined;
+          const sectionId = mapping.section_id ?? undefined;
+          if (!collectionId && !sectionId) continue;
+          const key = sectionId ? `s:${sectionId}` : `c:${collectionId}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          scopes.push({
+            key,
+            collectionId,
+            sectionId,
+            label: `${String(mapping.fer_collection_num).padStart(2, "0")}-${String(mapping.fer_section_num).padStart(2, "0")}`,
+          });
+        }
+        setFerScopes(scopes);
+        setAllFerScopes(
+          projectFer.scopes.map((scope) => ({
+            key: `s:${scope.section_id}`,
+            sectionId: scope.section_id,
+            collectionId: scope.collection_id,
+            label: `Сб. ${scope.collection_num} · ${scope.section_title}`,
+          })),
+        );
+      })
+      .catch((e: any) => {
+        if (cancelled) return;
+        setFerScopes([]);
+        setAllFerScopes([]);
+        setError(e.message ?? "Не удалось загрузить область поиска ФЕР");
+      })
+      .finally(() => {
+        if (!cancelled) setScopeLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [batchId, card.nw_item_code, projectId]);
+
+  useEffect(() => {
+    const query = q.trim();
+    const activeScopes = scopeMode === "all" ? allFerScopes : ferScopes;
+    if (query.length < 2) {
+      setResults([]);
+      return;
+    }
+    if (scopeLoading) return;
+    if (activeScopes.length === 0) {
+      setResults([]);
+      return;
+    }
+    if (debounce.current) clearTimeout(debounce.current);
+    let cancelled = false;
+    debounce.current = setTimeout(async () => {
+      setSearching(true);
+      setError(null);
+      try {
+        const scopedResults = await Promise.all(
+          activeScopes.map((scope) =>
+            ferApi
+              .search(query, 50, scope.sectionId ? { sectionId: scope.sectionId } : { collectionId: scope.collectionId })
+              .catch(() => []),
+          ),
+        );
+        if (cancelled) return;
+        const byTableId = new Map<number, FerSearchResult>();
+        for (const result of scopedResults.flat()) {
+          if (!byTableId.has(result.table_id)) {
+            byTableId.set(result.table_id, result);
+          }
+        }
+        setResults(Array.from(byTableId.values()).slice(0, 50));
+      } catch (e: any) {
+        if (cancelled) return;
+        setResults([]);
+        setError(e.message ?? "Не удалось выполнить поиск ФЕР");
+      } finally {
+        if (!cancelled) setSearching(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      if (debounce.current) clearTimeout(debounce.current);
+    };
+  }, [allFerScopes, ferScopes, q, scopeLoading, scopeMode]);
+
+  useEffect(() => {
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onEsc);
+    return () => document.removeEventListener("keydown", onEsc);
+  }, [onClose]);
+
+  async function pick(result: FerSearchResult | null) {
+    if (result?.effective_ignored) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onSelect(result);
+    } catch (e: any) {
+      setError(e.message ?? "Не удалось назначить ФЕР");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const activeScopeCount = scopeMode === "all" ? allFerScopes.length : ferScopes.length;
+
+  return (
+    <div
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "#0f172a80",
+        zIndex: 120,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 20,
+      }}
+    >
+      <div
+        style={{
+          width: 900,
+          maxWidth: "96vw",
+          maxHeight: "86vh",
+          background: "white",
+          borderRadius: 8,
+          display: "flex",
+          flexDirection: "column",
+          boxShadow: "0 24px 64px rgba(0,0,0,.28)",
+          overflow: "hidden",
+        }}
+      >
+        <div style={{ padding: "14px 18px", borderBottom: `1px solid ${COLORS.border}`, display: "flex", gap: 12 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4, color: COLORS.text }}>
+              Ручное назначение ФЕР
+            </div>
+            <div style={{ fontSize: 12, color: COLORS.muted, lineHeight: 1.4 }}>
+              {card.source_label ?? card.nw_label}
+            </div>
+            {card.fer_table_id && (
+              <div style={{ marginTop: 4, fontSize: 11, color: COLORS.primary }}>
+                Сейчас: {formatFerChipLabel(card)}
+              </div>
+            )}
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: COLORS.muted, fontSize: 20, lineHeight: 1 }}>
+            ×
+          </button>
+        </div>
+
+        <div style={{ padding: "12px 18px", borderBottom: `1px solid ${COLORS.border}` }}>
+          <input
+            autoFocus
+            value={q}
+            onChange={(event) => setQ(event.target.value)}
+            placeholder="Поиск только по ФЕР, привязанным к этому NW..."
+            style={{ ...inputStyle, boxSizing: "border-box", width: "100%" }}
+          />
+          <div style={{ marginTop: 8, fontSize: 11, color: COLORS.muted, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+            {scopeLoading ? (
+              <span>Загружаю привязки NW к ФЕР...</span>
+            ) : allFerScopes.length > 0 || ferScopes.length > 0 ? (
+              <>
+                <span>Область поиска:</span>
+                {allFerScopes.length > 0 && (
+                  <Chip
+                    label="Все"
+                    color={scopeMode === "all" ? "white" : COLORS.primary}
+                    bg={scopeMode === "all" ? COLORS.primary : COLORS.primaryBg}
+                    onClick={() => setScopeMode("all")}
+                    title="Искать по всем ФЕР, доступным для типа загруженной сметы"
+                  />
+                )}
+                {ferScopes.map((scope) => (
+                  <Chip
+                    key={scope.key}
+                    label={scope.label}
+                    color={scopeMode === "mapped" ? "white" : COLORS.primary}
+                    bg={scopeMode === "mapped" ? COLORS.primary : COLORS.primaryBg}
+                    onClick={() => setScopeMode("mapped")}
+                    title={`Искать по ФЕР ${scopeSource === "wt" ? "родительского WT" : "этого NW"}`}
+                  />
+                ))}
+                {ferScopes.length === 0 && <span>Для NW/WT нет узких меток, доступен режим «Все».</span>}
+              </>
+            ) : (
+              <span style={{ color: COLORS.warn }}>У этого NW и родительского WT нет привязанных разделов ФЕР.</span>
+            )}
+          </div>
+          {error && <div style={{ marginTop: 8, fontSize: 12, color: COLORS.err }}>{error}</div>}
+        </div>
+
+        <div style={{ flex: 1, overflow: "auto" }}>
+          {(scopeLoading || searching) && <div style={{ padding: 24, textAlign: "center", color: COLORS.muted, fontSize: 13 }}>{scopeLoading ? "Загружаю область поиска..." : "Поиск..."}</div>}
+          {!scopeLoading && !searching && activeScopeCount === 0 && (
+            <div style={{ padding: 24, textAlign: "center", color: COLORS.muted, fontSize: 13 }}>Нет привязанных ФЕР для ручного назначения.</div>
+          )}
+          {!scopeLoading && !searching && activeScopeCount > 0 && q.trim().length >= 2 && results.length === 0 && (
+            <div style={{ padding: 24, textAlign: "center", color: COLORS.muted, fontSize: 13 }}>
+              Ничего не найдено {scopeMode === "all" ? "в доступных ФЕР для типа сметы" : "в привязанных разделах ФЕР"}
+            </div>
+          )}
+          {!scopeLoading && !searching && activeScopeCount > 0 && q.trim().length < 2 && (
+            <div style={{ padding: 24, textAlign: "center", color: COLORS.muted, fontSize: 13 }}>Введите минимум 2 символа</div>
+          )}
+
+          {!scopeLoading && !searching && results.length > 0 && (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead style={{ position: "sticky", top: 0, background: COLORS.bg, zIndex: 1 }}>
+                <tr style={{ borderBottom: `1px solid ${COLORS.border}` }}>
+                  <th style={manualFerThStyle}>Код</th>
+                  <th style={manualFerThStyle}>Иерархия</th>
+                  <th style={manualFerThStyle}>Таблица</th>
+                  <th style={manualFerThStyle}>Работа</th>
+                  <th style={{ ...manualFerThStyle, textAlign: "right" }}>Строк</th>
+                </tr>
+              </thead>
+              <tbody>
+                {results.map((result) => {
+                  const disabled = saving || result.effective_ignored;
+                  const selected = result.table_id === card.fer_table_id;
+                  return (
+                    <tr
+                      key={result.table_id}
+                      onClick={() => !disabled && pick(result)}
+                      style={{
+                        borderBottom: `1px solid ${COLORS.border}`,
+                        cursor: disabled ? "default" : "pointer",
+                        opacity: result.effective_ignored ? 0.5 : 1,
+                        background: selected ? COLORS.primaryBg : result.effective_ignored ? "#f8fafc" : "white",
+                      }}
+                      onMouseEnter={(event) => {
+                        if (!disabled && !selected) event.currentTarget.style.background = COLORS.bg;
+                      }}
+                      onMouseLeave={(event) => {
+                        event.currentTarget.style.background = selected ? COLORS.primaryBg : result.effective_ignored ? "#f8fafc" : "white";
+                      }}
+                    >
+                      <td style={{ ...manualFerTdStyle, fontFamily: "var(--mono, monospace)", whiteSpace: "nowrap", color: COLORS.primary, fontWeight: 700 }}>
+                        {formatFerSearchCode(result)}
+                      </td>
+                      <td style={{ ...manualFerTdStyle, color: COLORS.muted, minWidth: 170 }}>
+                        {formatFerBreadcrumb(result)}
+                      </td>
+                      <td style={{ ...manualFerTdStyle, minWidth: 260 }}>
+                        <div style={{ fontWeight: 600, color: COLORS.text, lineHeight: 1.35 }}>{result.table_title}</div>
+                        {result.effective_ignored && <div style={{ marginTop: 4, color: COLORS.warn, fontSize: 11 }}>Игнорируется и недоступна для назначения</div>}
+                      </td>
+                      <td style={{ ...manualFerTdStyle, color: COLORS.muted, minWidth: 220, lineHeight: 1.35 }}>
+                        {result.common_work_name ?? "—"}
+                      </td>
+                      <td style={{ ...manualFerTdStyle, textAlign: "right", fontFamily: "var(--mono, monospace)" }}>
+                        {result.row_count}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        {card.fer_table_id && (
+          <div style={{ padding: "10px 18px", borderTop: `1px solid ${COLORS.border}`, background: "#fef9f9" }}>
+            <button
+              onClick={() => !saving && pick(null)}
+              disabled={saving}
+              style={{ ...btn("white", COLORS.err), borderColor: "#ef444440", cursor: saving ? "wait" : "pointer" }}
+            >
+              Сбросить назначение ФЕР
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const manualFerThStyle: React.CSSProperties = {
+  padding: "8px 10px",
+  textAlign: "left",
+  color: COLORS.muted,
+  fontWeight: 700,
+  fontSize: 11,
+};
+
+const manualFerTdStyle: React.CSSProperties = {
+  padding: "9px 10px",
+  verticalAlign: "top",
+};
+
 function WorkPlanDetailPanel({
   projectId,
   batchId,
   card,
   onClose,
   onPickRow,
+  onReplaceFer,
 }: {
   projectId: string;
   batchId: string;
   card: WorkPlanCard;
   onClose: () => void;
   onPickRow: () => void;
+  onReplaceFer: (card: WorkPlanCard) => void;
 }) {
   const [detail, setDetail] = useState<WorkPlanCardDetail | null>(null);
   const [ferRows, setFerRows] = useState<FerRowOption[]>([]);
@@ -1032,7 +1454,24 @@ function WorkPlanDetailPanel({
         ) : (
           <div style={{ border: `1px solid ${COLORS.border}`, borderRadius: 6, padding: 12, fontSize: 12, marginBottom: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 6 }}>
-              <strong style={{ color: COLORS.text }}>ФЕР {formatFerCode(c)}</strong>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                <strong style={{ color: COLORS.text }}>ФЕР {formatFerCode(c)}</strong>
+                <button
+                  type="button"
+                  onClick={() => onReplaceFer(c)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    padding: 0,
+                    color: COLORS.primary,
+                    cursor: "pointer",
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  Заменить
+                </button>
+              </div>
               <Chip
                 label={c.fer_match_score != null ? `${(Number(c.fer_match_score) * 100).toFixed(0)}%` : "без оценки"}
                 color={COLORS.primary}
@@ -1050,10 +1489,12 @@ function WorkPlanDetailPanel({
               </div>
               {selectedFerRow || c.fer_row_id ? (
                 <div style={{ lineHeight: 1.35 }}>
-                  <code style={{ fontSize: 11, color: COLORS.muted, marginRight: 4 }}>#{c.fer_row_id}</code>
+                  <code style={{ fontSize: 11, color: COLORS.muted, marginRight: 4 }}>
+                    {formatFerRowPosition(selectedFerRow?.position)}
+                  </code>
                   {selectedFerRow?.clarification ?? c.fer_row_clarification ?? "Описание строки не найдено"}
                   <div style={{ color: COLORS.muted, marginTop: 4 }}>
-                    Чел.час: {formatMaybeNumber(selectedFerRow?.h_hour ?? c.fer_row_h_hour)} · Маш.час: {formatMaybeNumber(selectedFerRow?.m_hour)}
+                    Чел.час: {formatMaybeNumber(selectedFerRow?.h_hour ?? c.fer_row_h_hour)} · Маш.час: {formatMaybeNumber(selectedFerRow?.m_hour ?? c.fer_row_m_hour)}
                   </div>
                 </div>
               ) : (
@@ -1170,6 +1611,16 @@ function formatFerChipLabel(card: Pick<WorkPlanCard, "fer_table_code" | "fer_tab
   return card.fer_match_score ? `${code} (${(Number(card.fer_match_score) * 100).toFixed(0)}%)` : code;
 }
 
+function formatFerSearchCode(result: FerSearchResult) {
+  const source = `${result.table_title} ${result.table_url}`;
+  const match = source.match(/(\d{2}-\d{2}-\d{3})/);
+  return match?.[1] ?? `#${result.table_id}`;
+}
+
+function formatFerBreadcrumb(result: FerSearchResult) {
+  return [`Сб. ${result.collection.num}`, result.section?.title, result.subsection?.title].filter(Boolean).join(" › ");
+}
+
 function BuildGanttDialog({
   onClose, onBuild,
 }: {
@@ -1216,7 +1667,298 @@ function btn(bg: string, fg: string): React.CSSProperties {
   };
 }
 
+const planThStyle: React.CSSProperties = {
+  padding: "9px 12px",
+  fontSize: 10,
+  color: "#94a3b8",
+  textTransform: "uppercase",
+  letterSpacing: ".06em",
+  fontFamily: "var(--mono)",
+  fontWeight: 400,
+  borderRight: "1px solid #334155",
+  whiteSpace: "nowrap",
+};
+
+const planTdStyle: React.CSSProperties = {
+  padding: "8px 12px",
+  borderBottom: `1px solid ${COLORS.border}`,
+  verticalAlign: "top",
+};
+
+function formatFerRowPosition(position?: number | null) {
+  return position != null ? `с${position}` : "с—";
+}
+
+function FerRowPositionBadge({
+  projectId,
+  batchId,
+  card,
+  onClick,
+}: {
+  projectId: string;
+  batchId: string;
+  card: WorkPlanCard;
+  onClick?: () => void;
+}) {
+  const [position, setPosition] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!card.fer_row_id) {
+      setPosition(null);
+      return;
+    }
+    let cancelled = false;
+    wpApi
+      .ferRows(projectId, batchId, card.id)
+      .then((response) => {
+        if (!cancelled) {
+          setPosition(response.items.find((row) => row.id === card.fer_row_id)?.position ?? null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setPosition(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [batchId, card.fer_row_id, card.id, projectId]);
+
+  return (
+    <span
+      onClick={(event) => {
+        if (!onClick) return;
+        event.stopPropagation();
+        onClick();
+      }}
+      role={onClick ? "button" : undefined}
+      tabIndex={onClick ? 0 : undefined}
+      title={onClick ? "Сменить строку ФЕР" : undefined}
+      style={{
+        fontSize: 10,
+        color: onClick ? "#7c3aed" : COLORS.muted,
+        fontFamily: "var(--mono, monospace)",
+        cursor: onClick ? "pointer" : "default",
+        textDecoration: onClick ? "underline" : "none",
+        textUnderlineOffset: 2,
+      }}
+    >
+      {formatFerRowPosition(position)}
+    </span>
+  );
+}
+
+function PlanTableRow({
+  projectId,
+  batchId,
+  card,
+  children,
+  index,
+  depth = 0,
+  isEditing = false,
+  onEdit,
+  onClose,
+  onPatch,
+  onConfirm,
+  onRemove,
+  onMatchFer,
+  isMatchingFer = false,
+  onManualFer,
+  onPickRow,
+  onOpenDetails,
+  dicts,
+}: {
+  projectId: string;
+  batchId: string;
+  card: WorkPlanCard;
+  children: WorkPlanCard[];
+  index: number;
+  depth?: number;
+  isEditing?: boolean;
+  onEdit?: () => void;
+  onClose?: () => void;
+  onPatch?: (p: WorkPlanCardPatch) => void;
+  onConfirm?: () => void;
+  onRemove?: () => void;
+  onMatchFer?: () => void;
+  isMatchingFer?: boolean;
+  onManualFer?: () => void;
+  onPickRow?: () => void;
+  onOpenDetails?: () => void;
+  dicts: { otMap: Record<string, string>; btMap: Record<string, string>; lsMap: Record<string, string>; stMap: Record<string, string> };
+}) {
+  const stCol = STATUS_COLOR[card.status];
+  const quantity = card.quantity != null ? Number(card.quantity) : null;
+  const hoursPerUnit = card.human_hours_per_unit != null ? Number(card.human_hours_per_unit) : null;
+  const totalHours = quantity != null && hoursPerUnit != null ? quantity * hoursPerUnit : null;
+  const rowBg = card.status === "removed" ? COLORS.bg : index % 2 ? "#f8fafc" : "white";
+  const firstCellStyle = {
+    ...planTdStyle,
+    borderLeft: `${depth ? 2 : 3}px solid ${depth ? COLORS.borderHard : stCol.fg}`,
+    paddingLeft: 12 + depth * 20,
+  };
+
+  return (
+    <>
+      <tr style={{ background: rowBg, opacity: card.status === "removed" ? 0.55 : 1 }}>
+        <td style={firstCellStyle}>
+          <div style={{ minWidth: 360 }}>
+            {card.source_label ? (
+              <>
+                <div style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, lineHeight: 1.35 }}>
+                  {depth > 0 && <span style={{ color: COLORS.muted, marginRight: 6 }}>↳</span>}
+                  {card.source_label}
+                </div>
+                {card.source_section && (
+                  <div style={{ marginTop: 3, fontSize: 11, color: COLORS.muted }}>
+                    {card.source_section}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                {depth > 0 && <span style={{ color: COLORS.muted }}>↳</span>}
+                <code style={{ fontSize: 11, color: COLORS.muted }}>{card.nw_item_code}</code>
+                <strong style={{ fontSize: 13, color: COLORS.text }}>{card.nw_label}</strong>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
+              {card.object_type_code && <Chip label={dicts.otMap[card.object_type_code] ?? card.object_type_code} title="Тип объекта" />}
+              {card.building_technology_code && <Chip label={dicts.btMap[card.building_technology_code] ?? card.building_technology_code} title="Технология" />}
+              {card.location_scope_code && <Chip label={dicts.lsMap[card.location_scope_code] ?? card.location_scope_code} title="Зона" />}
+              {card.stage_code && <Chip label={dicts.stMap[card.stage_code] ?? card.stage_code} title="Этап" />}
+            </div>
+          </div>
+        </td>
+        <td style={{ ...planTdStyle, textAlign: "right", color: COLORS.muted }}>{card.unit ?? "—"}</td>
+        <td style={{ ...planTdStyle, textAlign: "right", fontFamily: "var(--mono, monospace)" }}>
+          {quantity != null ? quantity.toLocaleString("ru") : <span style={{ color: COLORS.warn }}>—</span>}
+        </td>
+        <td style={planTdStyle}>
+          <Chip
+            label={STATUS_LABEL[card.status]}
+            color={stCol.fg}
+            bg={stCol.bg}
+            onClick={onOpenDetails ? (e) => { e.stopPropagation(); onOpenDetails(); } : undefined}
+            title="Показать детали карточки"
+          />
+        </td>
+        <td style={planTdStyle}>
+          {card.fer_table_id ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap", minWidth: 72 }}>
+              <button
+                type="button"
+                onClick={onOpenDetails}
+                title={card.fer_table_title ? `${card.fer_table_title}\nИсточник: ${card.fer_match_source ?? "—"}` : `Источник: ${card.fer_match_source ?? "—"}`}
+                style={{
+                  border: `1px solid ${COLORS.primary}35`,
+                  background: COLORS.primaryBg,
+                  color: COLORS.primary,
+                  borderRadius: 4,
+                  padding: "3px 7px",
+                  fontFamily: "var(--mono, monospace)",
+                  fontSize: 11,
+                  fontWeight: 700,
+                  cursor: onOpenDetails ? "pointer" : "default",
+                }}
+              >
+                {formatFerCode(card)}
+              </button>
+              {onPickRow && card.status !== "removed" && !card.fer_row_id && (
+                <button
+                  type="button"
+                  onClick={onPickRow}
+                  style={smallBtn(card.fer_row_id ? "#7c3aed" : COLORS.muted)}
+                  title={card.fer_row_clarification ? `Уточнение: ${card.fer_row_clarification}` : "Выбрать уточнение строки ФЕР"}
+                >
+                  📋
+                </button>
+              )}
+              {card.fer_row_id && (
+                <FerRowPositionBadge
+                  projectId={projectId}
+                  batchId={batchId}
+                  card={card}
+                  onClick={card.status !== "removed" ? onPickRow : undefined}
+                />
+              )}
+            </div>
+          ) : card.status !== "removed" && (onManualFer || onMatchFer) ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 72 }}>
+              {onManualFer && (
+                <button type="button" onClick={onManualFer} style={smallBtn(COLORS.primary)} title="Назначить ФЕР вручную">
+                  ＋ ФЕР
+                </button>
+              )}
+              {onMatchFer && (
+                <button
+                  type="button"
+                  onClick={onMatchFer}
+                  disabled={isMatchingFer}
+                  style={smallBtn(COLORS.primary, isMatchingFer)}
+                  title={isMatchingFer ? "Подбирается ФЕР" : "Подобрать ФЕР векторным поиском"}
+                >
+                  {isMatchingFer ? <Spinner /> : "🤖"}
+                </button>
+              )}
+            </div>
+          ) : (
+            <span style={{ color: COLORS.muted }}>—</span>
+          )}
+        </td>
+        <td style={{ ...planTdStyle, textAlign: "right", fontFamily: "var(--mono, monospace)" }}>
+          {totalHours != null ? (
+            <div>
+              <div style={{ fontWeight: 700, color: COLORS.text }}>{formatMaybeNumber(totalHours)} чел-ч</div>
+              <div style={{ marginTop: 2, fontSize: 10, color: COLORS.muted }}>
+                {formatMaybeNumber(hoursPerUnit)} ч/{card.unit ?? "ед"}
+                {card.duration_days ? ` · ${card.duration_days} дн` : ""}
+              </div>
+            </div>
+          ) : card.duration_days ? (
+            <span>{card.duration_days} дн</span>
+          ) : (
+            <span style={{ color: COLORS.muted }}>—</span>
+          )}
+        </td>
+        <td style={planTdStyle}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 4 }}>
+            {onOpenDetails && <button onClick={onOpenDetails} style={smallBtn(COLORS.primary)} title="Детали">i</button>}
+            {onConfirm && card.status !== "confirmed" && card.status !== "removed" && (
+              <button onClick={onConfirm} style={smallBtn(COLORS.ok)} title="Подтвердить">✓</button>
+            )}
+            {onEdit && <button onClick={onEdit} style={smallBtn(COLORS.muted)} title="Редактировать">✎</button>}
+            {onRemove && card.status !== "removed" && (
+              <button onClick={onRemove} style={smallBtn(COLORS.err)} title="Удалить">✕</button>
+            )}
+          </div>
+        </td>
+      </tr>
+      {isEditing && onPatch && onClose && (
+        <tr>
+          <td colSpan={7} style={{ padding: 12, background: "#f8fafc", borderBottom: `1px solid ${COLORS.border}` }}>
+            <CardEditor card={card} onPatch={(p) => { onPatch(p); onClose(); }} onCancel={onClose} />
+          </td>
+        </tr>
+      )}
+      {children.map((child, childIndex) => (
+        <PlanTableRow
+          key={child.id}
+          projectId={projectId}
+          batchId={batchId}
+          card={child}
+          children={[]}
+          index={childIndex}
+          depth={depth + 1}
+          dicts={dicts}
+        />
+      ))}
+    </>
+  );
+}
+
 function CardItem({
+  projectId,
+  batchId,
   card,
   children,
   isEditing,
@@ -1227,10 +1969,13 @@ function CardItem({
   onRemove,
   onMatchFer,
   isMatchingFer = false,
+  onManualFer,
   onPickRow,
   onOpenDetails,
   dicts,
 }: {
+  projectId?: string;
+  batchId?: string;
   card: WorkPlanCard;
   children: WorkPlanCard[];
   isEditing: boolean;
@@ -1241,6 +1986,7 @@ function CardItem({
   onRemove: () => void;
   onMatchFer?: () => void;
   isMatchingFer?: boolean;
+  onManualFer?: () => void;
   onPickRow?: () => void;
   onOpenDetails?: () => void;
   dicts: { otMap: Record<string, string>; btMap: Record<string, string>; lsMap: Record<string, string>; stMap: Record<string, string> };
@@ -1347,12 +2093,33 @@ function CardItem({
             />
           )}
           {card.fer_row_id && card.fer_row_clarification && (
-            <Chip
-              label={`📋 строка #${card.fer_row_id}`}
-              color="#7c3aed"
-              bg="#7c3aed18"
-              title={`${card.fer_row_clarification}\n${card.fer_row_h_hour ?? "?"} ч`}
-            />
+            <span
+              title={`${card.fer_row_clarification}\n${card.fer_row_h_hour ?? card.fer_row_m_hour ?? "?"} ч`}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "2px 8px",
+                borderRadius: 12,
+                fontSize: 11,
+                fontWeight: 600,
+                color: "#7c3aed",
+                background: "#7c3aed18",
+                border: "1px solid #7c3aed30",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {projectId && batchId ? (
+                <FerRowPositionBadge
+                  projectId={projectId}
+                  batchId={batchId}
+                  card={card}
+                  onClick={card.status !== "removed" ? onPickRow : undefined}
+                />
+              ) : (
+                <span style={{ fontSize: 10, fontFamily: "var(--mono, monospace)" }}>{formatFerRowPosition()}</span>
+              )}
+            </span>
           )}
           {card.duration_days && (
             <Chip
@@ -1380,7 +2147,16 @@ function CardItem({
                 {isMatchingFer ? <Spinner /> : "🔗"}
               </button>
             )}
-            {card.fer_table_id && onPickRow && card.status !== "removed" && (
+            {onManualFer && card.status !== "removed" && (
+              <button
+                onClick={onManualFer}
+                style={smallBtn(card.fer_table_id ? "#7c3aed" : COLORS.primary)}
+                title={card.fer_table_id ? "Переназначить ФЕР вручную" : "Назначить ФЕР вручную"}
+              >
+                {card.fer_table_id ? "↻" : "＋"}
+              </button>
+            )}
+            {card.fer_table_id && onPickRow && card.status !== "removed" && !card.fer_row_id && (
               <button onClick={onPickRow} style={smallBtn("#7c3aed")} title="Выбрать строку расценки">📋</button>
             )}
             {card.status !== "confirmed" && card.status !== "removed" && (
@@ -1409,6 +2185,8 @@ function CardItem({
             {children.map((ch) => (
               <CardItem
                 key={ch.id}
+                projectId={projectId}
+                batchId={batchId}
                 card={ch}
                 children={[]}
                 isEditing={false}

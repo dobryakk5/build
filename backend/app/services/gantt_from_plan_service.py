@@ -99,43 +99,104 @@ async def compute_card_duration(
     if not card:
         raise ValueError(f"plan card {plan_id} not found")
 
-    if not card["fer_table_id"]:
-        return {"plan_id": plan_id, "skipped": "no fer_table_id"}
-    if card["quantity"] is None:
+    quantity = float(card["quantity"]) if card["quantity"] is not None else None
+    if quantity is None or quantity <= 0:
+        await db.execute(
+            text(
+                """
+                UPDATE fer.project_work_plan
+                SET human_hours_per_unit = NULL,
+                    duration_days = NULL,
+                    updated_at = NOW()
+                WHERE id = :id
+                """
+            ),
+            {"id": plan_id},
+        )
         return {"plan_id": plan_id, "skipped": "no quantity"}
 
-    # Если выбрана конкретная строка — берём её h_hour и парсим divisor из clarification.
-    # Иначе fallback — AVG по всем строкам с дефолтным divisor=100.
-    h_hour: float | None = None
+    # Источник часов:
+    # 1) выбранная строка ФЕР: h_hour, а если он пустой — m_hour;
+    # 2) выбранная таблица ФЕР: AVG(h_hour/m_hour);
+    # 3) связанные строки сметы: labor_hours / fer_words_human_hours / fer_words_machine_hours.
+    hour_value: float | None = None
     divisor: float = 100.0
     source: str = "avg"
-    if card["fer_row_id"]:
+    if card["fer_table_id"] and card["fer_row_id"]:
         row = (await db.execute(
-            text("SELECT h_hour, clarification FROM fer.fer_rows WHERE id = :id"),
+            text("SELECT h_hour, m_hour, clarification FROM fer.fer_rows WHERE id = :id"),
             {"id": card["fer_row_id"]},
         )).mappings().first()
-        if row and row["h_hour"] is not None:
-            h_hour = float(row["h_hour"])
+        if row:
+            raw_hour = row["h_hour"] if row["h_hour"] is not None else row["m_hour"]
+        else:
+            raw_hour = None
+        if raw_hour is not None:
+            hour_value = float(raw_hour)
             divisor = parse_fer_row_divisor(row["clarification"], default=1.0)
-            source = "row"
+            source = "row" if row["h_hour"] is not None else "row_machine"
 
-    if h_hour is None:
+    if hour_value is None and card["fer_table_id"]:
         avg = (await db.execute(
             text(
                 """
-                SELECT AVG(h_hour) FROM fer.fer_rows
-                WHERE table_id = :tid AND h_hour IS NOT NULL
+                SELECT AVG(COALESCE(h_hour, m_hour)) FROM fer.fer_rows
+                WHERE table_id = :tid
+                  AND COALESCE(h_hour, m_hour) IS NOT NULL
                 """
             ),
             {"tid": card["fer_table_id"]},
         )).scalar()
-        if not avg:
-            return {"plan_id": plan_id, "skipped": "no fer_rows hours"}
-        h_hour = float(avg)
-        divisor = 100.0  # для AVG используем стандартный множитель
+        if avg:
+            hour_value = float(avg)
+            divisor = 100.0  # для AVG используем стандартный множитель
+            source = "avg"
 
-    h_per_unit = h_hour / divisor
-    labor_hours = h_per_unit * float(card["quantity"])
+    if hour_value is not None:
+        h_per_unit = hour_value / divisor
+    else:
+        estimate_hours = (await db.execute(
+            text(
+                """
+                SELECT
+                  SUM(e.labor_hours * COALESCE(l.share, 1.0)) AS linked_labor_hours,
+                  SUM(COALESCE(e.fer_words_human_hours, e.fer_words_machine_hours) * e.quantity * COALESCE(l.share, 1.0))
+                    / NULLIF(SUM(e.quantity * COALESCE(l.share, 1.0)), 0) AS fer_words_hours_per_unit
+                FROM fer.project_work_plan_estimate_link l
+                JOIN estimates e ON e.id = l.estimate_id
+                WHERE l.plan_id = :id
+                  AND e.deleted_at IS NULL
+                """
+            ),
+            {"id": plan_id},
+        )).mappings().first()
+        if estimate_hours and estimate_hours["linked_labor_hours"] is not None:
+            h_per_unit = float(estimate_hours["linked_labor_hours"]) / quantity
+            source = "estimate_labor"
+            divisor = 1.0
+            hour_value = h_per_unit
+        elif estimate_hours and estimate_hours["fer_words_hours_per_unit"] is not None:
+            h_per_unit = float(estimate_hours["fer_words_hours_per_unit"])
+            source = "estimate_fer_words"
+            divisor = 1.0
+            hour_value = h_per_unit
+        else:
+            await db.execute(
+                text(
+                    """
+                    UPDATE fer.project_work_plan
+                    SET human_hours_per_unit = NULL,
+                        duration_days = NULL,
+                        workers_count = COALESCE(workers_count, :w),
+                        updated_at = NOW()
+                    WHERE id = :id
+                    """
+                ),
+                {"w": workers_count or card["workers_count"] or card["batch_workers"] or DEFAULT_WORKERS_PER_TASK, "id": plan_id},
+            )
+            return {"plan_id": plan_id, "skipped": "no hours"}
+
+    labor_hours = h_per_unit * quantity
 
     workers = workers_count or card["workers_count"] or card["batch_workers"] or DEFAULT_WORKERS_PER_TASK
     hpd     = hours_per_day or float(card["batch_hpd"] or DEFAULT_HOURS_PER_DAY)
@@ -158,7 +219,7 @@ async def compute_card_duration(
         "plan_id": plan_id, "h_per_unit": h_per_unit,
         "labor_hours": round(labor_hours, 2), "workers": workers,
         "duration_days": days, "source": source,
-        "h_hour_raw": h_hour, "divisor": divisor,
+        "h_hour_raw": hour_value, "divisor": divisor,
     }
 
 
@@ -173,7 +234,6 @@ async def compute_all_durations(
             SELECT id FROM fer.project_work_plan
             WHERE estimate_batch_id = :b
               AND parent_id IS NULL
-              AND fer_table_id IS NOT NULL
               AND quantity IS NOT NULL
               AND status NOT IN ('removed')
             """

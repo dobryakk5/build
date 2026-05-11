@@ -2,8 +2,10 @@
 
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
-import { useSearchParams } from "next/navigation";
+import Link from "next/link";
+import { usePathname, useSearchParams } from "next/navigation";
 
+import NwDictionaryPage from "@/app/nw/page";
 import { fer as ferApi } from "@/lib/api";
 import type {
   FerBreadcrumbItem,
@@ -14,6 +16,7 @@ import type {
   FerTableDetail,
   FerTableRow,
 } from "@/lib/types";
+import EstimatePage from "../estimate/page";
 
 const PANEL: CSSProperties = {
   background: "var(--surface)",
@@ -115,7 +118,10 @@ function IgnoreBadge({
 
 export default function FerPage() {
   const searchParams = useSearchParams();
+  const pathname = usePathname();
   const tableFromUrl = searchParams.get("table");
+  const tabFromUrl = searchParams.get("tab");
+  const activeDirectoryTab = tableFromUrl ? "fer" : tabFromUrl === "work-types" || tabFromUrl === "estimate" ? tabFromUrl : "fer";
   const [collections, setCollections] = useState<FerCollectionSummary[]>([]);
   const [collectionsLoad, setCollectionsLoad] = useState(true);
   const [browse, setBrowse] = useState<FerBrowseResponse | null>(null);
@@ -270,8 +276,15 @@ export default function FerPage() {
   }
 
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: 16 }}>
-      <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 1200 }}>
+    <div style={{ height: "100%", overflow: "auto" }}>
+      <ReferenceTabs activeTab={activeDirectoryTab} basePath={pathname} />
+      {activeDirectoryTab === "work-types" ? (
+        <NwDictionaryPage />
+      ) : activeDirectoryTab === "estimate" ? (
+        <EstimatePage />
+      ) : (
+        <div style={{ padding: 16 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14, maxWidth: 1200 }}>
         <div
           style={{
             ...PANEL,
@@ -667,7 +680,59 @@ export default function FerPage() {
             )}
           </div>
         )}
-      </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReferenceTabs({
+  activeTab,
+  basePath,
+}: {
+  activeTab: string;
+  basePath: string;
+}) {
+  const tabs = [
+    { id: "fer", label: "ФЕР", href: basePath },
+    { id: "work-types", label: "Виды работ", href: `${basePath}?tab=work-types` },
+    { id: "estimate", label: "Смета", href: `${basePath}?tab=estimate` },
+  ];
+
+  return (
+    <div
+      style={{
+        position: "sticky",
+        top: 0,
+        zIndex: 20,
+        background: "var(--surface)",
+        borderBottom: "1px solid var(--border)",
+        padding: "0 16px",
+        display: "flex",
+        gap: 4,
+        minHeight: 42,
+        alignItems: "flex-end",
+      }}
+    >
+      {tabs.map((tab) => (
+        <Link
+          key={tab.id}
+          href={tab.href}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            padding: "11px 12px 10px",
+            borderBottom: activeTab === tab.id ? "2px solid var(--blue)" : "2px solid transparent",
+            color: activeTab === tab.id ? "var(--text)" : "var(--muted)",
+            fontSize: 12,
+            fontWeight: activeTab === tab.id ? 700 : 500,
+            whiteSpace: "nowrap",
+          }}
+        >
+          {tab.label}
+        </Link>
+      ))}
     </div>
   );
 }

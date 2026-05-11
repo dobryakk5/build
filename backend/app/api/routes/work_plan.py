@@ -59,6 +59,10 @@ class SetFerRow(BaseModel):
     fer_row_id: int | None = None  # None — сбросить выбор
 
 
+class SetFerTable(BaseModel):
+    fer_table_id: int | None = None  # None — сбросить назначение ФЕР
+
+
 # ─── GET — текущий план ───
 @router.get("")
 async def get_work_plan(
@@ -94,6 +98,60 @@ async def get_palette(
         "estimate_kind": int(kind_row["estimate_kind"]),
         "wt_codes": wt_palette,
         "nw_items": palette,
+    }
+
+
+@router.get("/fer-scopes")
+async def get_fer_scopes(
+    project_id: str,
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Все ФЕР-разделы, доступные для типа загруженной сметы."""
+    from sqlalchemy import text as sa_text
+
+    rows = (await db.execute(
+        sa_text(
+            """
+            SELECT
+                eb.estimate_kind,
+                wts.work_name,
+                c.id AS collection_id,
+                c.num AS collection_num,
+                c.name AS collection_name,
+                s.id AS section_id,
+                s.title AS section_title
+            FROM estimate_batches eb
+            JOIN fer.work_type_sections wts ON wts.id = eb.estimate_kind
+            JOIN fer.sections s ON s.id = ANY(wts.section_ids)
+            JOIN fer.collections c ON c.id = s.collection_id
+            WHERE eb.id = :batch_id
+              AND eb.project_id = :project_id
+              AND eb.deleted_at IS NULL
+            ORDER BY c.num, s.title
+            """
+        ),
+        {"batch_id": batch_id, "project_id": project_id},
+    )).mappings().all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="batch not found")
+
+    first = rows[0]
+    return {
+        "estimate_kind": int(first["estimate_kind"]),
+        "work_name": first["work_name"],
+        "scopes": [
+            {
+                "collection_id": row["collection_id"],
+                "collection_num": row["collection_num"],
+                "collection_name": row["collection_name"],
+                "section_id": row["section_id"],
+                "section_title": row["section_title"],
+            }
+            for row in rows
+        ],
     }
 
 
@@ -182,6 +240,9 @@ async def match_card_fer(
     user: User = Depends(get_current_user),
 ):
     res = await narrow_fer_matcher.match_card_to_fer(db, plan_id, use_llm=use_llm)
+    if res.get("fer_table_id"):
+        res["duration"] = await gantt_from_plan_service.compute_card_duration(db, plan_id)
+        await db.commit()
     return res
 
 
@@ -195,7 +256,116 @@ async def match_all_fer(
     user: User = Depends(get_current_user),
 ):
     summary = await narrow_fer_matcher.match_all_confirmed_cards(db, batch_id, use_llm=use_llm)
+    summary["duration"] = await gantt_from_plan_service.compute_all_durations(db, batch_id)
     return summary
+
+
+# ─── POST /{plan_id}/set-fer-table — ручное назначение / переназначение ФЕР ───
+@router.post("/{plan_id}/set-fer-table")
+async def set_fer_table(
+    project_id: str,
+    batch_id: str,
+    plan_id: int,
+    body: SetFerTable,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from sqlalchemy import text as sa_text
+
+    card = (await db.execute(
+        sa_text(
+            """
+            SELECT id
+            FROM fer.project_work_plan
+            WHERE id = :id AND estimate_batch_id = :batch_id
+            """
+        ),
+        {"id": plan_id, "batch_id": batch_id},
+    )).mappings().first()
+    if not card:
+        raise HTTPException(status_code=404, detail="plan card not found")
+
+    table_row = None
+    if body.fer_table_id is not None:
+        table_row = (await db.execute(
+            sa_text(
+                """
+                SELECT
+                    t.id,
+                    t.table_title,
+                    (
+                        COALESCE(c.ignored, FALSE)
+                        OR COALESCE(s.ignored, FALSE)
+                        OR COALESCE(ss.ignored, FALSE)
+                        OR COALESCE(t.ignored, FALSE)
+                    ) AS effective_ignored
+                FROM fer.fer_tables t
+                JOIN fer.collections c ON c.id = t.collection_id
+                LEFT JOIN fer.sections s ON s.id = t.section_id
+                LEFT JOIN fer.subsections ss ON ss.id = t.subsection_id
+                WHERE t.id = :table_id
+                """
+            ),
+            {"table_id": body.fer_table_id},
+        )).mappings().first()
+        if not table_row:
+            raise HTTPException(status_code=404, detail="FER table not found")
+        if table_row.get("effective_ignored"):
+            raise HTTPException(status_code=400, detail="FER table is ignored")
+
+    if table_row is None:
+        await db.execute(
+            sa_text(
+                """
+                UPDATE fer.project_work_plan
+                SET fer_table_id = NULL,
+                    fer_row_id = NULL,
+                    fer_match_score = NULL,
+                    fer_match_source = NULL,
+                    fer_candidates = NULL,
+                    fer_matched_at = NULL,
+                    human_hours_per_unit = NULL,
+                    duration_days = NULL,
+                    status = 'needs_review',
+                    updated_at = NOW()
+                WHERE id = :id
+                """
+            ),
+            {"id": plan_id},
+        )
+        await db.commit()
+        return {"plan_id": plan_id, "fer_table_id": None, "fer_match_score": None, "fer_match_source": None}
+
+    await db.execute(
+        sa_text(
+            """
+            UPDATE fer.project_work_plan
+            SET fer_table_id = :table_id,
+                fer_row_id = NULL,
+                fer_match_score = 1.0,
+                fer_match_source = 'manual',
+                fer_candidates = NULL,
+                fer_matched_at = NOW(),
+                human_hours_per_unit = NULL,
+                duration_days = NULL,
+                status = 'fer_mapped',
+                updated_at = NOW()
+            WHERE id = :id
+            """
+        ),
+        {"id": plan_id, "table_id": int(table_row["id"])},
+    )
+    await db.commit()
+    duration = await gantt_from_plan_service.compute_card_duration(db, plan_id)
+    await db.commit()
+    return {
+        "plan_id": plan_id,
+        "fer_table_id": int(table_row["id"]),
+        "fer_table_title": table_row["table_title"],
+        "fer_match_score": 1.0,
+        "fer_match_source": "manual",
+        "duration": duration,
+    }
 
 
 # ─── GET /{plan_id}/fer-rows — список строк FER таблицы карточки ───
@@ -242,11 +412,9 @@ async def set_fer_row(
         {"rid": body.fer_row_id, "id": plan_id},
     )
     await db.commit()
-    # Если задана строка и есть quantity — пересчитываем длительность
-    summary = None
-    if body.fer_row_id:
-        summary = await gantt_from_plan_service.compute_card_duration(db, plan_id)
-        await db.commit()
+    # Пересчитываем и при сбросе строки: тогда берётся AVG по таблице.
+    summary = await gantt_from_plan_service.compute_card_duration(db, plan_id)
+    await db.commit()
     return {"plan_id": plan_id, "fer_row_id": body.fer_row_id, "duration_recomputed": summary}
 
 
@@ -312,7 +480,11 @@ async def update_card(
 ):
     fields = body.model_dump(exclude_unset=True)
     await pwp_service.update_card(db, plan_id, fields)
-    return {"id": plan_id, "updated": list(fields.keys())}
+    duration = None
+    if {"quantity", "workers_count"} & set(fields.keys()):
+        duration = await gantt_from_plan_service.compute_card_duration(db, plan_id)
+        await db.commit()
+    return {"id": plan_id, "updated": list(fields.keys()), "duration": duration}
 
 
 # ─── POST /confirm — подтвердить одну ───

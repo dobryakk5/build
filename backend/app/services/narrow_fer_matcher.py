@@ -286,7 +286,13 @@ async def get_fer_rows_for_card(
     rows = await db.execute(
         text(
             """
-            SELECT r.id, r.clarification, r.h_hour, r.m_hour, r.row_slug
+            SELECT
+                r.id,
+                row_number() OVER (ORDER BY r.id)::int AS position,
+                r.clarification,
+                r.h_hour,
+                r.m_hour,
+                r.row_slug
             FROM fer.fer_rows r
             JOIN fer.project_work_plan p ON p.fer_table_id = r.table_id
             WHERE p.id = :id

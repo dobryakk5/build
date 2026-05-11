@@ -242,12 +242,15 @@ async def get_plan(db: AsyncSession, estimate_batch_id: str) -> list[dict[str, A
               p.fer_row_id,
               fr.clarification AS fer_row_clarification,
               fr.h_hour        AS fer_row_h_hour,
+              fr.m_hour        AS fer_row_m_hour,
               t.table_title    AS fer_table_title,
               COALESCE(
                 substring(t.table_title from '(\\d{2}-\\d{2}-\\d{3})'),
                 substring(t.table_url   from '(\\d{2}-\\d{2}-\\d{3})')
               ) AS fer_table_code,
-              p.human_hours_per_unit, p.workers_count, p.duration_days,
+              p.human_hours_per_unit,
+              COALESCE(p.workers_count, eb.workers_count, 4) AS workers_count,
+              p.duration_days,
               p.notes, p.source_label, p.source_section,
               p.created_at, p.confirmed_at,
               i.unique_label AS nw_label,
@@ -258,6 +261,7 @@ async def get_plan(db: AsyncSession, estimate_batch_id: str) -> list[dict[str, A
             FROM fer.project_work_plan p
             JOIN fer.nw_item i      ON i.code = p.nw_item_code
             JOIN fer.nw_work_type wt ON wt.code = i.work_type_code
+            JOIN estimate_batches eb ON eb.id = p.estimate_batch_id
             LEFT JOIN fer.fer_tables t ON t.id = p.fer_table_id
             LEFT JOIN fer.fer_rows fr  ON fr.id = p.fer_row_id
             WHERE p.estimate_batch_id = :id

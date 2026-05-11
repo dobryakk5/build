@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 import { nw as nwApi } from "@/lib/api";
 import { useUser } from "@/lib/UserContext";
@@ -88,7 +88,9 @@ function dictMap(entries: NwDictEntry[] | undefined): Record<string, string> {
 
 export default function NwDictionaryPage() {
   const router = useRouter();
+  const pathname = usePathname();
   const { user, loading: userLoading } = useUser();
+  const embedded = pathname.startsWith("/projects/") && pathname.includes("/fer");
 
   const [workTypes, setWorkTypes] = useState<NwWorkType[]>([]);
   const [dicts, setDicts] = useState<NwDictionaries | null>(null);
@@ -159,36 +161,37 @@ export default function NwDictionaryPage() {
   }
 
   return (
-    <div style={{ minHeight: "100vh", background: COLORS.bg, color: COLORS.text, fontFamily: "system-ui, sans-serif" }}>
-      {/* Header */}
-      <div
-        style={{
-          padding: "16px 24px",
-          background: "white",
-          borderBottom: `1px solid ${COLORS.border}`,
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 16,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-          <button
-            onClick={() => router.push("/projects")}
-            style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 12, cursor: "pointer" }}
-          >
-            ← Проекты
-          </button>
-          <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>
-            Нормализованные виды работ
-          </h1>
-          <span style={{ fontSize: 12, color: COLORS.muted }}>
-            {workTypes.length} типов · {workTypes.reduce((s, w) => s + w.items_count, 0)} видов
-          </span>
+    <div style={{ minHeight: embedded ? "auto" : "100vh", background: embedded ? "transparent" : COLORS.bg, color: COLORS.text, fontFamily: "system-ui, sans-serif" }}>
+      {!embedded && (
+        <div
+          style={{
+            padding: "16px 24px",
+            background: "white",
+            borderBottom: `1px solid ${COLORS.border}`,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 16,
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+            <button
+              onClick={() => router.push("/projects")}
+              style={{ background: "none", border: "none", color: COLORS.muted, fontSize: 12, cursor: "pointer" }}
+            >
+              ← Проекты
+            </button>
+            <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700 }}>
+              Нормализованные виды работ
+            </h1>
+            <span style={{ fontSize: 12, color: COLORS.muted }}>
+              {workTypes.length} типов · {workTypes.reduce((s, w) => s + w.items_count, 0)} видов
+            </span>
+          </div>
         </div>
-      </div>
+      )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", minHeight: "calc(100vh - 50px)" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "260px 1fr", minHeight: embedded ? "calc(100vh - 104px)" : "calc(100vh - 50px)" }}>
         {/* Left: WT list */}
         <aside style={{ borderRight: `1px solid ${COLORS.border}`, background: "white", padding: "12px 8px" }}>
           <button

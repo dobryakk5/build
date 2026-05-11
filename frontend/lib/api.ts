@@ -584,6 +584,11 @@ export const workPlan = {
       `/projects/${pid}/batches/${bid}/work-plan/${planId}/match-fer`,
       { method: "POST" },
     ),
+  setFerTable: (pid: string, bid: string, planId: number, ferTableId: number | null) =>
+    request<{ plan_id: number; fer_table_id: number | null; fer_table_title?: string | null; fer_match_score: number | null; fer_match_source: string | null }>(
+      `/projects/${pid}/batches/${bid}/work-plan/${planId}/set-fer-table`,
+      { method: "POST", body: JSON.stringify({ fer_table_id: ferTableId }) },
+    ),
   matchFerAll: (pid: string, bid: string) =>
     request<{ total_processed: number; fer_mapped: number; needs_review: number; no_candidates: number; errors: number }>(
       `/projects/${pid}/batches/${bid}/work-plan/match-fer-all`,
@@ -602,6 +607,10 @@ export const workPlan = {
   ferRows: (pid: string, bid: string, planId: number) =>
     request<{ items: import("./types").FerRowOption[]; total: number }>(
       `/projects/${pid}/batches/${bid}/work-plan/${planId}/fer-rows`,
+    ),
+  ferScopes: (pid: string, bid: string) =>
+    request<{ estimate_kind: number; work_name: string; scopes: import("./types").WorkPlanFerScope[] }>(
+      `/projects/${pid}/batches/${bid}/work-plan/fer-scopes`,
     ),
   setFerRow: (pid: string, bid: string, planId: number, ferRowId: number | null) =>
     request<{ plan_id: number; fer_row_id: number | null; duration_recomputed: any }>(

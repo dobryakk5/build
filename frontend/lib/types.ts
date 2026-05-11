@@ -626,6 +626,7 @@ export interface NwItem {
 export interface NwItemDetail extends NwItem {
   work_type_description: string | null;
   fer_mappings: NwFerMapping[];
+  work_type_fer_mappings?: NwFerMapping[];
 }
 
 export interface NwFerMapping {
@@ -636,7 +637,9 @@ export interface NwFerMapping {
   is_primary: boolean;
   notes: string | null;
   // в /nw/items/{code}.fer_mappings подтягиваются названия из fer.collections/sections:
+  collection_id?: number | null;
   collection_name?: string | null;
+  section_id?: number | null;
   section_title?: string | null;
   // в /nw/mapping добавляются поля:
   id?: number;
@@ -681,6 +684,7 @@ export interface WorkPlanCard {
   fer_row_id: number | null;
   fer_row_clarification: string | null;
   fer_row_h_hour: number | null;
+  fer_row_m_hour: number | null;
   human_hours_per_unit: number | null;
   workers_count: number | null;
   duration_days: number | null;
@@ -722,6 +726,7 @@ export interface WorkPlanCardDetail {
 
 export interface FerRowOption {
   id: number;
+  position: number;
   clarification: string;
   h_hour: number | null;
   m_hour: number | null;
@@ -744,6 +749,14 @@ export interface WorkPlanPalette {
     work_type_name: string;
     stage_code: string | null;
   }>;
+}
+
+export interface WorkPlanFerScope {
+  collection_id: number;
+  collection_num: string;
+  collection_name: string;
+  section_id: number;
+  section_title: string;
 }
 
 export interface WorkPlanAutoSummary {

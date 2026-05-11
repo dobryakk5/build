@@ -238,7 +238,9 @@ async def nw_item(code: str, db: AsyncSession = Depends(get_db)):
             m.confidence,
             m.is_primary,
             m.notes,
+            c.id    AS collection_id,
             c.name  AS collection_name,
+            s.id    AS section_id,
             s.title AS section_title
         FROM fer.nw_fer_mapping m
         LEFT JOIN fer.collections c
@@ -255,5 +257,34 @@ async def nw_item(code: str, db: AsyncSession = Depends(get_db)):
                  m.fer_collection_num, m.fer_section_num
         """,
         {"code": code},
+    )
+    item["work_type_fer_mappings"] = await _fetch_all(
+        db,
+        r"""
+        SELECT DISTINCT
+            m.fer_collection_num,
+            m.fer_section_num,
+            c.id    AS collection_id,
+            c.name  AS collection_name,
+            s.id    AS section_id,
+            s.title AS section_title,
+            'direct'::text AS mapping_type,
+            'medium'::text AS confidence,
+            FALSE AS is_primary,
+            'Унаследовано от родительского WT'::text AS notes
+        FROM fer.nw_fer_mapping m
+        JOIN fer.nw_item parent_i ON parent_i.code = m.nw_item_code
+        LEFT JOIN fer.collections c
+               ON c.num ~ '^[0-9]+$'
+              AND c.num::int = m.fer_collection_num
+        LEFT JOIN fer.sections s
+               ON s.collection_id = c.id
+              AND substring(s.title from '^Раздел\s+(\d+)') ~ '^[0-9]+$'
+              AND substring(s.title from '^Раздел\s+(\d+)')::int = m.fer_section_num
+        WHERE parent_i.work_type_code = :work_type_code
+          AND m.mapping_type <> 'out_of_scope_subscope'
+        ORDER BY m.fer_collection_num, m.fer_section_num
+        """,
+        {"work_type_code": item["work_type_code"]},
     )
     return item
