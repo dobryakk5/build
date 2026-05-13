@@ -285,7 +285,6 @@ export default function KtpGroupsPage() {
                       Альтернативы: {group.wt_match_candidates.map((candidate) => `${candidate.wt_code} · ${candidate.wt_name}`).join(", ")}
                     </div>
                   ) : null}
-                  <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)" }}>{group.group_key}</div>
                 </td>
                 <td style={{ padding: "12px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--text)" }}>
                   {group.row_count}
