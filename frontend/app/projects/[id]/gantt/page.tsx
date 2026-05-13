@@ -388,6 +388,8 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .btn.danger{color:#f87171;}
 .hint{font-size:10px;color:#475569;font-family:var(--mono);padding:0 6px;}
 .pname{margin-left:auto;font-size:13px;font-weight:600;color:#e2e8f0;padding:4px 12px;border-radius:4px;background:var(--hdr2);border:1px solid var(--hdr3);cursor:pointer;}
+.pname.saving{opacity:.65;cursor:wait;}
+.pname-error{margin-left:8px;font-size:11px;color:#f87171;}
 
 /* split */
 .split-vp{display:flex;flex:1;min-height:0;overflow:hidden;position:relative;}
@@ -663,7 +665,10 @@ export default function App() {
   const [viewportW, setViewportW] = useState(1280);
   const [isTouchDevice, setIsTouchDevice] = useState(false);
   const [pname, setPname] = useState("Объект");
+  const [savedPname, setSavedPname] = useState("Объект");
   const [editP, setEditP] = useState(false);
+  const [pnameSaving, setPnameSaving] = useState(false);
+  const [pnameError, setPnameError] = useState<string | null>(null);
   const [role, setRole] = useState<RoleKey>("pm");
   const [panelId, setPanelId] = useState<string | null>(null);
   const [comments, setComments] = useState<CommentsByTask>(INIT_COMMENTS);
@@ -677,6 +682,7 @@ export default function App() {
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [baselineReason, setBaselineReason] = useState("");
   const [actsSaving, setActsSaving] = useState(false);
+  const [clearingGantt, setClearingGantt] = useState(false);
   const [hoveredTaskTooltip, setHoveredTaskTooltip] = useState<HoveredTaskTooltip | null>(null);
 
   const lbRef = useRef<HTMLDivElement | null>(null);
@@ -689,6 +695,7 @@ export default function App() {
   const dateInpRef = useRef<HTMLInputElement | null>(null);
   const dayWidthRef = useRef(DEFAULT_DAY_W);
   const pinchRef = useRef<{ startDistance: number; startDayWidth: number } | null>(null);
+  const suppressProjectNameBlurRef = useRef(false);
 
   useEffect(() => {
     dayWidthRef.current = dayWidth;
@@ -742,7 +749,7 @@ export default function App() {
       }
     } catch (error: unknown) {
       setTasks([]);
-      setTaskError(error instanceof Error ? error.message : "Не удалось загрузить задачи Ганта.");
+      setTaskError(error instanceof Error ? error.message : "Не удалось загрузить задачи ГПР.");
     } finally {
       setApiLoaded(true);
     }
@@ -751,7 +758,10 @@ export default function App() {
   useEffect(() => {
     if (!pid) return;
     projects.get(pid).then((project) => {
-      if (project?.name) setPname(project.name);
+      if (project?.name) {
+        setPname(project.name);
+        setSavedPname(project.name);
+      }
       if (project?.my_role && ["owner", "pm", "foreman", "supplier", "viewer"].includes(project.my_role)) {
         setRole(project.my_role as RoleKey);
       }
@@ -766,9 +776,49 @@ export default function App() {
     }).catch(() => {
       setBatches([]);
       setActiveBatchId(batchFromUrl ?? null);
-      setBatchError("Не удалось загрузить блоки сметы для Ганта. Проверьте backend и миграции БД.");
+      setBatchError("Не удалось загрузить блоки сметы для ГПР. Проверьте backend и миграции БД.");
     }).finally(() => setBatchesLoaded(true));
   }, [batchFromUrl, loadBaselineStatus, pid]);
+
+  const commitProjectName = useCallback(async () => {
+    if (suppressProjectNameBlurRef.current) {
+      suppressProjectNameBlurRef.current = false;
+      return;
+    }
+
+    if (!pid || pnameSaving) return;
+
+    const nextName = pname.trim();
+    if (!nextName) {
+      setPname(savedPname);
+      setEditP(false);
+      setPnameError("Название не может быть пустым");
+      return;
+    }
+
+    if (nextName === savedPname) {
+      setPname(savedPname);
+      setEditP(false);
+      setPnameError(null);
+      return;
+    }
+
+    setPnameSaving(true);
+    setPnameError(null);
+    try {
+      const updatedProject = await projects.update(pid, { name: nextName });
+      const savedName = updatedProject?.name ?? nextName;
+      setPname(savedName);
+      setSavedPname(savedName);
+      setEditP(false);
+    } catch (error: unknown) {
+      setPname(savedPname);
+      setEditP(false);
+      setPnameError(error instanceof Error ? error.message : "Не удалось сохранить название");
+    } finally {
+      setPnameSaving(false);
+    }
+  }, [pid, pname, pnameSaving, savedPname]);
 
   useEffect(() => {
     if (!batchesLoaded) return;
@@ -1379,6 +1429,26 @@ export default function App() {
     }
   }, [activeBatchId, canSplitPanelTask, loadTasks, panelTask, pid, splitDate, splitWorkers]);
 
+  const clearGantt = useCallback(async () => {
+    if (!pid || clearingGantt || rows.length === 0 || !can(role, "delete")) return;
+    const scope = activeBatchId ? "текущей партии" : "проекта";
+    if (!window.confirm(`Удалить все строки ГПР ${scope}? Действие нельзя отменить.`)) return;
+
+    setClearingGantt(true);
+    try {
+      await ganttApi.clear(pid, activeBatchId);
+      setTasks([]);
+      setSel(null);
+      setPanelId(null);
+      await loadTasks(null, activeBatchId);
+      await loadBaselineStatus();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "Не удалось очистить ГПР.");
+    } finally {
+      setClearingGantt(false);
+    }
+  }, [activeBatchId, clearingGantt, loadBaselineStatus, loadTasks, pid, role, rows.length]);
+
   return(
     <>
       <style>{CSS}</style>
@@ -1394,14 +1464,34 @@ export default function App() {
           <div className="tb-sep"/>
           <button className={`btn danger${!can(role,'delete')?' locked':''}`} onClick={delTask} disabled={!sel}>✕ Удалить</button>
           <div className="tb-sep"/>
-          <span className="hint">Enter = новая задача · Двойной клик = ред. · «Зависит от»: номера через запятую</span>
+          <button
+            className={`btn danger${!can(role,'delete')?' locked':''}`}
+            onClick={clearGantt}
+            disabled={clearingGantt || rows.length === 0 || !can(role,'delete')}
+          >
+            {clearingGantt ? "Очищаем..." : "Очистить ГПР"}
+          </button>
           {editP
             ? <input style={{marginLeft:'auto',background:'#1e293b',border:'1px solid #3b82f6',color:'#e2e8f0',
                 padding:'4px 10px',borderRadius:4,fontSize:13,fontWeight:600,fontFamily:'DM Sans,sans-serif',outline:'none',minWidth:280}}
                 value={pname} autoFocus onChange={e=>setPname(e.target.value)}
-                onBlur={()=>setEditP(false)} onKeyDown={e=>{if(e.key==='Enter')setEditP(false);}}/>
-            : <div className="pname" onClick={()=>setEditP(true)}>{pname}</div>
+                onBlur={commitProjectName}
+                onKeyDown={e=>{
+                  if(e.key==='Enter'){
+                    e.preventDefault();
+                    e.currentTarget.blur();
+                  }
+                  if(e.key==='Escape'){
+                    e.preventDefault();
+                    suppressProjectNameBlurRef.current = true;
+                    setPname(savedPname);
+                    setEditP(false);
+                    setPnameError(null);
+                  }
+                }}/>
+            : <div className={`pname${pnameSaving ? " saving" : ""}`} onClick={()=>{ if(!pnameSaving) setEditP(true); }}>{pname}</div>
           }
+          {pnameError && <span className="pname-error">{pnameError}</span>}
         </div>
 
         {/* ROLE BAR */}

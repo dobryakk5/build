@@ -539,6 +539,11 @@ export interface KtpGroup {
   sort_order: number;
   status: "new" | "questions_required" | "generated" | "failed";
   ktp_card_id: string | null;
+  wt_code?: string | null;
+  wt_name?: string | null;
+  wt_match_reason?: string | null;
+  wt_match_confidence?: number | null;
+  wt_match_candidates?: Array<{ wt_code: string; wt_name: string }> | null;
 }
 
 export interface KtpQuestion {

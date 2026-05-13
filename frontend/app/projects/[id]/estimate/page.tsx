@@ -2210,10 +2210,10 @@ export default function EstimatePage() {
               }}
             >
               {buildingGanttBatchId === activeBatch.id
-                ? "Формируем Гант..."
+                ? "Формируем ГПР..."
                 : activeBatch.gantt_tasks_count > 0
-                  ? "Сформировать Гант заново"
-                  : "Сформировать Гант"}
+                  ? "Сформировать ГПР заново"
+                  : "Сформировать ГПР"}
             </button>
           </div>
         )}
@@ -2224,7 +2224,7 @@ export default function EstimatePage() {
           <div>
             ФЕР размечено: <b style={{ color: "var(--text)" }}>{activeBatch.fer_matched_count}</b> из <b style={{ color: "var(--text)" }}>{matchableRowsCount}</b>
             <span style={{ marginLeft: 10 }}>
-              · Гант: <b style={{ color: "var(--text)" }}>{activeBatch.gantt_tasks_count}</b> задач
+              · ГПР: <b style={{ color: "var(--text)" }}>{activeBatch.gantt_tasks_count}</b> задач
             </span>
             <span style={{ marginLeft: 10, color: "var(--muted)" }}>· кнопка ИИ в строке запускает векторную сверку по этой работе</span>
           </div>

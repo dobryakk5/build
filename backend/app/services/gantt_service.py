@@ -12,7 +12,7 @@ from collections import defaultdict, deque
 from datetime import date, datetime
 from uuid import uuid4
 
-from sqlalchemy import select, text, func
+from sqlalchemy import or_, select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.date_utils import next_task_start_date, task_end_date, working_days_between
@@ -393,6 +393,67 @@ async def soft_delete_task(
 
     if task.parent_id:
         await _refresh_is_group(task.parent_id, db)
+
+    return deleted_ids
+
+
+async def soft_delete_project_tasks(
+    project_id: str,
+    actor_id: str,
+    db: AsyncSession,
+    estimate_batch_id: str | None = None,
+) -> list[str]:
+    """
+    Помечает все активные задачи проекта или выбранной сметной партии как удалённые.
+    Физически строки не удаляются — история и аудит сохраняются.
+    """
+    query = (
+        select(GanttTask)
+        .where(GanttTask.project_id == project_id)
+        .where(GanttTask.deleted_at == None)
+        .order_by(GanttTask.row_order)
+    )
+    if estimate_batch_id:
+        query = query.where(GanttTask.estimate_batch_id == estimate_batch_id)
+
+    tasks = list(await db.scalars(query))
+    if not tasks:
+        return []
+
+    deleted_ids = [task.id for task in tasks]
+    deleted_id_set = set(deleted_ids)
+    parent_ids = {task.parent_id for task in tasks if task.parent_id and task.parent_id not in deleted_id_set}
+
+    deps = list(await db.scalars(
+        select(TaskDependency)
+        .where(or_(
+            TaskDependency.task_id.in_(deleted_ids),
+            TaskDependency.depends_on.in_(deleted_ids),
+        ))
+    ))
+    for dep in deps:
+        await db.delete(dep)
+
+    deleted_at = datetime.utcnow()
+    for task in tasks:
+        task.deleted_at = deleted_at
+        db.add(task)
+        db.add(TaskHistory(
+            id=str(uuid4()),
+            task_id=task.id,
+            project_id=task.project_id,
+            user_id=actor_id,
+            action="deleted",
+            old_data={
+                "name": task.name,
+                "start_date": str(task.start_date),
+                "working_days": task.working_days,
+                "progress": task.progress,
+            },
+        ))
+
+    for parent_id in parent_ids:
+        await _refresh_is_group(parent_id, db)
 
     return deleted_ids
 

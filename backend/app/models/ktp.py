@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import uuid
 
+from datetime import datetime
+
 from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import TIMESTAMP
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin
+
+TIMESTAMPTZ = TIMESTAMP(timezone=True)
 
 
 class KtpGroup(Base, TimestampMixin):
@@ -44,6 +49,12 @@ class KtpGroup(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default="new"
     )
+    wt_code: Mapped[str | None] = mapped_column(String(10))
+    wt_name: Mapped[str | None] = mapped_column(Text)
+    wt_match_reason: Mapped[str | None] = mapped_column(Text)
+    wt_match_confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    wt_match_candidates: Mapped[list[dict] | None] = mapped_column(JSONB)
+    wt_matched_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
 
     ktp_card: Mapped["KtpCard | None"] = relationship(
         back_populates="ktp_group",

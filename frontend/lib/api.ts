@@ -173,6 +173,12 @@ export const gantt = {
   update:    (pid: string, tid: string, body: any)  => request<any>(`/projects/${pid}/gantt/${tid}`, { method: "PATCH", body: JSON.stringify(body) }),
   split:     (pid: string, tid: string, body: any)  => request<any>(`/projects/${pid}/gantt/${tid}/split`, { method: "POST", body: JSON.stringify(body) }),
   delete:    (pid: string, tid: string)             => request<any>(`/projects/${pid}/gantt/${tid}`, { method: "DELETE" }),
+  clear:     (pid: string, estimateBatchId?: string | null) => {
+    const params = new URLSearchParams();
+    if (estimateBatchId) params.set("estimate_batch_id", estimateBatchId);
+    const query = params.toString();
+    return request<{ deleted: string[]; deleted_count: number }>(`/projects/${pid}/gantt/clear${query ? `?${query}` : ""}`, { method: "DELETE" });
+  },
   reorder:   (pid: string, body: any)               => request<any>(`/projects/${pid}/gantt/reorder`, { method: "POST", body: JSON.stringify(body) }),
   resolve:   (pid: string)                          => request<any>(`/projects/${pid}/gantt/resolve`, { method: "POST" }),
   baselineStatus: (pid: string)                    => request<BaselineStatus>(`/projects/${pid}/gantt/baseline-status`),
@@ -478,6 +484,11 @@ export const ktp = {
     request<KtpGroup[]>(`/projects/${projectId}/ktp/groups/build`, {
       method: "POST",
       body: JSON.stringify({ estimate_batch_id: batchId, force }),
+    }),
+  matchAi: (projectId: string, batchId: string, onlyUnmatched = true) =>
+    request<KtpGroup[]>(`/projects/${projectId}/ktp/groups/match-ai`, {
+      method: "POST",
+      body: JSON.stringify({ estimate_batch_id: batchId, only_unmatched: onlyUnmatched }),
     }),
   group: (projectId: string, groupId: string) =>
     request<{ group: KtpGroup; card: KtpCard | null }>(`/projects/${projectId}/ktp/groups/${groupId}`),

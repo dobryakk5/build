@@ -404,19 +404,19 @@ export default function WorkPlanPage() {
       const res = await wpApi.buildGantt(projectId, batchId, { start_date: startDate, replace });
       const lines: string[] = [];
       if (res.created > 0) {
-        lines.push(`✓ Гант собран:`);
+        lines.push(`✓ ГПР собран:`);
         lines.push(`  Задач: ${res.created}`);
         lines.push(`  Зависимостей: ${res.deps}`);
         lines.push(`  Этапов: ${res.stages}`);
         if (res.fallback_used) lines.push(`\n⚠️ ${res.fallback_note}`);
       } else {
-        lines.push(`⚠️ Гант не собрался.`);
+        lines.push(`⚠️ ГПР не собрался.`);
         if (res.warning) lines.push(res.warning);
       }
       alert(lines.join("\n"));
       setShowBuildDialog(false);
       await reload();
-      if (res.created > 0 && confirm("Перейти на экран Ганта?")) {
+      if (res.created > 0 && confirm("Перейти на экран ГПР?")) {
         router.push(`/projects/${projectId}/gantt?batch=${batchId}`);
       }
     } catch (e: any) {
@@ -527,9 +527,9 @@ export default function WorkPlanPage() {
                 onClick={() => setShowBuildDialog(true)}
                 disabled={building}
                 style={btn("#16a34a", "white")}
-                title="Создать задачи Ганта из плана"
+                title="Создать задачи ГПР из плана"
               >
-                📊 Построить Гант
+                📊 Построить ГПР
               </button>
               <button onClick={() => setShowAddDialog(true)} style={btn("white", COLORS.text)}>
                 + Добавить карточку
@@ -1634,16 +1634,16 @@ function BuildGanttDialog({
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "#0f172a40", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: "white", padding: 24, borderRadius: 8, width: 380 }}>
-        <h3 style={{ margin: "0 0 12px 0", fontSize: 16 }}>Построить Гант из плана</h3>
+        <h3 style={{ margin: "0 0 12px 0", fontSize: 16 }}>Построить ГПР из плана</h3>
         <p style={{ fontSize: 12, color: COLORS.muted, marginBottom: 12 }}>
-          Карточки группируются по виду работ × этапу → одна задача Ганта на группу. Зависимости устанавливаются автоматически по порядку этапов.
+          Карточки группируются по виду работ × этапу → одна задача ГПР на группу. Зависимости устанавливаются автоматически по порядку этапов.
         </p>
         <Field label="Дата начала">
           <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={inputStyle} />
         </Field>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 8, cursor: "pointer" }}>
           <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} />
-          Удалить существующие задачи Ганта этой сметы
+          Удалить существующие задачи ГПР этой сметы
         </label>
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 16 }}>
           <button onClick={onClose} style={btn("white", COLORS.muted)}>Отмена</button>

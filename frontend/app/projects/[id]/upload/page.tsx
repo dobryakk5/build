@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { estimates } from "@/lib/api";
+import { estimates, ktp as ktpApi } from "@/lib/api";
 import { fmtMoney } from "@/lib/dateUtils";
 import { useJobPoller } from "@/lib/useJobPoller";
 
@@ -92,7 +92,13 @@ export default function UploadPage() {
     }
 
     redirectedRef.current = true;
-    router.replace(`/projects/${id}/work-plan?batch=${result.estimate_batch_id}`);
+
+    void ktpApi
+      .buildGroups(id, result.estimate_batch_id)
+      .catch(() => null)
+      .finally(() => {
+        router.replace(`/projects/${id}/ktp?batch=${result.estimate_batch_id}`);
+      });
   }, [id, result?.estimate_batch_id, router, status]);
 
   return (

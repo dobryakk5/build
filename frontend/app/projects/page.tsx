@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import EmailVerificationBanner from "@/components/EmailVerificationBanner";
 import { auth, projects } from "@/lib/api";
@@ -144,7 +145,13 @@ export default function ProjectsPage() {
               >
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
                   <div>
-                    <div style={{fontWeight:600,fontSize:14}}>{p.name}</div>
+                    <Link
+                      href={`/projects/${p.id}`}
+                      onClick={(event) => event.stopPropagation()}
+                      style={{fontWeight:600,fontSize:14,color:"var(--blue-dark)",textDecoration:"underline"}}
+                    >
+                      {p.name}
+                    </Link>
                     {p.address && <div style={{fontSize:11,color:"var(--muted)",marginTop:2}}>📍 {p.address}</div>}
                   </div>
                   <span style={{

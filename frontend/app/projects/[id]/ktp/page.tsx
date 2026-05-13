@@ -13,6 +13,17 @@ function fmtPrice(value: number | null): string {
   return `${fmtMoney(value)} ₽`;
 }
 
+function wtMatchLabel(group: KtpGroup): string {
+  if (!group.wt_code || !group.wt_name) {
+    return "WT: не определён";
+  }
+  const confidence =
+    typeof group.wt_match_confidence === "number"
+      ? ` · ${Math.round(group.wt_match_confidence * 100)}%`
+      : "";
+  return `WT: ${group.wt_code} · ${group.wt_name}${confidence}`;
+}
+
 const STATUS_LABEL: Record<KtpGroup["status"], string> = {
   new: "Не создана",
   questions_required: "Нужны данные",
@@ -36,6 +47,7 @@ export default function KtpGroupsPage() {
   const [groups, setGroups] = useState<KtpGroup[]>([]);
   const [resolvedBatchId, setResolvedBatchId] = useState<string | null>(batchId);
   const [loading, setLoading] = useState(false);
+  const [matchingAi, setMatchingAi] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasBatches, setHasBatches] = useState(true);
 
@@ -160,27 +172,62 @@ export default function KtpGroupsPage() {
         <div>
           <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>Группы работ для КТП</div>
           <div style={{ fontSize: 13, color: "var(--muted)", maxWidth: 720, lineHeight: 1.5 }}>
-            Сначала проверьте, как смета разбилась на группы. На следующем экране КТП создаётся по одной группе работ, начиная с первой незавершённой.
+            WT для групп определяется по ключевым словам без ИИ. Если часть групп не распозналась, можно отдельно запустить кнопку <b style={{ color: "var(--text)" }}>ИИ группы</b>.
           </div>
         </div>
 
-        {nextGroup && (
-          <Link
-            href={`/projects/${projectId}/ktp/${nextGroup.id}?batch=${resolvedBatchId}${nextGroup.status === "generated" ? "" : "&autoStart=1"}`}
-            style={{
-              padding: "10px 18px",
-              background: "var(--blue-dark)",
-              color: "#fff",
-              textDecoration: "none",
-              borderRadius: 6,
-              fontSize: 13,
-              fontWeight: 600,
-              whiteSpace: "nowrap",
-            }}
-          >
-            {nextGroup.status === "generated" ? "Открыть КТП →" : "Перейти к первой группе →"}
-          </Link>
-        )}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {resolvedBatchId && (
+            <button
+              onClick={async () => {
+                if (!resolvedBatchId || matchingAi) return;
+                setMatchingAi(true);
+                setError(null);
+                try {
+                  const nextGroups = await ktpApi.matchAi(projectId, resolvedBatchId, true);
+                  setGroups(nextGroups);
+                } catch (nextError) {
+                  setError(nextError instanceof Error ? nextError.message : "Ошибка ИИ-матчинга");
+                } finally {
+                  setMatchingAi(false);
+                }
+              }}
+              disabled={matchingAi}
+              style={{
+                padding: "10px 18px",
+                background: "var(--surface)",
+                color: "var(--text)",
+                border: "1px solid var(--border2)",
+                borderRadius: 6,
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+                cursor: matchingAi ? "default" : "pointer",
+                opacity: matchingAi ? 0.7 : 1,
+              }}
+            >
+              {matchingAi ? "ИИ определяет WT..." : "ИИ группы"}
+            </button>
+          )}
+
+          {nextGroup && (
+            <Link
+              href={`/projects/${projectId}/ktp/${nextGroup.id}?batch=${resolvedBatchId}${nextGroup.status === "generated" ? "" : "&autoStart=1"}`}
+              style={{
+                padding: "10px 18px",
+                background: "var(--blue-dark)",
+                color: "#fff",
+                textDecoration: "none",
+                borderRadius: 6,
+                fontSize: 13,
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {nextGroup.status === "generated" ? "Открыть КТП →" : "Перейти к первой группе →"}
+            </Link>
+          )}
+        </div>
       </div>
 
       <div
@@ -232,6 +279,12 @@ export default function KtpGroupsPage() {
               <tr key={group.id} style={{ borderTop: "1px solid var(--border)" }}>
                 <td style={{ padding: "12px 16px" }}>
                   <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 3 }}>{group.title}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 3 }}>{wtMatchLabel(group)}</div>
+                  {group.wt_match_candidates?.length ? (
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 3 }}>
+                      Альтернативы: {group.wt_match_candidates.map((candidate) => `${candidate.wt_code} · ${candidate.wt_name}`).join(", ")}
+                    </div>
+                  ) : null}
                   <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)" }}>{group.group_key}</div>
                 </td>
                 <td style={{ padding: "12px", textAlign: "right", fontFamily: "var(--mono)", color: "var(--text)" }}>

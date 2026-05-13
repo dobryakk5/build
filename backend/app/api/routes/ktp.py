@@ -11,6 +11,7 @@ from app.api.deps import get_db, require_action
 from app.core.permissions import Action
 from app.models.ktp import KtpGroup
 from app.services.ktp_service import (
+    ai_match_ktp_groups_for_batch,
     build_ktp_groups_for_batch,
     generate_ktp_for_group,
     get_ktp_card,
@@ -60,6 +61,11 @@ class KtpGroupOut(BaseModel):
     sort_order: int
     status: str
     ktp_card_id: str | None = None
+    wt_code: str | None = None
+    wt_name: str | None = None
+    wt_match_reason: str | None = None
+    wt_match_confidence: float | None = None
+    wt_match_candidates: list[dict] | None = None
 
 
 class KtpGroupDetailOut(BaseModel):
@@ -70,6 +76,11 @@ class KtpGroupDetailOut(BaseModel):
 class BuildGroupsRequest(BaseModel):
     estimate_batch_id: str
     force: bool = False
+
+
+class AiMatchGroupsRequest(BaseModel):
+    estimate_batch_id: str
+    only_unmatched: bool = True
 
 
 class GenerateRequest(BaseModel):
@@ -95,6 +106,11 @@ def _group_to_out(group: KtpGroup) -> KtpGroupOut:
         sort_order=group.sort_order,
         status=group.status,
         ktp_card_id=group.ktp_card.id if group.ktp_card else None,
+        wt_code=group.wt_code,
+        wt_name=group.wt_name,
+        wt_match_reason=group.wt_match_reason,
+        wt_match_confidence=float(group.wt_match_confidence) if group.wt_match_confidence is not None else None,
+        wt_match_candidates=group.wt_match_candidates,
     )
 
 
@@ -136,6 +152,25 @@ async def build_groups(
             project_id=str(project_id),
             estimate_batch_id=body.estimate_batch_id,
             force=body.force,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return [_group_to_out(group) for group in groups]
+
+
+@router.post("/groups/match-ai", response_model=list[KtpGroupOut])
+async def match_groups_ai(
+    project_id: UUID,
+    body: AiMatchGroupsRequest,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        groups = await ai_match_ktp_groups_for_batch(
+            db,
+            project_id=str(project_id),
+            estimate_batch_id=body.estimate_batch_id,
+            only_unmatched=body.only_unmatched,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

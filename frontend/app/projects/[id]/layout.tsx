@@ -61,7 +61,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
       : path;
 
   const tabs = [
-    { id: "gantt", label: "📊 Ганта", matchPath: `/projects/${id}/gantt`, href: withBatch(`/projects/${id}/gantt`) },
+    { id: "gantt", label: "📊 ГПР", matchPath: `/projects/${id}/gantt`, href: withBatch(`/projects/${id}/gantt`) },
     { id: "estimate", label: "📋 Смета", matchPath: `/projects/${id}/estimate`, href: withBatch(`/projects/${id}/estimate`) },
     { id: "work-plan", label: "📐 План", matchPath: `/projects/${id}/work-plan`, href: withBatch(`/projects/${id}/work-plan`) },
     { id: "journal", label: "🗒 Журнал", matchPath: `/projects/${id}/journal`, href: `/projects/${id}/journal` },

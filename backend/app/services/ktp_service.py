@@ -14,7 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models import Estimate, EstimateBatch
 from app.models.ktp import KtpCard, KtpGroup
-from app.services.openrouter_embeddings import create_chat_completion
+from app.services.estimate_nw_matcher import match_estimate_row
+from app.services.nw_palette_service import get_palette
+from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -125,17 +127,331 @@ async def get_ktp_groups(
     return list(rows)
 
 
+def _build_ktp_group_match_text(group: KtpGroup, estimates: list[Estimate]) -> str:
+    seen: set[str] = set()
+    work_names: list[str] = []
+    for estimate in estimates:
+        work_name = " ".join(str(estimate.work_name or "").split()).strip()
+        if not work_name:
+            continue
+        lowered = work_name.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        work_names.append(work_name)
+        if len(work_names) >= 8:
+            break
+
+    if not work_names:
+        return group.title
+
+    return f"{group.title}. Работы: {'; '.join(work_names)}"
+
+
+def _build_wt_palette(nw_palette: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_code: dict[str, dict[str, Any]] = {}
+    for item in nw_palette:
+        code = str(item.get("work_type_code") or "").strip()
+        name = str(item.get("work_type_name") or "").strip()
+        if not code or not name:
+            continue
+
+        wt = by_code.setdefault(
+            code,
+            {
+                "wt_code": code,
+                "wt_name": name,
+                "examples": [],
+            },
+        )
+
+        label = str(item.get("unique_label") or "").strip()
+        if label and label not in wt["examples"] and len(wt["examples"]) < 4:
+            wt["examples"].append(label)
+
+    return list(by_code.values())
+
+
+def _format_wt_palette_for_prompt(wt_palette: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for wt in wt_palette:
+        examples = wt.get("examples") or []
+        examples_suffix = f" | примеры NW: {'; '.join(examples)}" if examples else ""
+        lines.append(f"- {wt['wt_code']}: {wt['wt_name']}{examples_suffix}")
+    return "\n".join(lines)
+
+
+def _normalize_wt_confidence(value: Any) -> float | None:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, min(1.0, confidence))
+
+
+def _extract_wt_candidate_codes(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    codes: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            code = item.strip().upper()
+        elif isinstance(item, dict):
+            code = str(item.get("wt_code") or item.get("code") or "").strip().upper()
+        else:
+            continue
+        if re.match(r"^WT-\d{2}$", code) and code not in codes:
+            codes.append(code)
+    return codes
+
+
+def _clear_ktp_group_wt_match(group: KtpGroup, matched_at: datetime | None = None) -> None:
+    group.wt_code = None
+    group.wt_name = None
+    group.wt_match_reason = None
+    group.wt_match_confidence = None
+    group.wt_match_candidates = None
+    group.wt_matched_at = matched_at
+
+
+async def _match_wt_by_keywords_for_ktp_group(
+    db: AsyncSession,
+    group: KtpGroup,
+    estimates: list[Estimate],
+    estimate_kind: int,
+) -> None:
+    matched_at = _now()
+    nw_palette = await get_palette(db, estimate_kind)
+    if not nw_palette:
+        _clear_ktp_group_wt_match(group, matched_at)
+        return
+
+    nw_by_code = {
+        str(item["nw_item_code"]).strip(): item
+        for item in nw_palette
+        if item.get("nw_item_code") and item.get("work_type_code") and item.get("work_type_name")
+    }
+    if not nw_by_code:
+        _clear_ktp_group_wt_match(group, matched_at)
+        return
+
+    stats: dict[str, dict[str, Any]] = {}
+    total_score = 0.0
+    for estimate in estimates:
+        match = match_estimate_row(
+            work_name=str(estimate.work_name or ""),
+            section=_nonempty(estimate.section),
+            allowed_nw_codes=nw_by_code.keys(),
+        )
+        if not match.nw_code:
+            continue
+
+        nw_item = nw_by_code.get(match.nw_code)
+        if not nw_item:
+            continue
+
+        wt_code = str(nw_item["work_type_code"]).strip()
+        wt_name = str(nw_item["work_type_name"]).strip()
+        weight = 2.0 if match.confidence == "high" else 1.0
+        total_score += weight
+
+        item = stats.setdefault(
+            wt_code,
+            {
+                "wt_code": wt_code,
+                "wt_name": wt_name,
+                "rows": 0,
+                "score": 0.0,
+                "notes": [],
+            },
+        )
+        item["rows"] += 1
+        item["score"] += weight
+        if match.note and match.note not in item["notes"] and len(item["notes"]) < 3:
+            item["notes"].append(match.note)
+
+    if not stats:
+        group.wt_code = None
+        group.wt_name = None
+        group.wt_match_reason = "По ключевым словам WT не определён"
+        group.wt_match_confidence = 0.0
+        group.wt_match_candidates = None
+        group.wt_matched_at = matched_at
+        return
+
+    ranked = sorted(
+        stats.values(),
+        key=lambda item: (float(item["score"]), int(item["rows"]), item["wt_code"]),
+        reverse=True,
+    )
+    top = ranked[0]
+    confidence = (
+        max(0.0, min(1.0, float(top["score"]) / total_score))
+        if total_score > 0
+        else None
+    )
+
+    notes = ", ".join(top["notes"]) if top["notes"] else "по совпадениям в названиях работ"
+    group.wt_code = top["wt_code"]
+    group.wt_name = top["wt_name"]
+    group.wt_match_reason = (
+        f"По ключевым словам: {top['rows']} из {len(estimates)} позиций группы "
+        f"относятся к {top['wt_name']} ({notes})"
+    )
+    group.wt_match_confidence = confidence
+    group.wt_match_candidates = [
+        {"wt_code": item["wt_code"], "wt_name": item["wt_name"]}
+        for item in ranked[1:3]
+    ] or None
+    group.wt_matched_at = matched_at
+
+
+async def _match_wt_with_ai_for_ktp_group(
+    db: AsyncSession,
+    group: KtpGroup,
+    estimates: list[Estimate],
+    estimate_kind: int,
+) -> None:
+    matched_at = _now()
+    raw_group_text = _build_ktp_group_match_text(group, estimates).strip()
+    if not raw_group_text:
+        _clear_ktp_group_wt_match(group, matched_at)
+        return
+
+    nw_palette = await get_palette(db, estimate_kind)
+    wt_palette = _build_wt_palette(nw_palette)
+    if not wt_palette:
+        _clear_ktp_group_wt_match(group, matched_at)
+        return
+
+    wt_by_code = {item["wt_code"]: item for item in wt_palette}
+    user_prompt = f"""Ты классифицируешь группу строительной сметы по верхнему уровню work type (WT).
+Выбери только один WT код из палитры ниже или верни null, если подходящий WT определить нельзя.
+Ответ верни строго JSON-объектом без markdown.
+
+ПАЛИТРА ДОПУСТИМЫХ WT:
+{_format_wt_palette_for_prompt(wt_palette)}
+
+ГРУППА СМЕТЫ:
+{raw_group_text}
+
+Верни JSON такого вида:
+{{
+  "wt_code": "WT-01",
+  "reason": "Краткое объяснение выбора на русском",
+  "confidence": 0.84,
+  "alternatives": ["WT-02", "WT-05"]
+}}
+
+Если выбор сделать нельзя, верни:
+{{
+  "wt_code": null,
+  "reason": "Почему не удалось определить",
+  "confidence": 0.0,
+  "alternatives": []
+}}"""
+
+    try:
+        raw = await create_chat_completion(
+            model=settings.KTP_GENERATION_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты эксперт по строительным сметам. "
+                        "Классифицируешь группу работ только по допустимым WT кодам. "
+                        "Возвращаешь строго JSON."
+                    ),
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=700,
+        )
+        parsed = parse_json_object(raw)
+    except Exception:
+        logger.exception("WT match failed for KTP group %s", group.id)
+        _clear_ktp_group_wt_match(group)
+        return
+
+    reason = _nonempty(
+        str(parsed.get("reason") or "") if parsed.get("reason") is not None else None
+    )
+    confidence = _normalize_wt_confidence(parsed.get("confidence"))
+    alternatives = []
+    for candidate_code in _extract_wt_candidate_codes(parsed.get("alternatives")):
+        candidate = wt_by_code.get(candidate_code)
+        if candidate:
+            alternatives.append(
+                {"wt_code": candidate_code, "wt_name": candidate["wt_name"]}
+            )
+
+    wt_code_raw = parsed.get("wt_code")
+    wt_code = (
+        str(wt_code_raw).strip().upper()
+        if isinstance(wt_code_raw, str) and wt_code_raw.strip()
+        else None
+    )
+    if wt_code is None:
+        group.wt_code = None
+        group.wt_name = None
+        group.wt_match_reason = reason
+        group.wt_match_confidence = confidence
+        group.wt_match_candidates = alternatives or None
+        group.wt_matched_at = matched_at
+        return
+
+    if wt_code not in wt_by_code:
+        _clear_ktp_group_wt_match(group)
+        return
+
+    group.wt_code = wt_code
+    group.wt_name = wt_by_code[wt_code]["wt_name"]
+    group.wt_match_reason = reason
+    group.wt_match_confidence = confidence
+    group.wt_match_candidates = [
+        candidate for candidate in alternatives if candidate["wt_code"] != wt_code
+    ] or None
+    group.wt_matched_at = matched_at
+
+
+async def _ensure_ktp_group_wt_matches(
+    db: AsyncSession,
+    batch: EstimateBatch,
+    groups: list[KtpGroup],
+) -> list[KtpGroup]:
+    changed = False
+    for group in groups:
+        if group.wt_matched_at is not None:
+            continue
+        estimates = await _load_estimates_for_group(db, group)
+        await _match_wt_by_keywords_for_ktp_group(
+            db, group, estimates, batch.estimate_kind
+        )
+        changed = True
+
+    if changed:
+        await db.commit()
+        return (
+            await get_ktp_groups(db, groups[0].project_id, groups[0].estimate_batch_id)
+            if groups
+            else groups
+        )
+    return groups
+
+
 async def build_ktp_groups_for_batch(
     db: AsyncSession,
     project_id: str,
     estimate_batch_id: str,
     force: bool = False,
 ) -> list[KtpGroup]:
-    await _assert_batch_belongs_to_project(db, project_id, estimate_batch_id)
+    batch = await _assert_batch_belongs_to_project(db, project_id, estimate_batch_id)
 
     existing = await get_ktp_groups(db, project_id, estimate_batch_id)
     if existing and not force:
-        return existing
+        return await _ensure_ktp_group_wt_matches(db, batch, existing)
 
     if existing and force:
         for group in existing:
@@ -172,6 +488,9 @@ async def build_ktp_groups_for_batch(
         )
         db.add(group)
         result.append(group)
+        await _match_wt_by_keywords_for_ktp_group(
+            db, group, items, batch.estimate_kind
+        )
 
     try:
         await db.flush()
@@ -191,6 +510,32 @@ async def build_ktp_groups_for_batch(
             )
             return existing
         raise exc
+
+
+async def ai_match_ktp_groups_for_batch(
+    db: AsyncSession,
+    project_id: str,
+    estimate_batch_id: str,
+    *,
+    only_unmatched: bool = True,
+) -> list[KtpGroup]:
+    batch = await _assert_batch_belongs_to_project(db, project_id, estimate_batch_id)
+    groups = await get_ktp_groups(db, project_id, estimate_batch_id)
+    if not groups:
+        return []
+
+    changed = False
+    for group in groups:
+        if only_unmatched and group.wt_code:
+            continue
+        estimates = await _load_estimates_for_group(db, group)
+        await _match_wt_with_ai_for_ktp_group(db, group, estimates, batch.estimate_kind)
+        changed = True
+
+    if changed:
+        await db.commit()
+        return await get_ktp_groups(db, project_id, estimate_batch_id)
+    return groups
 
 
 async def generate_ktp_for_group(

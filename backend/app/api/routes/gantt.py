@@ -30,7 +30,7 @@ from app.services.gantt_service import (
     accept_overdue_baseline,
     get_baseline_status,
     get_effective_progress, update_leaf_progress,
-    resolve_project_dates, reorder_task, soft_delete_task, split_task_by_date,
+    resolve_project_dates, reorder_task, soft_delete_project_tasks, soft_delete_task, split_task_by_date,
     _refresh_is_group,
 )
 
@@ -456,6 +456,24 @@ async def split_task(
         created_task=await _enrich_task(created_task, db),
         affected_tasks=affected,
     )
+
+
+@router.delete("/clear")
+async def clear_tasks(
+    project_id: UUID,
+    estimate_batch_id: UUID | None = Query(default=None),
+    current_user = Depends(get_current_user),
+    member: ProjectMember = Depends(require_action(Action.DELETE)),
+    db: AsyncSession = Depends(get_db),
+):
+    deleted_ids = await soft_delete_project_tasks(
+        project_id=str(project_id),
+        actor_id=current_user.id,
+        db=db,
+        estimate_batch_id=str(estimate_batch_id) if estimate_batch_id else None,
+    )
+    await db.commit()
+    return {"deleted": deleted_ids, "deleted_count": len(deleted_ids)}
 
 
 # ── DELETE /projects/{pid}/gantt/{tid} ────────────────────────────────────────

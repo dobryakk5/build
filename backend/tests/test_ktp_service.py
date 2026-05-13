@@ -141,6 +141,58 @@ def test_clean_json_strips_markdown():
     assert _clean_json('```json\n{"a": 1}\n```') == '{"a": 1}'
 
 
+def test_build_ktp_group_match_text_includes_group_and_works():
+    from app.services.ktp_service import _build_ktp_group_match_text
+
+    group = make_group(title="Монтаж потолков")
+    estimates = [
+        make_estimate("e1", "Устройство каркаса"),
+        make_estimate("e2", "Обшивка ГКЛ"),
+    ]
+
+    text = _build_ktp_group_match_text(group, estimates)
+    assert "Монтаж потолков" in text
+    assert "Устройство каркаса" in text
+    assert "Обшивка ГКЛ" in text
+
+
+def test_build_wt_palette_groups_nw_examples_under_wt():
+    from app.services.ktp_service import _build_wt_palette
+
+    palette = _build_wt_palette(
+        [
+            {
+                "work_type_code": "WT-01",
+                "work_type_name": "Демонтаж",
+                "unique_label": "Демонтаж потолков",
+            },
+            {
+                "work_type_code": "WT-01",
+                "work_type_name": "Демонтаж",
+                "unique_label": "Демонтаж стен",
+            },
+            {
+                "work_type_code": "WT-02",
+                "work_type_name": "Монтаж",
+                "unique_label": "Монтаж перегородок",
+            },
+        ]
+    )
+
+    assert palette == [
+        {
+            "wt_code": "WT-01",
+            "wt_name": "Демонтаж",
+            "examples": ["Демонтаж потолков", "Демонтаж стен"],
+        },
+        {
+            "wt_code": "WT-02",
+            "wt_name": "Монтаж",
+            "examples": ["Монтаж перегородок"],
+        },
+    ]
+
+
 @pytest.mark.asyncio
 async def test_batch_wrong_project_raises():
     from app.services.ktp_service import _assert_batch_belongs_to_project
@@ -192,6 +244,103 @@ async def test_generate_returns_questions_when_insufficient():
     assert result["questions"][0]["key"] == "concrete_grade"
     assert fake_card.status == "questions_required"
     assert fake_group.status == "questions_required"
+
+
+@pytest.mark.asyncio
+async def test_keyword_match_wt_for_group_sets_wt_fields():
+    from app.services.ktp_service import _match_wt_by_keywords_for_ktp_group
+
+    fake_group = make_group(title="Демонтаж потолков")
+    fake_estimates = [
+        make_estimate("e1", "Демонтаж подвесного потолка"),
+        make_estimate("e2", "Демонтаж каркаса потолка"),
+    ]
+
+    with patch(
+        "app.services.ktp_service.get_palette",
+        AsyncMock(
+            return_value=[
+                {
+                    "nw_item_code": "NW-001",
+                    "work_type_code": "WT-01",
+                    "work_type_name": "Демонтажные работы",
+                    "unique_label": "Демонтаж потолков",
+                },
+                {
+                    "nw_item_code": "NW-002",
+                    "work_type_code": "WT-02",
+                    "work_type_name": "Монтажные работы",
+                    "unique_label": "Монтаж потолков",
+                },
+            ]
+        ),
+    ), patch(
+        "app.services.ktp_service.match_estimate_row",
+        side_effect=[
+            MagicMock(nw_code="NW-001", confidence="high", note="по ключевому слову: демонтаж"),
+            MagicMock(nw_code="NW-001", confidence="high", note="по ключевому слову: демонтаж"),
+        ],
+    ):
+        await _match_wt_by_keywords_for_ktp_group(
+            AsyncMock(), fake_group, fake_estimates, 1
+        )
+
+    assert fake_group.wt_code == "WT-01"
+    assert fake_group.wt_name == "Демонтажные работы"
+    assert "По ключевым словам" in fake_group.wt_match_reason
+    assert fake_group.wt_match_confidence is not None
+    assert fake_group.wt_match_confidence > 0
+
+
+@pytest.mark.asyncio
+async def test_ai_match_wt_for_group_sets_wt_fields():
+    from app.services.ktp_service import _match_wt_with_ai_for_ktp_group
+
+    fake_group = make_group(title="Демонтаж потолков")
+    fake_estimates = [
+        make_estimate("e1", "Разборка подвесного потолка"),
+        make_estimate("e2", "Снятие профиля"),
+    ]
+
+    with (
+        patch(
+            "app.services.ktp_service.get_palette",
+            AsyncMock(
+                return_value=[
+                    {
+                        "work_type_code": "WT-01",
+                        "work_type_name": "Демонтажные работы",
+                        "unique_label": "Демонтаж потолков",
+                    },
+                    {
+                        "work_type_code": "WT-02",
+                        "work_type_name": "Монтажные работы",
+                        "unique_label": "Монтаж потолков",
+                    },
+                ]
+            ),
+        ),
+        patch(
+            "app.services.ktp_service.create_chat_completion",
+            AsyncMock(
+                return_value="""{
+                    "wt_code": "WT-01",
+                    "reason": "В группе только работы по разборке существующих элементов.",
+                    "confidence": 0.92,
+                    "alternatives": ["WT-02"]
+                }"""
+            ),
+        ),
+    ):
+        await _match_wt_with_ai_for_ktp_group(AsyncMock(), fake_group, fake_estimates, 1)
+
+    assert fake_group.wt_code == "WT-01"
+    assert fake_group.wt_name == "Демонтажные работы"
+    assert fake_group.wt_match_reason == "В группе только работы по разборке существующих элементов."
+    assert fake_group.wt_match_confidence == 0.92
+    assert fake_group.wt_match_candidates == [
+        {"wt_code": "WT-02", "wt_name": "Монтажные работы"}
+    ]
 
 
 @pytest.mark.asyncio

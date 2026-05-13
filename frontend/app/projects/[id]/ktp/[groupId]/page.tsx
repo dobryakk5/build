@@ -19,6 +19,17 @@ function fmtPrice(value: number | null): string {
   return `${fmtMoney(value)} ₽`;
 }
 
+function wtMatchLabel(group: KtpGroup | null): string {
+  if (!group?.wt_code || !group.wt_name) {
+    return "WT не определён";
+  }
+  const confidence =
+    typeof group.wt_match_confidence === "number"
+      ? ` · ${Math.round(group.wt_match_confidence * 100)}%`
+      : "";
+  return `WT: ${group.wt_code} · ${group.wt_name}${confidence}`;
+}
+
 function KtpTable({ card }: { card: KtpCard }) {
   return (
     <div>
@@ -402,6 +413,17 @@ export default function KtpGroupPage() {
             ← Назад к группам
           </Link>
           <div style={{ fontSize: 18, fontWeight: 600, marginBottom: 6 }}>{group?.title}</div>
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>{wtMatchLabel(group)}</div>
+          {group?.wt_match_reason ? (
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, maxWidth: 760 }}>
+              {group.wt_match_reason}
+            </div>
+          ) : null}
+          {group?.wt_match_candidates?.length ? (
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+              Альтернативы: {group.wt_match_candidates.map((candidate) => `${candidate.wt_code} · ${candidate.wt_name}`).join(", ")}
+            </div>
+          ) : null}
         </div>
 
         {nextGroup && (
