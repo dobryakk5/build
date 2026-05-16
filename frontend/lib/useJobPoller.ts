@@ -23,6 +23,7 @@ export interface JobResult {
   confidence?:        number;
   total_price?:       number;
   error?:             string;
+  _progress?:         string;
 }
 
 export interface Job {

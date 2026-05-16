@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -108,16 +109,17 @@ async def create_chat_completion(
     messages: Sequence[dict[str, Any]],
     temperature: float = 0.0,
     max_tokens: int = 500,
+    response_format: dict[str, Any] | None = None,
 ) -> str:
-    data = await _post_openrouter(
-        "/chat/completions",
-        {
-            "model": model,
-            "messages": list(messages),
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
-    )
+    payload: dict[str, Any] = {
+        "model": model,
+        "messages": list(messages),
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format is not None:
+        payload["response_format"] = response_format
+    data = await _post_openrouter("/chat/completions", payload)
     choices = data.get("choices", [])
     if not choices:
         raise RuntimeError("OpenRouter chat response did not return choices.")
@@ -135,6 +137,19 @@ async def create_chat_completion(
     raise RuntimeError("OpenRouter chat response content is missing.")
 
 
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+_SINGLE_LINE_COMMENT_RE = re.compile(r"//[^\n\r]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _soft_fix_json(s: str) -> str:
+    """Чинит типовые косяки LLM: trailing commas, // и /* */ комментарии."""
+    s = _BLOCK_COMMENT_RE.sub("", s)
+    s = _SINGLE_LINE_COMMENT_RE.sub("", s)
+    s = _TRAILING_COMMA_RE.sub(r"\1", s)
+    return s
+
+
 def parse_json_object(content: str) -> dict[str, Any]:
     trimmed = content.strip()
     if trimmed.startswith("```"):
@@ -142,15 +157,30 @@ def parse_json_object(content: str) -> dict[str, Any]:
         if trimmed.startswith("json"):
             trimmed = trimmed[4:].strip()
 
-    try:
-        value = json.loads(trimmed)
-    except json.JSONDecodeError:
+    def _try_load(s: str) -> dict[str, Any] | None:
+        try:
+            v = json.loads(s)
+        except json.JSONDecodeError:
+            return None
+        return v if isinstance(v, dict) else None
+
+    # 1) как есть
+    value = _try_load(trimmed)
+
+    # 2) с мягкой починкой (trailing commas, // /* */ комментарии)
+    if value is None:
+        value = _try_load(_soft_fix_json(trimmed))
+
+    # 3) подстрока между первым { и последним }
+    if value is None:
         start = trimmed.find("{")
         end = trimmed.rfind("}")
-        if start < 0 or end < 0 or end <= start:
-            raise RuntimeError("Model did not return a valid JSON object.")
-        value = json.loads(trimmed[start : end + 1])
+        if start >= 0 and end > start:
+            sub = trimmed[start : end + 1]
+            value = _try_load(sub) or _try_load(_soft_fix_json(sub))
 
+    if value is None:
+        raise RuntimeError("Model did not return a valid JSON object.")
     if not isinstance(value, dict):
         raise RuntimeError("Model returned JSON, but not an object.")
     return value

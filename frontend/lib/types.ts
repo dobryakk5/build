@@ -585,6 +585,87 @@ export type KtpGenerateResponse =
       ktp: KtpCard;
     };
 
+// ─────────────── КТП по смете (AI-flow) ───────────────
+
+export type KtpEstimateStatus =
+  | "stage1_pending"
+  | "stage1_processing"
+  | "stage1_review"
+  | "stage1_failed"
+  | "stage2_review"
+  | "gpr_pending"
+  | "gpr_processing"
+  | "gpr_done"
+  | "gpr_failed";
+
+export interface KtpEstimateSession {
+  id: string;
+  project_id: string;
+  estimate_batch_id: string;
+  status: KtpEstimateStatus;
+  error_message?: string | null;
+  stage1_job_id?: string | null;
+  gpr_job_id?: string | null;
+}
+
+export interface KtpWbsItem {
+  id: string;
+  group_id: string;
+  name: string;
+  sort_order: number;
+  origin: "from_estimate" | "ai_added" | "manual";
+  estimate_id?: string | null;
+  unit?: string | null;
+  quantity?: number | null;
+  quantity_source?: string | null;
+  review_status: "pending" | "accepted" | "rejected";
+  ai_reason?: string | null;
+  norm_source?: string | null;
+  norm_kind?: string | null;
+  norm_value?: number | null;
+  norm_unit?: string | null;
+  brigade_size?: number | null;
+  labor_hours?: number | null;
+  duration_days?: number | null;
+}
+
+export interface KtpWbsGroup {
+  id: string;
+  title: string;
+  sort_order: number;
+  wt_code?: string | null;
+  wt_name?: string | null;
+  status: "draft" | "card_questions" | "card_generated" | "card_failed";
+  start_date?: string | null;
+  duration_days?: number | null;
+  items: KtpWbsItem[];
+}
+
+export interface KtpWbsGroupDependency {
+  group_id: string;
+  depends_on_group_id: string;
+}
+
+export interface KtpWbs {
+  session: KtpEstimateSession;
+  groups: KtpWbsGroup[];
+  group_dependencies: KtpWbsGroupDependency[];
+}
+
+export interface KtpEstimateCard {
+  id: string;
+  title: string | null;
+  goal: string | null;
+  steps: KtpStep[];
+  recommendations: string[];
+  status: string;
+  questions_json?: KtpQuestion[] | null;
+}
+
+export type KtpEstimateCardResponse =
+  | { sufficient: false; questions: KtpQuestion[]; group_id: null; card: null }
+  | { sufficient: true; questions: []; group_id: string; card: KtpEstimateCard };
+
 // ─────────────── NW (нормализованные виды работ) ───────────────
 
 export interface NwWorkType {

@@ -20,6 +20,10 @@ import type {
   KtpCard,
   KtpGenerateResponse,
   KtpGroup,
+  KtpEstimateSession,
+  KtpEstimateCard,
+  KtpEstimateCardResponse,
+  KtpWbs,
   NwDictionaries,
   NwFerMapping,
   NwItem,
@@ -499,6 +503,109 @@ export const ktp = {
     }),
   card: (projectId: string, groupId: string) =>
     request<KtpCard>(`/projects/${projectId}/ktp/groups/${groupId}/card`),
+};
+
+export const ktpEstimate = {
+  startSession: (projectId: string, batchId: string, force = false) =>
+    request<{ job_id: string | null; session_id: string; status: string }>(
+      `/projects/${projectId}/ktp-estimate/sessions`,
+      { method: "POST", body: JSON.stringify({ estimate_batch_id: batchId, force }) },
+    ),
+  getSession: (projectId: string, batchId: string) =>
+    request<KtpEstimateSession | null>(
+      `/projects/${projectId}/ktp-estimate/sessions?estimate_batch_id=${batchId}`,
+    ),
+  getWbs: (projectId: string, sessionId: string) =>
+    request<KtpWbs>(`/projects/${projectId}/ktp-estimate/sessions/${sessionId}/wbs`),
+  updateItem: (
+    projectId: string,
+    itemId: string,
+    patch: Partial<{
+      name: string;
+      group_id: string;
+      review_status: string;
+      unit: string | null;
+      quantity: number | null;
+      sort_order: number;
+    }>,
+  ) =>
+    request<KtpWbs>(`/projects/${projectId}/ktp-estimate/items/${itemId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  createItem: (
+    projectId: string,
+    groupId: string,
+    payload: { name: string; unit?: string | null; quantity?: number | null },
+  ) =>
+    request<KtpWbs>(`/projects/${projectId}/ktp-estimate/groups/${groupId}/items`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteItem: (projectId: string, itemId: string) =>
+    request<KtpWbs>(`/projects/${projectId}/ktp-estimate/items/${itemId}`, {
+      method: "DELETE",
+    }),
+  createGroup: (projectId: string, sessionId: string, title: string) =>
+    request<KtpWbs>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/groups`,
+      { method: "POST", body: JSON.stringify({ title }) },
+    ),
+  updateGroup: (
+    projectId: string,
+    groupId: string,
+    patch: Partial<{ title: string; sort_order: number; wt_code: string | null }>,
+  ) =>
+    request<KtpWbs>(`/projects/${projectId}/ktp-estimate/groups/${groupId}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  deleteGroup: (projectId: string, groupId: string) =>
+    request<KtpWbs>(`/projects/${projectId}/ktp-estimate/groups/${groupId}`, {
+      method: "DELETE",
+    }),
+  approveStage1: (projectId: string, sessionId: string) =>
+    request<KtpEstimateSession>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-stage1`,
+      { method: "POST" },
+    ),
+  generateCard: (
+    projectId: string,
+    groupId: string,
+    answers: Record<string, string> = {},
+  ) =>
+    request<KtpEstimateCardResponse>(
+      `/projects/${projectId}/ktp-estimate/groups/${groupId}/generate-card`,
+      { method: "POST", body: JSON.stringify({ answers }) },
+    ),
+  getCard: (projectId: string, groupId: string) =>
+    request<KtpEstimateCard>(
+      `/projects/${projectId}/ktp-estimate/groups/${groupId}/card`,
+    ),
+  updateCard: (
+    projectId: string,
+    groupId: string,
+    patch: Partial<{
+      title: string;
+      goal: string;
+      steps: unknown[];
+      recommendations: string[];
+    }>,
+  ) =>
+    request<KtpEstimateCard>(
+      `/projects/${projectId}/ktp-estimate/groups/${groupId}/card`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+    ),
+  approveStage2: (projectId: string, sessionId: string) =>
+    request<KtpEstimateSession>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-stage2`,
+      { method: "POST" },
+    ),
+  buildGpr: (projectId: string, sessionId: string) =>
+    request<{ job_id: string }>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/build-gpr`,
+      { method: "POST" },
+    ),
 };
 
 export const nw = {

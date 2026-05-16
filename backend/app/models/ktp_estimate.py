@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import uuid
+
+from datetime import date
+
+from sqlalchemy import (
+    Date,
+    ForeignKey,
+    Integer,
+    Numeric,
+    SmallInteger,
+    String,
+    Text,
+    UniqueConstraint,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .base import Base, TimestampMixin
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
+class KtpEstimateSession(Base, TimestampMixin):
+    """Один прогон AI-flow «КТП по смете» на батч сметы."""
+
+    __tablename__ = "ktp_estimate_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id",
+            "estimate_batch_id",
+            name="uq_ktp_estimate_sessions_project_batch",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False), primary_key=True, default=_uuid
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    estimate_batch_id: Mapped[str] = mapped_column(
+        ForeignKey("estimate_batches.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="stage1_pending"
+    )
+    stage1_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL")
+    )
+    gpr_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="SET NULL")
+    )
+    stage1_raw_json: Mapped[dict | None] = mapped_column(JSONB)
+    llm_model: Mapped[str | None] = mapped_column(String(128))
+    prompt_version: Mapped[str | None] = mapped_column(String(32))
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    groups: Mapped[list["KtpWbsGroup"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="KtpWbsGroup.sort_order",
+    )
+
+
+class KtpWbsGroup(Base, TimestampMixin):
+    """Группа технологической последовательности внутри сеанса."""
+
+    __tablename__ = "ktp_wbs_groups"
+
+    id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False), primary_key=True, default=_uuid
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ktp_estimate_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[float] = mapped_column(
+        Numeric(20, 10), nullable=False, server_default="1000"
+    )
+    wt_code: Mapped[str | None] = mapped_column(String(10))
+    wt_name: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="draft"
+    )
+    # Этап 2 — карточка КТП
+    card_title: Mapped[str | None] = mapped_column(Text)
+    card_goal: Mapped[str | None] = mapped_column(Text)
+    card_steps_json: Mapped[list[dict] | None] = mapped_column(JSONB)
+    card_recommendations_json: Mapped[list[str] | None] = mapped_column(JSONB)
+    card_questions_json: Mapped[list[dict] | None] = mapped_column(JSONB)
+    card_answers_json: Mapped[dict[str, str] | None] = mapped_column(JSONB)
+    card_error_message: Mapped[str | None] = mapped_column(Text)
+    # Этап 3 — ГПР
+    start_date: Mapped[date | None] = mapped_column(Date)
+    duration_days: Mapped[int | None] = mapped_column(Integer)
+    gantt_task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("gantt_tasks.id", ondelete="SET NULL")
+    )
+
+    session: Mapped["KtpEstimateSession"] = relationship(back_populates="groups")
+    items: Mapped[list["KtpWbsItem"]] = relationship(
+        back_populates="group",
+        cascade="all, delete-orphan",
+        order_by="KtpWbsItem.sort_order",
+    )
+
+
+class KtpWbsItem(Base, TimestampMixin):
+    """Работа (лист WBS)."""
+
+    __tablename__ = "ktp_wbs_items"
+
+    id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False), primary_key=True, default=_uuid
+    )
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("ktp_wbs_groups.id", ondelete="CASCADE"), nullable=False
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ktp_estimate_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[float] = mapped_column(
+        Numeric(20, 10), nullable=False, server_default="1000"
+    )
+    # from_estimate | ai_added | manual
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="from_estimate"
+    )
+    estimate_id: Mapped[str | None] = mapped_column(
+        ForeignKey("estimates.id", ondelete="SET NULL")
+    )
+    unit: Mapped[str | None] = mapped_column(String(50))
+    quantity: Mapped[float | None] = mapped_column(Numeric(12, 3))
+    # estimate | ai_estimated | user
+    quantity_source: Mapped[str | None] = mapped_column(String(16))
+    # pending | accepted | rejected
+    review_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="accepted"
+    )
+    ai_reason: Mapped[str | None] = mapped_column(Text)
+    # Этап 3 — нормы и длительность
+    norm_source: Mapped[str | None] = mapped_column(String(8))  # enir | fer | ai
+    norm_ref: Mapped[str | None] = mapped_column(String(64))
+    # norm_time | vyrabotka | fallback | manual
+    norm_kind: Mapped[str | None] = mapped_column(String(12))
+    norm_value: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    norm_unit: Mapped[str | None] = mapped_column(String(32))
+    brigade_size: Mapped[int | None] = mapped_column(SmallInteger)
+    labor_hours: Mapped[float | None] = mapped_column(Numeric(12, 2))
+    duration_days: Mapped[int | None] = mapped_column(Integer)
+    gantt_task_id: Mapped[str | None] = mapped_column(
+        ForeignKey("gantt_tasks.id", ondelete="SET NULL")
+    )
+
+    group: Mapped["KtpWbsGroup"] = relationship(back_populates="items")
+
+
+class KtpWbsGroupDependency(Base):
+    """FS-зависимость между группами WBS."""
+
+    __tablename__ = "ktp_wbs_group_dependencies"
+
+    group_id: Mapped[str] = mapped_column(
+        ForeignKey("ktp_wbs_groups.id", ondelete="CASCADE"), primary_key=True
+    )
+    depends_on_group_id: Mapped[str] = mapped_column(
+        ForeignKey("ktp_wbs_groups.id", ondelete="CASCADE"), primary_key=True
+    )

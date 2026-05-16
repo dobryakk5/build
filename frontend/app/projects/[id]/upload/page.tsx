@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { estimates, ktp as ktpApi } from "@/lib/api";
+import { estimates, ktp as ktpApi, ktpEstimate } from "@/lib/api";
 import { fmtMoney } from "@/lib/dateUtils";
 import { useJobPoller } from "@/lib/useJobPoller";
 
@@ -45,7 +45,6 @@ export default function UploadPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
-  const redirectedRef = useRef(false);
 
   const [file, setFile] = useState<File | null>(null);
   const [drag, setDrag] = useState(false);
@@ -55,6 +54,7 @@ export default function UploadPage() {
   const [complexMode, setComplexMode] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [ktpLoading, setKtpLoading] = useState<"groups" | "estimate" | null>(null);
 
   const { job, loading: polling } = useJobPoller(jobId);
   const canUpload = estimateKind !== null;
@@ -86,20 +86,27 @@ export default function UploadPage() {
   const status = job?.status;
   const result = job?.result;
 
-  useEffect(() => {
-    if (status !== "done" || !result?.estimate_batch_id || redirectedRef.current) {
-      return;
+  async function handleKtpGroups(batchId: string) {
+    setKtpLoading("groups");
+    try {
+      await ktpApi.buildGroups(id, batchId).catch(() => null);
+      router.replace(`/projects/${id}/ktp?batch=${batchId}`);
+    } finally {
+      setKtpLoading(null);
     }
+  }
 
-    redirectedRef.current = true;
-
-    void ktpApi
-      .buildGroups(id, result.estimate_batch_id)
-      .catch(() => null)
-      .finally(() => {
-        router.replace(`/projects/${id}/ktp?batch=${result.estimate_batch_id}`);
-      });
-  }, [id, result?.estimate_batch_id, router, status]);
+  async function handleKtpEstimate(batchId: string) {
+    setKtpLoading("estimate");
+    try {
+      const { job_id, session_id } = await ktpEstimate.startSession(id, batchId);
+      const suffix = job_id ? `?job=${job_id}` : "";
+      router.replace(`/projects/${id}/ktp-estimate/${session_id}${suffix}`);
+    } catch (e: any) {
+      alert(e.message);
+      setKtpLoading(null);
+    }
+  }
 
   return (
     <div
@@ -321,8 +328,45 @@ export default function UploadPage() {
               </span>
             ))}
           </div>
-          <div style={{ marginTop: 14, fontSize: 13, color: "#15803d", fontWeight: 600 }}>
-            Переходим к группам работ для создания КТП...
+          <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button
+              onClick={() => handleKtpGroups(result.estimate_batch_id!)}
+              disabled={ktpLoading !== null}
+              style={{
+                flex: 1,
+                minWidth: 180,
+                padding: "11px 16px",
+                background: "var(--surface)",
+                color: "var(--text)",
+                border: "1px solid var(--border2)",
+                borderRadius: 6,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: ktpLoading !== null ? "default" : "pointer",
+                opacity: ktpLoading !== null ? 0.7 : 1,
+              }}
+            >
+              {ktpLoading === "groups" ? "Формируем группы..." : "КТП по группам"}
+            </button>
+            <button
+              onClick={() => handleKtpEstimate(result.estimate_batch_id!)}
+              disabled={ktpLoading !== null}
+              style={{
+                flex: 1,
+                minWidth: 180,
+                padding: "11px 16px",
+                background: "var(--blue-dark)",
+                color: "#fff",
+                border: "none",
+                borderRadius: 6,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: ktpLoading !== null ? "default" : "pointer",
+                opacity: ktpLoading !== null ? 0.7 : 1,
+              }}
+            >
+              {ktpLoading === "estimate" ? "ИИ анализирует смету..." : "КТП по смете"}
+            </button>
           </div>
         </div>
       )}

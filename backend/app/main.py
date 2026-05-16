@@ -21,6 +21,7 @@ from app.api.routes.users         import router as users_router
 from app.api.routes.admin         import router as admin_router
 from app.api.routes.foreman_reports import router as foreman_reports_router
 from app.api.routes.ktp           import router as ktp_router
+from app.api.routes.ktp_estimate  import router as ktp_estimate_router
 from app.api.routes.nw            import router as nw_router
 from app.api.routes.work_plan     import router as work_plan_router
 
@@ -66,6 +67,7 @@ app.include_router(users_router)
 app.include_router(admin_router)
 app.include_router(foreman_reports_router)
 app.include_router(ktp_router)
+app.include_router(ktp_estimate_router)
 app.include_router(nw_router)
 app.include_router(work_plan_router)
 

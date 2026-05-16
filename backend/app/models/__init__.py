@@ -10,6 +10,12 @@ from .material_delay import MaterialDelayEvent
 from .schedule_baseline import ScheduleBaseline, ScheduleBaselineTask
 from .gantt        import GanttTask, TaskDependency
 from .ktp          import KtpGroup, KtpCard
+from .ktp_estimate import (
+    KtpEstimateSession,
+    KtpWbsGroup,
+    KtpWbsItem,
+    KtpWbsGroupDependency,
+)
 from .foreman_task_report import ForemanTaskReport
 from .other        import (
     Comment,
@@ -70,6 +76,7 @@ __all__ = [
     "ScheduleBaseline", "ScheduleBaselineTask",
     "GanttTask", "TaskDependency",
     "KtpGroup", "KtpCard",
+    "KtpEstimateSession", "KtpWbsGroup", "KtpWbsItem", "KtpWbsGroupDependency",
     "ForemanTaskReport",
     "Comment", "TaskHistory", "Job",
     "DailyReport", "DailyReportItem",

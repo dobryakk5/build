@@ -1,0 +1,634 @@
+"""Этап 3 — построение ГПР (график производства работ) из утверждённого КТП.
+
+- Длительности: ИИ выбирает норму, КОД считает T детерминированно.
+- Зависимости: ИИ упорядочивает ГРУППЫ (FS), код проверяет циклы.
+- Даты: топологический прямой проход по группам.
+- Результат пишется в gantt_tasks + task_dependencies.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import uuid
+from datetime import date, datetime
+
+from sqlalchemy import delete, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.config import settings
+from app.core.date_utils import next_task_start_date, task_end_date
+from app.models import (
+    EnirNorm,
+    EnirParagraph,
+    EstimateBatch,
+    GanttTask,
+    Job,
+    KtpEstimateSession,
+    KtpWbsGroup,
+    KtpWbsGroupDependency,
+    KtpWbsItem,
+    TaskDependency,
+)
+from app.models.estimate import Estimate
+from app.services.gantt_calculations import (
+    DEFAULT_HOURS_PER_DAY,
+    calculate_labor_hours,
+    calculate_working_days,
+)
+from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_BRIGADE_SIZE = 3
+MAX_DURATION_DAYS = 365
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ЗАПУСК
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def start_gpr_job(
+    db: AsyncSession, project_id: str, session_id: str, user_id: str
+) -> Job:
+    session = await db.scalar(
+        select(KtpEstimateSession)
+        .where(KtpEstimateSession.id == session_id)
+        .where(KtpEstimateSession.project_id == project_id)
+    )
+    if not session:
+        raise ValueError(f"Сеанс КТП {session_id} не найден в проекте {project_id}")
+    if session.status not in {"gpr_pending", "gpr_failed", "gpr_done"}:
+        raise ValueError(
+            "ГПР можно строить только после утверждения карточек КТП (этап 2)"
+        )
+
+    job = Job(
+        id=_uuid(),
+        type="ktp_gpr_build",
+        status="pending",
+        project_id=project_id,
+        created_by=user_id,
+        input={"session_id": session_id},
+    )
+    db.add(job)
+    # Сначала INSERT Job — иначе UPDATE сессии падает по FK.
+    await db.flush()
+    session.gpr_job_id = job.id
+    session.status = "gpr_pending"
+    await db.commit()
+
+    asyncio.create_task(_process_gpr(job.id))
+    return job
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ФОНОВАЯ ОБРАБОТКА
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _process_gpr(job_id: str) -> None:
+    from app.core.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, job_id)
+        if not job:
+            return
+        session_id = job.input.get("session_id")
+        session = await db.get(KtpEstimateSession, session_id)
+        if not session:
+            return
+
+        job.status = "processing"
+        job.started_at = datetime.utcnow()
+        session.status = "gpr_processing"
+        await db.commit()
+
+        warnings: list[str] = []
+        try:
+            batch = await db.get(EstimateBatch, session.estimate_batch_id)
+            groups = list(
+                await db.scalars(
+                    select(KtpWbsGroup)
+                    .where(KtpWbsGroup.session_id == session_id)
+                    .options(selectinload(KtpWbsGroup.items))
+                    .order_by(KtpWbsGroup.sort_order)
+                )
+            )
+            # только принятые работы — НЕ мутируем relationship (delete-orphan),
+            # держим отдельный список на не-mapped атрибуте группы
+            for g in groups:
+                g.accepted_items = [
+                    it for it in g.items if it.review_status != "rejected"
+                ]
+            groups = [g for g in groups if g.accepted_items]
+            if not groups:
+                raise ValueError("В КТП нет принятых работ для построения ГПР")
+
+            hours_per_day = float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY)
+
+            # Шаг 3 — длительности
+            await _compute_durations(db, groups, hours_per_day, warnings)
+
+            # Шаг 4 — зависимости между группами
+            dep_edges = await _resolve_group_dependencies(groups, warnings)
+            await db.execute(
+                delete(KtpWbsGroupDependency).where(
+                    KtpWbsGroupDependency.group_id.in_([g.id for g in groups])
+                )
+            )
+            for gid, dep_gid in dep_edges:
+                db.add(
+                    KtpWbsGroupDependency(group_id=gid, depends_on_group_id=dep_gid)
+                )
+
+            # Даты — топологический проход по группам
+            start_default = batch.start_date or date.today()
+            _schedule_groups(groups, dep_edges, start_default)
+
+            # Запись в gantt_tasks
+            counts = await _write_gantt(db, session, batch, groups, dep_edges)
+
+            session.status = "gpr_done"
+            session.error_message = None
+            job.status = "done"
+            job.result = {
+                "session_id": session_id,
+                "gantt_tasks_count": counts["tasks"],
+                "dependency_count": counts["deps"],
+                "warnings": warnings,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("KTP GPR build failed for job %s", job_id)
+            session.status = "gpr_failed"
+            session.error_message = str(exc)
+            job.status = "failed"
+            job.result = {"error": str(exc), "warnings": warnings}
+        finally:
+            job.finished_at = datetime.utcnow()
+            await db.commit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ШАГ 3 — ДЛИТЕЛЬНОСТИ
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _compute_durations(
+    db: AsyncSession,
+    groups: list[KtpWbsGroup],
+    hours_per_day: float,
+    warnings: list[str],
+) -> None:
+    items = [it for g in groups for it in g.accepted_items]
+    hints = await _ground_norms(db, items)
+
+    norms = await _ai_pick_norms(groups, items, hints, warnings)
+
+    for it in items:
+        norm = norms.get(it.id, {})
+        # объём
+        quantity = float(it.quantity) if it.quantity is not None else None
+        if quantity is None:
+            est_qty = norm.get("estimated_quantity")
+            if isinstance(est_qty, (int, float)) and est_qty > 0:
+                quantity = float(est_qty)
+                it.quantity = quantity
+                it.quantity_source = "ai_estimated"
+                warnings.append(
+                    f"Объём работы «{it.name}» оценён ИИ ({quantity:g})"
+                )
+
+        brigade = norm.get("brigade_size")
+        brigade = int(brigade) if isinstance(brigade, (int, float)) and brigade else DEFAULT_BRIGADE_SIZE
+        it.brigade_size = max(1, brigade)
+
+        norm_kind = norm.get("norm_kind")
+        norm_value = norm.get("norm_value")
+        norm_value = float(norm_value) if isinstance(norm_value, (int, float)) and norm_value > 0 else None
+
+        if quantity is None or norm_value is None or norm_kind not in {"norm_time", "vyrabotka"}:
+            it.norm_kind = "fallback"
+            it.norm_source = "ai"
+            it.norm_value = None
+            it.norm_unit = None
+            it.duration_days = 1
+            it.labor_hours = float(
+                calculate_labor_hours(1, it.brigade_size, hours_per_day)
+            )
+            warnings.append(
+                f"Для работы «{it.name}» не удалось определить норму — длительность 1 день"
+            )
+            continue
+
+        it.norm_source = hints.get(it.id, {}).get("source", "ai")
+        it.norm_kind = norm_kind
+        it.norm_value = norm_value
+        it.norm_unit = str(norm.get("norm_unit") or "").strip()[:32] or None
+        it.norm_ref = str(norm.get("norm_ref") or "").strip()[:64] or hints.get(it.id, {}).get("ref")
+
+        if norm_kind == "norm_time":
+            # norm_value = чел-ч на единицу
+            labor = quantity * norm_value
+            duration = calculate_working_days(labor, it.brigade_size, hours_per_day) or 1
+        else:
+            # vyrabotka = единиц на одного рабочего в день
+            duration = math.ceil(quantity / (norm_value * it.brigade_size))
+            duration = max(1, duration)
+            labor = calculate_labor_hours(duration, it.brigade_size, hours_per_day)
+
+        it.duration_days = max(1, min(MAX_DURATION_DAYS, int(duration)))
+        it.labor_hours = float(labor)
+
+    # длительность группы = max по принятым работам
+    for g in groups:
+        g.duration_days = max(
+            (it.duration_days or 1) for it in g.accepted_items
+        )
+
+
+async def _ground_norms(
+    db: AsyncSession, items: list[KtpWbsItem]
+) -> dict[str, dict]:
+    """item_id -> {hint, source, ref} из ФЕР/ЕНиР по связанной позиции сметы."""
+    estimate_ids = [it.estimate_id for it in items if it.estimate_id]
+    if not estimate_ids:
+        return {}
+
+    estimates = {
+        e.id: e
+        for e in await db.scalars(
+            select(Estimate).where(Estimate.id.in_(estimate_ids))
+        )
+    }
+    hints: dict[str, dict] = {}
+    for it in items:
+        est = estimates.get(it.estimate_id) if it.estimate_id else None
+        if not est:
+            continue
+        if est.fer_words_human_hours is not None:
+            hints[it.id] = {
+                "hint": f"ФЕР: ~{float(est.fer_words_human_hours):.3f} чел-ч/ед",
+                "source": "fer",
+                "ref": est.fer_words_code,
+            }
+            continue
+        if est.enir_code:
+            para = await db.scalar(
+                select(EnirParagraph)
+                .where(EnirParagraph.code == est.enir_code)
+                .limit(1)
+            )
+            if para:
+                norm = await db.scalar(
+                    select(EnirNorm)
+                    .where(EnirNorm.paragraph_id == para.id)
+                    .where(EnirNorm.norm_time.isnot(None))
+                    .limit(1)
+                )
+                if norm and norm.norm_time:
+                    hints[it.id] = {
+                        "hint": (
+                            f"ЕНиР {para.code}: ~{float(norm.norm_time):.3f} "
+                            f"чел-ч/{para.unit or 'ед'}"
+                        ),
+                        "source": "enir",
+                        "ref": para.code,
+                    }
+    return hints
+
+
+async def _ai_pick_norms(
+    groups: list[KtpWbsGroup],
+    items: list[KtpWbsItem],
+    hints: dict[str, dict],
+    warnings: list[str],
+) -> dict[str, dict]:
+    lines: list[str] = []
+    for g in groups:
+        lines.append(f"# Группа: {g.title}")
+        for it in g.accepted_items:
+            qty = (
+                f"{float(it.quantity):g} {it.unit or ''}".strip()
+                if it.quantity is not None
+                else "ОБЪЁМ НЕИЗВЕСТЕН"
+            )
+            hint = hints.get(it.id, {}).get("hint")
+            hint_s = f" | подсказка: {hint}" if hint else ""
+            lines.append(f"  [{it.id}] {it.name} | {qty}{hint_s}")
+    body = "\n".join(lines)
+
+    prompt = f"""Ты эксперт-нормировщик в строительстве. Для каждой работы выбери
+норму производительности. НЕ СЧИТАЙ длительность — только выбери норму.
+
+Для каждой работы верни одно из:
+- "norm_kind": "norm_time", "norm_value": <чел-ч на единицу объёма>
+- "norm_kind": "vyrabotka", "norm_value": <единиц объёма на 1 рабочего в день>
+Также: "norm_unit" (текст, напр. "чел-ч/м3"), "brigade_size" (рекоменд. размер бригады),
+"norm_ref" (код нормы если знаешь). Если объём неизвестен — оцени "estimated_quantity".
+
+РАБОТЫ:
+{body}
+
+Верни строго JSON без markdown:
+{{"items": [
+  {{"id": "<id работы>", "norm_kind": "norm_time", "norm_value": 0.45,
+    "norm_unit": "чел-ч/м2", "brigade_size": 3, "norm_ref": "",
+    "estimated_quantity": null}}
+]}}"""
+
+    try:
+        raw = await create_chat_completion(
+            model=settings.KTP_GENERATION_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты эксперт-нормировщик. Выбираешь нормы, но никогда не "
+                        "считаешь арифметику. Возвращаешь СТРОГО валидный JSON: "
+                        "без markdown, без комментариев, без trailing commas."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=settings.KTP_ESTIMATE_MAX_TOKENS,
+            response_format={"type": "json_object"},
+        )
+        parsed = parse_json_object(raw)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("AI norm selection failed")
+        warnings.append(f"ИИ не смог подобрать нормы ({exc}) — длительности по умолчанию")
+        return {}
+
+    result: dict[str, dict] = {}
+    for entry in parsed.get("items") or []:
+        if isinstance(entry, dict) and entry.get("id"):
+            result[str(entry["id"])] = entry
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ШАГ 4 — ЗАВИСИМОСТИ МЕЖДУ ГРУППАМИ
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _resolve_group_dependencies(
+    groups: list[KtpWbsGroup], warnings: list[str]
+) -> list[tuple[str, str]]:
+    """Возвращает рёбра (group_id, depends_on_group_id) без циклов."""
+    if len(groups) < 2:
+        return []
+
+    lines = "\n".join(
+        f"  [{g.id}] {g.title}" + (f" (WT {g.wt_code})" if g.wt_code else "")
+        for g in groups
+    )
+    prompt = f"""Ты эксперт по организации строительства. Расставь технологические
+зависимости МЕЖДУ ГРУППАМИ работ. Только finish-to-start (группа начинается
+после полного завершения групп-предшественников). Без лагов.
+
+ГРУППЫ (в порядке предполагаемой последовательности):
+{lines}
+
+Верни строго JSON без markdown:
+{{"dependencies": [{{"group_id": "<id>", "depends_on_group_id": "<id>"}}]}}
+Указывай только реальные технологические связи. Параллельные группы не связывай."""
+
+    valid_ids = {g.id for g in groups}
+    edges: list[tuple[str, str]] = []
+    try:
+        raw = await create_chat_completion(
+            model=settings.KTP_GENERATION_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=2000,
+            response_format={"type": "json_object"},
+        )
+        parsed = parse_json_object(raw)
+        for dep in parsed.get("dependencies") or []:
+            if not isinstance(dep, dict):
+                continue
+            gid = str(dep.get("group_id") or "")
+            dep_gid = str(dep.get("depends_on_group_id") or "")
+            if gid in valid_ids and dep_gid in valid_ids and gid != dep_gid:
+                edges.append((gid, dep_gid))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("AI group dependency resolution failed")
+        warnings.append(f"ИИ не смог расставить зависимости ({exc})")
+        return []
+
+    return _drop_cycles(groups, edges, warnings)
+
+
+def _drop_cycles(
+    groups: list[KtpWbsGroup],
+    edges: list[tuple[str, str]],
+    warnings: list[str],
+) -> list[tuple[str, str]]:
+    """Убирает рёбра, образующие циклы (Kahn-подобно)."""
+    # adjacency: depends_on -> [dependents]
+    accepted: list[tuple[str, str]] = []
+    # граф предшественников для проверки достижимости
+    preds: dict[str, set[str]] = {g.id: set() for g in groups}
+
+    def reachable(start: str, target: str) -> bool:
+        # есть ли путь target -> ... -> start по preds (target — предок start)
+        stack = [start]
+        seen = set()
+        while stack:
+            node = stack.pop()
+            if node == target:
+                return True
+            if node in seen:
+                continue
+            seen.add(node)
+            stack.extend(preds.get(node, ()))
+        return False
+
+    for gid, dep_gid in edges:
+        # ребро: gid зависит от dep_gid. Цикл, если dep_gid уже зависит от gid.
+        if reachable(dep_gid, gid):
+            warnings.append(
+                "Отброшена циклическая зависимость между группами "
+                f"{gid[:8]} и {dep_gid[:8]}"
+            )
+            continue
+        preds[gid].add(dep_gid)
+        accepted.append((gid, dep_gid))
+    return accepted
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ДАТЫ — ТОПОЛОГИЧЕСКИЙ ПРОХОД
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _schedule_groups(
+    groups: list[KtpWbsGroup],
+    edges: list[tuple[str, str]],
+    start_default: date,
+) -> None:
+    by_id = {g.id: g for g in groups}
+    deps: dict[str, list[str]] = {g.id: [] for g in groups}
+    for gid, dep_gid in edges:
+        deps[gid].append(dep_gid)
+
+    scheduled: dict[str, date] = {}
+
+    def resolve(gid: str, stack: set[str]) -> date:
+        if gid in scheduled:
+            return scheduled[gid]
+        if gid in stack:  # защита (циклы уже убраны, но на всякий случай)
+            scheduled[gid] = start_default
+            return start_default
+        stack.add(gid)
+        g = by_id[gid]
+        if not deps[gid]:
+            start = start_default
+        else:
+            start = max(
+                next_task_start_date(
+                    resolve(dep_gid, stack), by_id[dep_gid].duration_days or 1
+                )
+                for dep_gid in deps[gid]
+            )
+        stack.discard(gid)
+        g.start_date = start
+        scheduled[gid] = start
+        return start
+
+    for g in groups:
+        resolve(g.id, set())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ЗАПИСЬ В GANTT
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _write_gantt(
+    db: AsyncSession,
+    session: KtpEstimateSession,
+    batch: EstimateBatch,
+    groups: list[KtpWbsGroup],
+    dep_edges: list[tuple[str, str]],
+) -> dict[str, int]:
+    from app.services.upload_service import _get_row_order_offset
+
+    project_id = session.project_id
+    batch_id = batch.id
+
+    # soft-delete существующих задач батча + их зависимостей
+    existing_ids = list(
+        await db.scalars(
+            select(GanttTask.id)
+            .where(GanttTask.project_id == project_id)
+            .where(GanttTask.estimate_batch_id == batch_id)
+            .where(GanttTask.deleted_at.is_(None))
+        )
+    )
+    if existing_ids:
+        await db.execute(
+            delete(TaskDependency).where(
+                or_(
+                    TaskDependency.task_id.in_(existing_ids),
+                    TaskDependency.depends_on.in_(existing_ids),
+                )
+            )
+        )
+        await db.execute(
+            GanttTask.__table__.update()
+            .where(GanttTask.id.in_(existing_ids))
+            .values(deleted_at=datetime.utcnow())
+        )
+        await db.flush()
+
+    hours_per_day = float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY)
+    row_order = await _get_row_order_offset(project_id, db)
+    start_default = batch.start_date or date.today()
+
+    # корневая задача батча
+    max_end = max(
+        task_end_date(g.start_date or start_default, g.duration_days or 1)
+        for g in groups
+    )
+    root_days = max(1, (max_end - start_default).days + 1)
+    root = GanttTask(
+        id=_uuid(),
+        project_id=project_id,
+        estimate_batch_id=batch_id,
+        name=batch.name,
+        start_date=start_default,
+        working_days=root_days,
+        hours_per_day=hours_per_day,
+        progress=0,
+        is_group=True,
+        type="project",
+        color="#0f172a",
+        row_order=row_order,
+    )
+    db.add(root)
+    row_order += 1.0
+
+    tasks = 1
+    group_task_id: dict[str, str] = {}
+    for g in groups:
+        g_task = GanttTask(
+            id=_uuid(),
+            project_id=project_id,
+            estimate_batch_id=batch_id,
+            parent_id=root.id,
+            name=g.title,
+            start_date=g.start_date or start_default,
+            working_days=g.duration_days or 1,
+            hours_per_day=hours_per_day,
+            progress=0,
+            is_group=True,
+            type="project",
+            row_order=row_order,
+        )
+        db.add(g_task)
+        g.gantt_task_id = g_task.id
+        group_task_id[g.id] = g_task.id
+        row_order += 1.0
+        tasks += 1
+
+        for it in sorted(g.accepted_items, key=lambda x: float(x.sort_order)):
+            i_task = GanttTask(
+                id=_uuid(),
+                project_id=project_id,
+                estimate_batch_id=batch_id,
+                estimate_id=it.estimate_id,
+                parent_id=g_task.id,
+                name=it.name,
+                start_date=g.start_date or start_default,
+                working_days=it.duration_days or 1,
+                workers_count=it.brigade_size,
+                labor_hours=it.labor_hours,
+                hours_per_day=hours_per_day,
+                progress=0,
+                is_group=False,
+                type="task",
+                row_order=row_order,
+            )
+            db.add(i_task)
+            it.gantt_task_id = i_task.id
+            row_order += 1.0
+            tasks += 1
+
+    await db.flush()
+
+    # зависимости между ГРУППОВЫМИ задачами
+    deps = 0
+    for gid, dep_gid in dep_edges:
+        t1 = group_task_id.get(gid)
+        t2 = group_task_id.get(dep_gid)
+        if t1 and t2:
+            db.add(TaskDependency(task_id=t1, depends_on=t2))
+            deps += 1
+
+    batch.start_date = start_default
+    await db.flush()
+    return {"tasks": tasks, "deps": deps}

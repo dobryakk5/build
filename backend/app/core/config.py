@@ -66,6 +66,8 @@ class Settings(BaseSettings):
     FER_GROUP_COLLECTION_AMBIGUOUS_THRESHOLD: float = 0.40
     KTP_GENERATION_MODEL: str = "openai/gpt-4o-mini"
     KTP_MAX_TOKENS: int = 3000
+    KTP_ESTIMATE_MAX_TOKENS: int = 6000
+    KTP_ESTIMATE_CHUNK_ROWS: int = 80
 
     # Token lifetimes
     EMAIL_VERIFICATION_EXPIRE_HOURS: int = 24
