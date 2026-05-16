@@ -4,6 +4,7 @@ import smtplib
 import ssl
 from email.message import EmailMessage
 from email.utils import parseaddr
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -11,6 +12,10 @@ from app.core.config import settings
 
 
 logger = logging.getLogger(__name__)
+
+
+class EmailDeliveryError(RuntimeError):
+    pass
 
 
 def _full_url(path: str, token: str) -> str:
@@ -44,49 +49,76 @@ def resolve_email_provider() -> str:
     return "log"
 
 
+def _smtp_address() -> tuple[str, int]:
+    raw_host = settings.SMTP_HOST.strip()
+    if not raw_host:
+        raise EmailDeliveryError("SMTP_HOST is not configured")
+
+    parsed = urlsplit(raw_host if "://" in raw_host else f"//{raw_host}")
+    if parsed.scheme and parsed.scheme not in {"smtp", "smtps"}:
+        raise EmailDeliveryError("SMTP_HOST must not include an http/https URL scheme")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise EmailDeliveryError("SMTP_HOST must contain only a host name, with optional port")
+
+    try:
+        port = parsed.port or settings.SMTP_PORT
+    except ValueError as exc:
+        raise EmailDeliveryError("SMTP_HOST contains an invalid port") from exc
+
+    host = parsed.hostname or raw_host
+    if not host:
+        raise EmailDeliveryError("SMTP_HOST is not configured")
+    return host, port
+
+
 def _send_via_smtp(*, to_email: str, subject: str, html: str) -> None:
-    if not settings.SMTP_HOST:
-        raise RuntimeError("SMTP_HOST is not configured")
+    host, port = _smtp_address()
 
     message = _build_message(to_email=to_email, subject=subject, html=html)
     timeout = settings.SMTP_TIMEOUT_SECONDS
 
-    if settings.SMTP_USE_SSL:
-        with smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
+    try:
+        if settings.SMTP_USE_SSL:
+            with smtplib.SMTP_SSL(host, port, timeout=timeout) as server:
+                if settings.SMTP_USERNAME:
+                    server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
+                server.send_message(message, from_addr=_smtp_sender_email(), to_addrs=[to_email])
+            return
+
+        with smtplib.SMTP(host, port, timeout=timeout) as server:
+            server.ehlo()
+            if settings.SMTP_USE_TLS:
+                server.starttls(context=ssl.create_default_context())
+                server.ehlo()
             if settings.SMTP_USERNAME:
                 server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
             server.send_message(message, from_addr=_smtp_sender_email(), to_addrs=[to_email])
-        return
-
-    with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT, timeout=timeout) as server:
-        server.ehlo()
-        if settings.SMTP_USE_TLS:
-            server.starttls(context=ssl.create_default_context())
-            server.ehlo()
-        if settings.SMTP_USERNAME:
-            server.login(settings.SMTP_USERNAME, settings.SMTP_PASSWORD)
-        server.send_message(message, from_addr=_smtp_sender_email(), to_addrs=[to_email])
+    except (OSError, smtplib.SMTPException) as exc:
+        raise EmailDeliveryError(f"SMTP delivery failed via {host}:{port}: {exc}") from exc
 
 
 async def _send_email(*, to_email: str, subject: str, html: str) -> str:
     provider = resolve_email_provider()
 
     if provider == "resend":
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                "https://api.resend.com/emails",
-                headers={
-                    "Authorization": f"Bearer {settings.RESEND_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "from": settings.EMAIL_FROM,
-                    "to": [to_email],
-                    "subject": subject,
-                    "html": html,
-                },
-            )
-            response.raise_for_status()
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    "https://api.resend.com/emails",
+                    headers={
+                        "Authorization": f"Bearer {settings.RESEND_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "from": settings.EMAIL_FROM,
+                        "to": [to_email],
+                        "subject": subject,
+                        "html": html,
+                    },
+                )
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise EmailDeliveryError(f"Resend delivery failed: {exc}") from exc
         logger.info("email_sent", extra={"provider": "resend", "to": to_email, "subject": subject})
         return "resend"
 

@@ -184,6 +184,30 @@ async def test_send_verification_email_safe_returns_provider_on_success(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_send_verification_email_safe_logs_delivery_errors_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.api.routes import auth as auth_routes
+
+    async def fake_send_verification_email(*, to_email: str, token: str) -> str:
+        raise auth_routes.EmailDeliveryError("SMTP_HOST is not configured")
+
+    monkeypatch.setattr(auth_routes, "send_verification_email", fake_send_verification_email)
+    monkeypatch.setattr(auth_routes, "resolve_email_provider", lambda: "smtp")
+    caplog.set_level(logging.WARNING, logger=auth_routes.logger.name)
+
+    assert await auth_routes._send_verification_email_safe(email="user@example.com", token="token-123") == (
+        False,
+        "smtp",
+        "SMTP_HOST is not configured",
+    )
+
+    assert "Failed to send verification email to user@example.com via smtp: SMTP_HOST is not configured" in caplog.text
+    assert "Traceback" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_send_password_reset_email_safe_returns_error_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

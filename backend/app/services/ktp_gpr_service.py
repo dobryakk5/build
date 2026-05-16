@@ -13,6 +13,7 @@ import logging
 import math
 import uuid
 from datetime import date, datetime
+from typing import Awaitable, Callable
 
 from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,7 +65,7 @@ async def start_gpr_job(
     )
     if not session:
         raise ValueError(f"Сеанс КТП {session_id} не найден в проекте {project_id}")
-    if session.status not in {"gpr_pending", "gpr_failed", "gpr_done"}:
+    if session.status not in {"gpr_pending", "gpr_processing", "gpr_failed", "gpr_done"}:
         raise ValueError(
             "ГПР можно строить только после утверждения карточек КТП (этап 2)"
         )
@@ -81,7 +82,7 @@ async def start_gpr_job(
     # Сначала INSERT Job — иначе UPDATE сессии падает по FK.
     await db.flush()
     session.gpr_job_id = job.id
-    session.status = "gpr_pending"
+    session.status = "gpr_processing"
     await db.commit()
 
     asyncio.create_task(_process_gpr(job.id))
@@ -109,6 +110,10 @@ async def _process_gpr(job_id: str) -> None:
         session.status = "gpr_processing"
         await db.commit()
 
+        async def _progress(msg: str) -> None:
+            job.result = {"_progress": msg}
+            await db.commit()
+
         warnings: list[str] = []
         try:
             batch = await db.get(EstimateBatch, session.estimate_batch_id)
@@ -133,7 +138,8 @@ async def _process_gpr(job_id: str) -> None:
             hours_per_day = float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY)
 
             # Шаг 3 — длительности
-            await _compute_durations(db, groups, hours_per_day, warnings)
+            await _compute_durations(db, groups, hours_per_day, warnings, _progress)
+            await _progress("Расставляем зависимости между группами…")
 
             # Шаг 4 — зависимости между группами
             dep_edges = await _resolve_group_dependencies(groups, warnings)
@@ -183,11 +189,12 @@ async def _compute_durations(
     groups: list[KtpWbsGroup],
     hours_per_day: float,
     warnings: list[str],
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
 ) -> None:
     items = [it for g in groups for it in g.accepted_items]
     hints = await _ground_norms(db, items)
 
-    norms = await _ai_pick_norms(groups, items, hints, warnings)
+    norms = await _ai_pick_norms(groups, items, hints, warnings, on_progress)
 
     for it in items:
         norm = norms.get(it.id, {})
@@ -302,28 +309,25 @@ async def _ground_norms(
     return hints
 
 
-async def _ai_pick_norms(
-    groups: list[KtpWbsGroup],
-    items: list[KtpWbsItem],
+async def _ai_pick_norms_for_group(
+    group: KtpWbsGroup,
     hints: dict[str, dict],
     warnings: list[str],
 ) -> dict[str, dict]:
     lines: list[str] = []
-    for g in groups:
-        lines.append(f"# Группа: {g.title}")
-        for it in g.accepted_items:
-            qty = (
-                f"{float(it.quantity):g} {it.unit or ''}".strip()
-                if it.quantity is not None
-                else "ОБЪЁМ НЕИЗВЕСТЕН"
-            )
-            hint = hints.get(it.id, {}).get("hint")
-            hint_s = f" | подсказка: {hint}" if hint else ""
-            lines.append(f"  [{it.id}] {it.name} | {qty}{hint_s}")
+    for it in group.accepted_items:
+        qty = (
+            f"{float(it.quantity):g} {it.unit or ''}".strip()
+            if it.quantity is not None
+            else "ОБЪЁМ НЕИЗВЕСТЕН"
+        )
+        hint = hints.get(it.id, {}).get("hint")
+        hint_s = f" | подсказка: {hint}" if hint else ""
+        lines.append(f"  [{it.id}] {it.name} | {qty}{hint_s}")
     body = "\n".join(lines)
 
-    prompt = f"""Ты эксперт-нормировщик в строительстве. Для каждой работы выбери
-норму производительности. НЕ СЧИТАЙ длительность — только выбери норму.
+    prompt = f"""Ты эксперт-нормировщик в строительстве. Для каждой работы в группе
+«{group.title}» выбери норму производительности. НЕ СЧИТАЙ длительность — только выбери норму.
 
 Для каждой работы верни одно из:
 - "norm_kind": "norm_time", "norm_value": <чел-ч на единицу объёма>
@@ -361,8 +365,10 @@ async def _ai_pick_norms(
         )
         parsed = parse_json_object(raw)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("AI norm selection failed")
-        warnings.append(f"ИИ не смог подобрать нормы ({exc}) — длительности по умолчанию")
+        logger.exception("AI norm selection failed for group %s", group.id)
+        warnings.append(
+            f"ИИ не смог подобрать нормы для «{group.title}» ({exc}) — длительности по умолчанию"
+        )
         return {}
 
     result: dict[str, dict] = {}
@@ -370,6 +376,35 @@ async def _ai_pick_norms(
         if isinstance(entry, dict) and entry.get("id"):
             result[str(entry["id"])] = entry
     return result
+
+
+async def _ai_pick_norms(
+    groups: list[KtpWbsGroup],
+    items: list[KtpWbsItem],
+    hints: dict[str, dict],
+    warnings: list[str],
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
+) -> dict[str, dict]:
+    if not groups:
+        return {}
+
+    total = len(groups)
+    if on_progress:
+        await on_progress(f"Оцениваем нормы для {total} групп работ…")
+
+    tasks = [
+        asyncio.create_task(_ai_pick_norms_for_group(g, hints, warnings))
+        for g in groups
+    ]
+    merged: dict[str, dict] = {}
+    completed = 0
+    for coro in asyncio.as_completed(tasks):
+        result = await coro
+        merged.update(result)
+        completed += 1
+        if on_progress:
+            await on_progress(f"Оценено {completed} из {total} групп работ…")
+    return merged
 
 
 # ─────────────────────────────────────────────────────────────────────────────

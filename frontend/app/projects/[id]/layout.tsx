@@ -6,8 +6,32 @@ import Link from "next/link";
 import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import EmailVerificationBanner from "@/components/EmailVerificationBanner";
-import { auth, notifications as notifApi } from "@/lib/api";
+import { auth, estimates, ktpEstimate, notifications as notifApi } from "@/lib/api";
+import type { EstimateBatch, KtpEstimateSession } from "@/lib/types";
 import { useUser } from "@/lib/UserContext";
+
+const RESUMABLE_KTP_STATUSES = new Set<KtpEstimateSession["status"]>([
+  "stage1_pending",
+  "stage1_processing",
+  "stage1_review",
+  "stage2_review",
+  "gpr_pending",
+  "gpr_processing",
+]);
+
+function latestBatch(batches: EstimateBatch[]) {
+  return [...batches].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)).at(-1) ?? null;
+}
+
+function ktpResumeHref(projectId: string, session: KtpEstimateSession) {
+  const jobId =
+    session.status === "stage1_pending" || session.status === "stage1_processing"
+      ? session.stage1_job_id
+      : session.status === "gpr_processing"
+        ? session.gpr_job_id
+        : null;
+  return `/projects/${projectId}/ktp-estimate/${session.id}${jobId ? `?job=${jobId}` : ""}`;
+}
 
 export default function ProjectLayout({ children }: { children: ReactNode }) {
   const router = useRouter();
@@ -20,6 +44,8 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const [showNotif, setShowNotif] = useState(false);
   const [notifs, setNotifs] = useState<any[]>([]);
   const [resendingVerification, setResendingVerification] = useState(false);
+  const [uploadHref, setUploadHref] = useState(`/projects/${id}/upload`);
+  const activeBatchId = searchParams.get("batch");
 
   useEffect(() => {
     if (!userLoading && !currentUser) {
@@ -30,6 +56,36 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   useEffect(() => {
     notifApi.listQuiet(true).then((items) => setUnread(items.length)).catch(() => {});
   }, [pathname]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fallbackHref = `/projects/${id}/upload`;
+    setUploadHref(fallbackHref);
+
+    if (userLoading || !currentUser) return;
+
+    async function resolveUploadHref() {
+      try {
+        let batchId = activeBatchId;
+        if (!batchId) {
+          const batches = await estimates.batches(id);
+          batchId = latestBatch(batches)?.id ?? null;
+        }
+        if (!batchId) return;
+
+        const session = await ktpEstimate.getSession(id, batchId);
+        if (cancelled || !session || !RESUMABLE_KTP_STATUSES.has(session.status)) return;
+        setUploadHref(ktpResumeHref(id, session));
+      } catch {
+        if (!cancelled) setUploadHref(fallbackHref);
+      }
+    }
+
+    void resolveUploadHref();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeBatchId, currentUser, id, pathname, userLoading]);
 
   async function openNotifs() {
     const items = await notifApi.listQuiet(false).catch(() => []);
@@ -54,7 +110,6 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
 
   const myRole = currentUser?.projects?.find((project) => project.project_id === id)?.role ?? null;
   const canManage = myRole === "owner" || myRole === "pm";
-  const activeBatchId = searchParams.get("batch");
   const withBatch = (path: string) =>
     activeBatchId && (path.includes("/gantt") || path.includes("/estimate") || path.includes("/ktp") || path.includes("/work-plan"))
       ? `${path}?batch=${activeBatchId}`
@@ -66,12 +121,14 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
     { id: "work-plan", label: "📐 План", matchPath: `/projects/${id}/work-plan`, href: withBatch(`/projects/${id}/work-plan`) },
     { id: "journal", label: "🗒 Журнал", matchPath: `/projects/${id}/journal`, href: `/projects/${id}/journal` },
     { id: "references", label: "🧾 Справочники", matchPath: `/projects/${id}/fer`, href: `/projects/${id}/fer` },
-    { id: "upload", label: "⬆ Загрузка", matchPath: `/projects/${id}/upload`, href: `/projects/${id}/upload` },
+    { id: "upload", label: "⬆ Загрузка", matchPath: `/projects/${id}/upload`, href: uploadHref },
     { id: "ktp", label: "🗂 КТП", matchPath: `/projects/${id}/ktp`, href: withBatch(`/projects/${id}/ktp`) },
     ...(canManage ? [{ id: "settings", label: "⚙ Настройки", matchPath: `/projects/${id}/settings`, href: `/projects/${id}/settings` }] : []),
   ];
 
-  const activeTab = tabs.find((tab) => pathname.startsWith(tab.matchPath))?.id ?? "gantt";
+  const activeTab = pathname.startsWith(`/projects/${id}/ktp-estimate`)
+    ? "upload"
+    : tabs.find((tab) => pathname.startsWith(tab.matchPath))?.id ?? "gantt";
 
   if (userLoading) {
     return (

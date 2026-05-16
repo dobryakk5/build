@@ -965,6 +965,9 @@ async def approve_stage2(
     for g in groups:
         accepted = [it for it in g.items if it.review_status != "rejected"]
         if not accepted:
+            for it in g.items:
+                await db.delete(it)
+            await db.delete(g)
             continue
         if g.status != "card_generated":
             raise ValueError(

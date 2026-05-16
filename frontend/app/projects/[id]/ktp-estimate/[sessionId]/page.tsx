@@ -37,6 +37,61 @@ const btn = (variant: "primary" | "ghost" | "danger" = "ghost"): React.CSSProper
   color: variant === "primary" ? "#fff" : variant === "danger" ? "var(--red)" : "var(--text)",
 });
 
+function buttonStyle(
+  variant: "primary" | "ghost" | "danger" = "ghost",
+  disabled = false,
+): React.CSSProperties {
+  return {
+    ...btn(variant),
+    opacity: disabled ? 0.65 : 1,
+    cursor: disabled ? "not-allowed" : "pointer",
+  };
+}
+
+function InlineSpinner() {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 13,
+        height: 13,
+        borderRadius: "50%",
+        border: "2px solid currentColor",
+        borderTopColor: "transparent",
+        display: "inline-block",
+        flexShrink: 0,
+        animation: "ktp-spin 0.8s linear infinite",
+      }}
+    />
+  );
+}
+
+function ButtonContent({ loading, children }: { loading?: boolean; children: React.ReactNode }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+      {loading && <InlineSpinner />}
+      {children}
+    </span>
+  );
+}
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 7,
+        height: 7,
+        borderRight: "2px solid currentColor",
+        borderBottom: "2px solid currentColor",
+        display: "inline-block",
+        transform: open ? "rotate(45deg)" : "rotate(-45deg)",
+        transition: "transform .15s ease",
+      }}
+    />
+  );
+}
+
 export default function KtpEstimateWizardPage() {
   const { id: projectId, sessionId } = useParams<{ id: string; sessionId: string }>();
   const router = useRouter();
@@ -48,6 +103,9 @@ export default function KtpEstimateWizardPage() {
   const [activeJobId, setActiveJobId] = useState<string | null>(searchParams.get("job"));
 
   const { job } = useJobPoller(activeJobId);
+  const session = wbs?.session;
+  const status = session?.status;
+  const batchId = session?.estimate_batch_id;
 
   const loadWbs = useCallback(async () => {
     try {
@@ -58,10 +116,10 @@ export default function KtpEstimateWizardPage() {
     }
   }, [projectId, sessionId]);
 
-  // нет ?job= — грузим WBS сразу
+  // WBS грузим всегда: stale ?job= не должен блокировать вход в мастер.
   useEffect(() => {
-    if (!activeJobId) void loadWbs();
-  }, [activeJobId, loadWbs]);
+    void loadWbs();
+  }, [loadWbs]);
 
   // сеанс ещё обрабатывается, но мы зашли без ?job= — подцепляем поллер по
   // сохранённому job_id (recovery после перезагрузки страницы)
@@ -77,6 +135,24 @@ export default function KtpEstimateWizardPage() {
     if (recoverJob) setActiveJobId(recoverJob);
   }, [wbs, activeJobId]);
 
+  // Если пользователь открыл старую ссылку с ?job=, но сеанс уже ушёл дальше,
+  // не держим экран на processing-состоянии.
+  useEffect(() => {
+    if (!session || !activeJobId) return;
+    const expectedJob =
+      session.status === "stage1_processing" || session.status === "stage1_pending"
+        ? session.stage1_job_id
+        : session.status === "gpr_processing"
+        ? session.gpr_job_id
+        : null;
+
+    if (expectedJob && expectedJob !== activeJobId) {
+      setActiveJobId(expectedJob);
+    } else if (!expectedJob) {
+      setActiveJobId(null);
+    }
+  }, [activeJobId, session]);
+
   // job завершился — перегружаем WBS
   useEffect(() => {
     if (!job) return;
@@ -88,10 +164,6 @@ export default function KtpEstimateWizardPage() {
       setError(job.result?.error || "Задача завершилась с ошибкой");
     }
   }, [job, loadWbs]);
-
-  const session = wbs?.session;
-  const status = session?.status;
-  const batchId = session?.estimate_batch_id;
 
   const run = useCallback(
     async (fn: () => Promise<KtpWbs>) => {
@@ -108,8 +180,11 @@ export default function KtpEstimateWizardPage() {
     [],
   );
 
+  const stage1Processing = status === "stage1_processing" || status === "stage1_pending";
+  const gprProcessing = status === "gpr_processing";
+
   // ── состояния загрузки ───────────────────────────────────────────────
-  if (activeJobId || status === "stage1_processing" || status === "stage1_pending") {
+  if (!wbs && activeJobId) {
     return (
       <ProcessingScreen
         title="ИИ анализирует смету"
@@ -118,7 +193,16 @@ export default function KtpEstimateWizardPage() {
       />
     );
   }
-  if (status === "gpr_processing") {
+  if (stage1Processing) {
+    return (
+      <ProcessingScreen
+        title="ИИ анализирует смету"
+        subtitle="Строим структуру работ — группируем позиции и проверяем полноту охвата"
+        progress={job?.result?._progress ?? null}
+      />
+    );
+  }
+  if (gprProcessing) {
     return (
       <ProcessingScreen
         title="Строим график производства работ"
@@ -149,11 +233,16 @@ export default function KtpEstimateWizardPage() {
   }
 
   const stepIndex =
-    status === "stage1_review" ? 1 : status === "stage2_review" ? 2 : 3;
+    status === "stage1_review" ? 2 : status === "stage2_review" ? 3 : 4;
 
   return (
     <div style={{ height: "100%", overflow: "auto", padding: 24, maxWidth: 1080, margin: "0 auto", boxSizing: "border-box" }}>
-      <Steps current={stepIndex} />
+      <Steps
+        current={stepIndex}
+        onNewEstimate={() =>
+          router.push(`/projects/${projectId}/estimate${batchId ? `?batch=${batchId}` : ""}`)
+        }
+      />
 
       {status === "stage1_review" && (
         <Stage1
@@ -201,6 +290,7 @@ export default function KtpEstimateWizardPage() {
             try {
               const { job_id } = await ktpEstimate.buildGpr(projectId, sessionId);
               setActiveJobId(job_id);
+              await loadWbs();
             } catch (e: any) {
               setError(e.message);
               setBusy(false);
@@ -339,28 +429,46 @@ function Spinner() {
   );
 }
 
-function Steps({ current }: { current: number }) {
-  const labels = ["Структура работ", "Карточки КТП", "ГПР"];
+function Steps({ current, onNewEstimate }: { current: number; onNewEstimate: () => void }) {
+  const labels = ["Новая смета", "Структура работ", "Карточки КТП", "ГПР"];
   return (
     <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
       {labels.map((label, i) => {
         const n = i + 1;
         const active = n === current;
         const done = n < current;
+        const stepStyle: React.CSSProperties = {
+          flex: 1,
+          padding: "9px 12px",
+          borderRadius: 6,
+          fontSize: 12,
+          fontWeight: 600,
+          textAlign: "center",
+          border: "1px solid var(--border)",
+          background: active ? "var(--blue-dark)" : done ? "rgba(34,197,94,.1)" : "var(--surface)",
+          color: active ? "#fff" : done ? "#15803d" : "var(--muted)",
+        };
+        if (n === 1) {
+          return (
+            <button
+              key={label}
+              type="button"
+              onClick={onNewEstimate}
+              style={{
+                ...stepStyle,
+                cursor: "pointer",
+                fontFamily: "var(--sans)",
+              }}
+            >
+              {done ? "✓ " : `${n}. `}
+              {label}
+            </button>
+          );
+        }
         return (
           <div
             key={label}
-            style={{
-              flex: 1,
-              padding: "9px 12px",
-              borderRadius: 6,
-              fontSize: 12,
-              fontWeight: 600,
-              textAlign: "center",
-              border: "1px solid var(--border)",
-              background: active ? "var(--blue-dark)" : done ? "rgba(34,197,94,.1)" : "var(--surface)",
-              color: active ? "#fff" : done ? "#15803d" : "var(--muted)",
-            }}
+            style={stepStyle}
           >
             {done ? "✓ " : `${n}. `}
             {label}
@@ -619,7 +727,13 @@ function Stage2({
   setError: (v: string | null) => void;
   reload: () => Promise<void>;
 }) {
-  const allReady = wbs.groups.every((g) => g.status === "card_generated");
+  const groupsWithWorks = wbs.groups.filter((g) =>
+    g.items.some((item) => item.review_status !== "rejected"),
+  );
+  const allReady = groupsWithWorks.every((g) => g.status === "card_generated");
+  const [approving, setApproving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const missingCards = groupsWithWorks.filter((g) => g.status !== "card_generated").length;
 
   return (
     <div>
@@ -628,9 +742,15 @@ function Stage2({
         hint="Сгенерируйте карточку технологического процесса для каждой группы. ИИ может задать уточняющие вопросы."
         right={
           <button
-            style={btn("primary")}
-            disabled={busy || !allReady}
+            style={buttonStyle("primary", busy)}
+            disabled={busy}
             onClick={async () => {
+              if (!allReady) {
+                setNotice(`Сначала сгенерируйте все карточки. Осталось: ${missingCards}.`);
+                return;
+              }
+              setNotice(null);
+              setApproving(true);
               setBusy(true);
               try {
                 await ktpEstimate.approveStage2(projectId, sessionId);
@@ -638,15 +758,28 @@ function Stage2({
               } catch (e: any) {
                 setError(e.message);
               } finally {
+                setApproving(false);
                 setBusy(false);
               }
             }}
           >
-            Все карточки готовы → к ГПР
+            <ButtonContent loading={approving}>Все карточки готовы → к ГПР</ButtonContent>
           </button>
         }
       />
-      {wbs.groups.map((g) => (
+      {notice && (
+        <div
+          role="alert"
+          style={{
+            ...feedbackStyle,
+            marginTop: -4,
+            marginBottom: 12,
+          }}
+        >
+          {notice}
+        </div>
+      )}
+      {groupsWithWorks.map((g) => (
         <Stage2Group
           key={g.id}
           group={g}
@@ -679,6 +812,9 @@ function Stage2Group({
   const [questions, setQuestions] = useState<KtpQuestion[] | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [cardData, setCardData] = useState<KtpEstimateCard | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [validation, setValidation] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
 
   useEffect(() => {
     if (group.status === "card_generated" || group.status === "card_questions") {
@@ -690,9 +826,11 @@ function Stage2Group({
   }, [projectId, group.id, group.status]);
 
   const generate = async (withAnswers: Record<string, string>) => {
+    setGenerating(true);
     setBusy(true);
     try {
       const res = await ktpEstimate.generateCard(projectId, group.id, withAnswers);
+      setValidation(null);
       if (res.sufficient) {
         setQuestions(null);
         setCardData(res.card);
@@ -703,9 +841,12 @@ function Stage2Group({
     } catch (e: any) {
       setError(e.message);
     } finally {
+      setGenerating(false);
       setBusy(false);
     }
   };
+
+  const requiredAnswersMissing = questions?.some((q) => !answers[q.key]?.trim()) ?? false;
 
   const statusLabel: Record<KtpWbsGroup["status"], string> = {
     draft: "Не создана",
@@ -717,7 +858,47 @@ function Stage2Group({
   return (
     <div style={{ ...card, marginBottom: 12, padding: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ fontSize: 14, fontWeight: 600 }}>{group.title}</div>
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          aria-expanded={expanded}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 9,
+            minWidth: 0,
+            flex: 1,
+            padding: 0,
+            border: "none",
+            background: "transparent",
+            color: "var(--text)",
+            cursor: "pointer",
+            fontFamily: "var(--sans)",
+            textAlign: "left",
+          }}
+        >
+          <span
+            style={{
+              width: 22,
+              height: 22,
+              borderRadius: 5,
+              border: "1px solid var(--border)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--muted)",
+              flexShrink: 0,
+            }}
+          >
+            <Chevron open={expanded} />
+          </span>
+          <span style={{ fontSize: 14, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+            {group.title}
+          </span>
+          <span style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>
+            {group.items.length} работ
+          </span>
+        </button>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           <span
             style={{
@@ -733,11 +914,53 @@ function Stage2Group({
           >
             {statusLabel[group.status]}
           </span>
-          <button style={btn()} disabled={busy} onClick={() => generate(answers)}>
-            {group.status === "card_generated" ? "Перегенерировать" : "Сгенерировать карточку"}
+          <button style={buttonStyle("ghost", busy)} disabled={busy} onClick={() => generate(answers)}>
+            <ButtonContent loading={generating}>
+              {group.status === "card_generated" ? "Перегенерировать" : "Сгенерировать карточку"}
+            </ButtonContent>
           </button>
         </div>
       </div>
+
+      {expanded && (
+        <div
+          style={{
+            marginTop: 12,
+            padding: "10px 12px",
+            borderRadius: 6,
+            border: "1px solid var(--border)",
+            background: "rgba(148,163,184,.06)",
+            display: "grid",
+            gap: 7,
+          }}
+        >
+          {group.items.length ? (
+            group.items.map((item, index) => (
+              <div
+                key={item.id}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "34px minmax(0, 1fr) auto",
+                  gap: 10,
+                  alignItems: "start",
+                  fontSize: 12,
+                  color: "var(--text)",
+                }}
+              >
+                <span style={{ color: "var(--muted)", fontFamily: "var(--mono)" }}>{index + 1}</span>
+                <span style={{ minWidth: 0 }}>{item.name}</span>
+                {(item.quantity != null || item.unit) && (
+                  <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>
+                    {item.quantity ?? ""} {item.unit ?? ""}
+                  </span>
+                )}
+              </div>
+            ))
+          ) : (
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>В группе пока нет работ.</div>
+          )}
+        </div>
+      )}
 
       {questions && (
         <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
@@ -752,16 +975,30 @@ function Stage2Group({
               <input
                 style={inputStyle}
                 value={answers[q.key] || ""}
-                onChange={(e) => setAnswers((a) => ({ ...a, [q.key]: e.target.value }))}
+                onChange={(e) => {
+                  setValidation(null);
+                  setAnswers((a) => ({ ...a, [q.key]: e.target.value }));
+                }}
               />
             </div>
           ))}
+          {validation && (
+            <div role="alert" style={feedbackStyle}>
+              {validation}
+            </div>
+          )}
           <button
-            style={btn("primary")}
-            disabled={busy || questions.some((q) => !answers[q.key])}
-            onClick={() => generate(answers)}
+            style={buttonStyle("primary", busy)}
+            disabled={busy}
+            onClick={() => {
+              if (requiredAnswersMissing) {
+                setValidation("Заполните ответы на вопросы, чтобы сгенерировать карточку.");
+                return;
+              }
+              void generate(answers);
+            }}
           >
-            Ответить и сгенерировать
+            <ButtonContent loading={generating}>Ответить и сгенерировать</ButtonContent>
           </button>
         </div>
       )}
@@ -793,10 +1030,11 @@ function CardView({
 }: {
   card: KtpEstimateCard;
   busy: boolean;
-  onSave: (patch: { title?: string; goal?: string }) => void;
+  onSave: (patch: { title?: string; goal?: string }) => Promise<void>;
 }) {
   const [title, setTitle] = useState(card.title || "");
   const [goal, setGoal] = useState(card.goal || "");
+  const [saving, setSaving] = useState(false);
   // sync локальный state при перегенерации/обновлении карточки
   useEffect(() => {
     setTitle(card.title || "");
@@ -806,13 +1044,19 @@ function CardView({
 
   return (
     <div style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-      <input style={{ ...inputStyle, fontWeight: 600, marginBottom: 6 }} value={title} onChange={(e) => setTitle(e.target.value)} />
-      <textarea
-        style={{ ...inputStyle, minHeight: 50, marginBottom: 8 }}
-        value={goal}
-        onChange={(e) => setGoal(e.target.value)}
-        placeholder="Цель"
-      />
+      <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
+        <input
+          style={{ ...inputStyle, width: "100%", fontWeight: 600 }}
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+        />
+        <textarea
+          style={{ ...inputStyle, width: "100%", minHeight: 50, resize: "vertical" }}
+          value={goal}
+          onChange={(e) => setGoal(e.target.value)}
+          placeholder="Цель"
+        />
+      </div>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, marginBottom: 8 }}>
         <thead>
           <tr style={{ background: "rgba(148,163,184,.08)" }}>
@@ -841,8 +1085,19 @@ function CardView({
         </ul>
       )}
       {dirty && (
-        <button style={btn("primary")} disabled={busy} onClick={() => onSave({ title, goal })}>
-          Сохранить правки
+        <button
+          style={buttonStyle("primary", busy)}
+          disabled={busy}
+          onClick={async () => {
+            setSaving(true);
+            try {
+              await onSave({ title, goal });
+            } finally {
+              setSaving(false);
+            }
+          }}
+        >
+          <ButtonContent loading={saving}>Сохранить правки</ButtonContent>
         </button>
       )}
     </div>
@@ -850,6 +1105,51 @@ function CardView({
 }
 
 // ── ЭТАП 3 ───────────────────────────────────────────────────────────────────
+
+const HOURS_PER_DAY = 8;
+
+function isSubDay(it: KtpWbsItem): boolean {
+  if (it.labor_hours == null) return false;
+  const brigade = it.brigade_size ?? 1;
+  return it.labor_hours / brigade < HOURS_PER_DAY;
+}
+
+function fmtDuration(it: KtpWbsItem): string | null {
+  if (!it.duration_days && it.labor_hours == null) return null;
+  if (isSubDay(it)) {
+    const brigade = it.brigade_size ?? 1;
+    const h = (it.labor_hours as number) / brigade;
+    const hStr = Number.isInteger(h) ? String(h) : h.toFixed(1);
+    return `${hStr} ч.${it.norm_kind === "fallback" ? " (нет оценки)" : ""}`;
+  }
+  if (!it.duration_days) return null;
+  return `${it.duration_days} дн.${it.norm_kind === "fallback" ? " (нет оценки)" : ""}`;
+}
+
+function normTooltip(it: KtpWbsItem): string | undefined {
+  if (!it.duration_days && it.labor_hours == null) return undefined;
+  const qty = it.quantity != null ? `${it.quantity}${it.unit ? ` ${it.unit}` : ""}` : "?";
+  const brigade = it.brigade_size ?? 1;
+  const sub = isSubDay(it);
+
+  if (it.norm_kind === "norm_time" && it.norm_value != null) {
+    const labor = it.labor_hours != null ? `${it.labor_hours.toFixed(1)} чел-ч` : "?";
+    const result = sub
+      ? `${((it.labor_hours as number) / brigade).toFixed(1)} ч. на бригаду (${brigade} чел.)`
+      : `${brigade} чел. → ${it.duration_days} дн.`;
+    return `${qty} × ${it.norm_value} чел-ч/${it.norm_unit || "ед"} = ${labor}\n${result}`;
+  }
+  if (it.norm_kind === "vyrabotka" && it.norm_value != null) {
+    const result = sub
+      ? `${((it.labor_hours as number) / brigade).toFixed(1)} ч. на бригаду (${brigade} чел.)`
+      : `= ${it.duration_days} дн.`;
+    return `${qty} ÷ (${it.norm_value} ${it.norm_unit || "ед"}/чел-день × ${brigade} чел.) ${result}`;
+  }
+  if (it.norm_kind === "fallback") {
+    return "Норму определить не удалось — поставлен 1 день по умолчанию";
+  }
+  return undefined;
+}
 
 function Stage3({
   wbs,
@@ -866,7 +1166,7 @@ function Stage3({
   busy: boolean;
   run: (fn: () => Promise<KtpWbs>) => Promise<void>;
   done: boolean;
-  onBuild: () => void;
+  onBuild: () => Promise<void> | void;
   onOpenGantt: () => void;
 }) {
   const missingQty = useMemo(
@@ -876,6 +1176,8 @@ function Stage3({
         .filter((it) => it.origin !== "from_estimate" && it.quantity == null),
     [wbs],
   );
+  const [building, setBuilding] = useState(false);
+  const qtyRefs = useRef<(HTMLInputElement | null)[]>([]);
 
   return (
     <div>
@@ -884,13 +1186,31 @@ function Stage3({
         hint="Укажите объёмы для добавленных работ — ИИ подберёт нормы, система рассчитает длительности и зависимости."
         right={
           done ? (
-            <button style={btn("primary")} onClick={onOpenGantt}>
+            <button style={buttonStyle("primary")} onClick={onOpenGantt}>
               Открыть Гант →
             </button>
           ) : (
-            <button style={btn("primary")} disabled={busy} onClick={onBuild}>
-              Построить ГПР
-            </button>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 }}>
+              <button
+                style={buttonStyle("primary", busy)}
+                disabled={busy}
+                onClick={async () => {
+                  setBuilding(true);
+                  try {
+                    await onBuild();
+                  } finally {
+                    setBuilding(false);
+                  }
+                }}
+              >
+                <ButtonContent loading={building}>Построить ГПР</ButtonContent>
+              </button>
+              {building && (
+                <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                  Идёт процесс оценки трудоёмкости…
+                </span>
+              )}
+            </div>
           )
         }
       />
@@ -915,8 +1235,14 @@ function Stage3({
           <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
             Объёмы для добавленных работ ({missingQty.length})
           </div>
-          {missingQty.map((it) => (
-            <QtyRow key={it.id} item={it} busy={busy} run={run} projectId={projectId} />
+          {missingQty.map((it, idx) => (
+            <QtyRow
+              key={it.id}
+              item={it}
+              projectId={projectId}
+              inputRef={(el) => { qtyRefs.current[idx] = el; }}
+              onNext={idx < missingQty.length - 1 ? () => qtyRefs.current[idx + 1]?.focus() : undefined}
+            />
           ))}
           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
             Если оставить пустым — объём оценит ИИ.
@@ -942,12 +1268,22 @@ function Stage3({
                 fontSize: 12,
                 color: "var(--muted)",
                 padding: "4px 0",
+                gap: 8,
               }}
             >
-              <span>{it.name}</span>
-              <span>
-                {it.duration_days ? `${it.duration_days} дн.` : "—"}
-                {it.norm_kind ? ` · ${it.norm_kind}` : ""}
+              <span style={{ flex: 1 }}>{it.name}</span>
+              <span style={{ whiteSpace: "nowrap", display: "flex", gap: 8, alignItems: "center" }}>
+                {fmtQty(it) && (
+                  <span style={{ color: "var(--text)", fontFamily: "var(--mono)", fontSize: 11 }}>
+                    {fmtQty(it)}
+                  </span>
+                )}
+                <span
+                  title={normTooltip(it)}
+                  style={normTooltip(it) ? { cursor: "help", borderBottom: "1px dotted var(--border2)" } : undefined}
+                >
+                  {fmtDuration(it) ?? (fmtQty(it) ? "" : "—")}
+                </span>
               </span>
             </div>
           ))}
@@ -957,48 +1293,84 @@ function Stage3({
   );
 }
 
+function parseQty(raw: string): { quantity: number | null; unit: string | null } {
+  // "100 м3" → 100, "м3"; "12,5 м²" → 12.5, "м²"; "м3" → null, "м3"
+  const m = raw.trim().match(/^([\d]+(?:[.,]\d+)?)\s*(.*)$/);
+  if (m) {
+    const n = Number(m[1].replace(",", "."));
+    return {
+      quantity: Number.isFinite(n) ? n : null,
+      unit: m[2].trim() || null,
+    };
+  }
+  return { quantity: null, unit: raw.trim() || null };
+}
+
+function fmtQty(item: KtpWbsItem): string {
+  const q = item.quantity ?? "";
+  const u = item.unit ?? "";
+  return q !== "" || u !== "" ? `${q}${q !== "" && u ? " " : ""}${u}`.trim() : "";
+}
+
 function QtyRow({
   item,
-  busy,
-  run,
   projectId,
+  inputRef,
+  onNext,
 }: {
   item: KtpWbsItem;
-  busy: boolean;
-  run: (fn: () => Promise<KtpWbs>) => Promise<void>;
   projectId: string;
+  inputRef?: (el: HTMLInputElement | null) => void;
+  onNext?: () => void;
 }) {
-  const [qty, setQty] = useState("");
-  const [unit, setUnit] = useState(item.unit || "");
+  const [value, setValue] = useState(fmtQty(item));
+  const [confirmed, setConfirmed] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const lastSaved = useRef(fmtQty(item));
+
+  const save = async () => {
+    const trimmed = value.trim();
+    if (trimmed === lastSaved.current || saving) return;
+    const { quantity, unit } = parseQty(trimmed);
+    setSaving(true);
+    try {
+      await ktpEstimate.updateItem(projectId, item.id, { quantity, unit });
+      lastSaved.current = trimmed;
+      setConfirmed(trimmed || null);
+    } catch {
+      // не блокируем UI — пользователь может попробовать ещё раз
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div style={{ display: "flex", gap: 8, alignItems: "center", padding: "4px 0" }}>
       <span style={{ flex: 1, fontSize: 12 }}>{item.name}</span>
       <input
-        value={qty}
-        onChange={(e) => setQty(e.target.value)}
-        placeholder="объём"
-        style={{ ...inputStyle, maxWidth: 90 }}
+        ref={inputRef}
+        value={value}
+        onChange={(e) => { setValue(e.target.value); setConfirmed(null); }}
+        onBlur={() => void save()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            // фокус на следующую строку → браузер сам вызовет blur → save
+            if (onNext) onNext();
+            else (e.target as HTMLInputElement).blur();
+          }
+        }}
+        placeholder="например: 100 м3"
+        disabled={saving}
+        style={{ ...inputStyle, maxWidth: 180 }}
       />
-      <input
-        value={unit}
-        onChange={(e) => setUnit(e.target.value)}
-        placeholder="ед."
-        style={{ ...inputStyle, maxWidth: 70 }}
-      />
-      <button
-        style={btn()}
-        disabled={busy || !qty.trim()}
-        onClick={() =>
-          run(() =>
-            ktpEstimate.updateItem(projectId, item.id, {
-              quantity: Number(qty),
-              unit: unit.trim() || null,
-            }),
-          )
-        }
-      >
-        OK
-      </button>
+      <span style={{ fontSize: 11, minWidth: 60, textAlign: "right" }}>
+        {saving
+          ? <span style={{ color: "var(--muted)" }}>…</span>
+          : confirmed
+            ? <span style={{ color: "#15803d", fontWeight: 600 }}>{confirmed}</span>
+            : null}
+      </span>
     </div>
   );
 }
@@ -1042,6 +1414,16 @@ const inputStyle: React.CSSProperties = {
   flex: 1,
   background: "var(--surface)",
   color: "var(--text)",
+};
+
+const feedbackStyle: React.CSSProperties = {
+  padding: "9px 11px",
+  borderRadius: 6,
+  border: "1px solid rgba(245,158,11,.3)",
+  background: "rgba(245,158,11,.08)",
+  color: "#92400e",
+  fontSize: 12,
+  lineHeight: 1.4,
 };
 
 const thCell: React.CSSProperties = {

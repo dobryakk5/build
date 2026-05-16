@@ -10,6 +10,27 @@ from app.core.config import settings
 from app.services import email_service
 
 
+def test_smtp_address_accepts_host_with_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp.example.com:465")
+    monkeypatch.setattr(settings, "SMTP_PORT", 587)
+
+    assert email_service._smtp_address() == ("smtp.example.com", 465)
+
+
+def test_smtp_address_accepts_smtp_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "SMTP_HOST", "smtp://smtp.example.com:2525")
+    monkeypatch.setattr(settings, "SMTP_PORT", 587)
+
+    assert email_service._smtp_address() == ("smtp.example.com", 2525)
+
+
+def test_smtp_address_rejects_http_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "SMTP_HOST", "https://smtp.example.com")
+
+    with pytest.raises(email_service.EmailDeliveryError, match="must not include an http/https URL scheme"):
+        email_service._smtp_address()
+
+
 @pytest.mark.asyncio
 async def test_send_email_dry_run_logs_only_metadata_at_info(
     monkeypatch: pytest.MonkeyPatch,
