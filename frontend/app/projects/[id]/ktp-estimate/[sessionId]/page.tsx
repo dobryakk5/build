@@ -497,9 +497,12 @@ function Stage1({
   onApprove: () => void;
 }) {
   const [newGroup, setNewGroup] = useState("");
-  const pendingAi = wbs.groups
-    .flatMap((g) => g.items)
-    .filter((it) => it.origin === "ai_added" && it.review_status === "pending").length;
+  const pendingAiItems = wbs.groups.flatMap((g) =>
+    g.items
+      .filter((it) => it.origin === "ai_added" && it.review_status === "pending")
+      .map((item) => ({ group: g, item })),
+  );
+  const pendingAi = pendingAiItems.length;
   const groupOptions = wbs.groups.map((g) => ({ id: g.id, title: g.title }));
 
   return (
@@ -519,9 +522,12 @@ function Stage1({
         }
       />
       {pendingAi > 0 && (
-        <div style={{ fontSize: 12, color: "#b45309", marginBottom: 14 }}>
-          Не проверено добавленных ИИ работ: {pendingAi}
-        </div>
+        <PendingAiReview
+          items={pendingAiItems}
+          busy={busy}
+          run={run}
+          projectId={projectId}
+        />
       )}
 
       {wbs.groups.map((g) => (
@@ -607,6 +613,7 @@ function Stage1Group({
       {group.items.map((it) => {
         const badge = ORIGIN_BADGE[it.origin];
         const rejected = it.review_status === "rejected";
+        const pendingAi = it.origin === "ai_added" && it.review_status === "pending";
         return (
           <div
             key={it.id}
@@ -614,8 +621,10 @@ function Stage1Group({
               display: "flex",
               alignItems: "center",
               gap: 8,
-              padding: "7px 0",
+              padding: pendingAi ? "7px 8px" : "7px 0",
               borderTop: "1px solid var(--border)",
+              borderRadius: pendingAi ? 6 : 0,
+              background: pendingAi ? "rgba(245,158,11,.08)" : "transparent",
               opacity: rejected ? 0.5 : 1,
             }}
           >
@@ -704,6 +713,70 @@ function Stage1Group({
           + Работа
         </button>
       </div>
+    </div>
+  );
+}
+
+function PendingAiReview({
+  items,
+  busy,
+  run,
+  projectId,
+}: {
+  items: Array<{ group: KtpWbsGroup; item: KtpWbsItem }>;
+  busy: boolean;
+  run: (fn: () => Promise<KtpWbs>) => Promise<void>;
+  projectId: string;
+}) {
+  return (
+    <div
+      style={{
+        ...feedbackStyle,
+        marginBottom: 14,
+        display: "grid",
+        gap: 10,
+      }}
+    >
+      <div style={{ fontWeight: 700 }}>Не проверено добавленных ИИ работ: {items.length}</div>
+      {items.map(({ group, item }) => (
+        <div
+          key={item.id}
+          style={{
+            display: "grid",
+            gridTemplateColumns: "minmax(0, 1fr) auto",
+            gap: 10,
+            alignItems: "center",
+          }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ color: "var(--text)", fontWeight: 600 }}>{item.name}</div>
+            <div style={{ color: "var(--muted)", marginTop: 2 }}>
+              Группа: {group.title}
+              {item.ai_reason ? ` · ${item.ai_reason}` : ""}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button
+              style={{ ...buttonStyle("ghost", busy), padding: "5px 9px", color: "#15803d" }}
+              disabled={busy}
+              onClick={() =>
+                run(() => ktpEstimate.updateItem(projectId, item.id, { review_status: "accepted" }))
+              }
+            >
+              Принять
+            </button>
+            <button
+              style={{ ...buttonStyle("ghost", busy), padding: "5px 9px", color: "var(--red)" }}
+              disabled={busy}
+              onClick={() =>
+                run(() => ktpEstimate.updateItem(projectId, item.id, { review_status: "rejected" }))
+              }
+            >
+              Отклонить
+            </button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
