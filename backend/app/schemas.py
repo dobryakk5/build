@@ -216,6 +216,7 @@ class EstimateBatchResponse(BaseModel):
     workers_count: int | None = None
     hours_per_day: float = 8
     source_filename: str | None = None
+    clarification_answers: dict | None = None
     estimates_count: int = 0
     gantt_tasks_count: int = 0
     fer_matched_count: int = 0

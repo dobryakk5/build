@@ -75,6 +75,7 @@ async def start_upload_job(
     workers:          int,
     estimate_kind:    int,
     complex_mode:     bool,
+    clarification_answers: dict | None,
     db:               AsyncSession,
 ) -> Job:
     """
@@ -116,6 +117,7 @@ async def start_upload_job(
         workers    = workers,
         estimate_kind = estimate_kind,
         complex_mode  = complex_mode,
+        clarification_answers = clarification_answers,
         db         = db,
     )
 
@@ -134,6 +136,7 @@ async def start_upload_job_with_mapping(
     workers:    int,
     estimate_kind: int,
     complex_mode: bool,
+    clarification_answers: dict | None,
     db:         AsyncSession,
 ) -> Job:
     """
@@ -152,6 +155,7 @@ async def start_upload_job_with_mapping(
         workers     = workers,
         estimate_kind = estimate_kind,
         complex_mode  = complex_mode,
+        clarification_answers = clarification_answers,
         db          = db,
         col_mapping = col_mapping,
         sheet       = sheet,
@@ -171,6 +175,7 @@ async def _create_and_run_job(
     workers:     int,
     estimate_kind: int,
     complex_mode: bool,
+    clarification_answers: dict | None,
     db:          AsyncSession,
     col_mapping: dict[int, str] | None = None,
     sheet:       str | None = None,
@@ -188,6 +193,7 @@ async def _create_and_run_job(
             "workers":     workers,
             "estimate_kind": estimate_kind,
             "complex_mode": complex_mode,
+            "clarification_answers": clarification_answers,
             "col_mapping": col_mapping,   # None = авто
             "sheet":       sheet,
         },
@@ -222,6 +228,7 @@ async def _process_upload(job_id: str) -> None:
             workers     = int(job.input["workers"])
             estimate_kind = int(job.input["estimate_kind"])
             complex_mode = bool(job.input.get("complex_mode"))
+            clarification_answers = job.input.get("clarification_answers")
             col_mapping = job.input.get("col_mapping")   # None → авто
             sheet       = job.input.get("sheet")
 
@@ -269,6 +276,7 @@ async def _process_upload(job_id: str) -> None:
                 workers_count=workers,
                 hours_per_day=DEFAULT_HOURS_PER_DAY,
                 source_filename=job.input.get("filename"),
+                clarification_answers=clarification_answers,
             )
             db.add(batch)
             await db.flush()

@@ -287,9 +287,13 @@ export const estimates = {
     workers: number,
     estimateKind: number,
     complexMode: boolean,
+    clarificationAnswers?: Record<string, unknown>,
   ) => {
     const form  = new FormData();
     form.append("file", file);
+    if (clarificationAnswers) {
+      form.append("clarification_answers", JSON.stringify(clarificationAnswers));
+    }
     return fetch(
       `${BASE}/projects/${pid}/estimates/upload?start_date=${startDate}&workers=${workers}&estimate_kind=${encodeURIComponent(estimateKind)}&complex_mode=${complexMode}`,
       { method: "POST", credentials: "include", body: form }
@@ -298,10 +302,15 @@ export const estimates = {
       if (r.status === 401) {
         const ok = await tryRefresh();
         if (ok) {
-          return estimates.upload(pid, file, startDate, workers, estimateKind, complexMode);
+          return estimates.upload(pid, file, startDate, workers, estimateKind, complexMode, clarificationAnswers);
         }
       }
       if (!r.ok) {
+        if (r.status === 422 && data?.detail?.needs_mapping) {
+          throw Object.assign(new Error("Требуется ручное сопоставление колонок"), {
+            mappingPayload: data.detail,
+          });
+        }
         throw new Error(data?.detail?.error ?? data?.detail ?? `HTTP ${r.status}`);
       }
       return data;

@@ -4,7 +4,9 @@ import { useCallback, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import { estimates, ktp as ktpApi, ktpEstimate } from "@/lib/api";
+import ColumnMapper, { type MappingPayload } from "@/components/ColumnMapper";
 import { fmtMoney } from "@/lib/dateUtils";
+import { CLARIFICATION_BY_KIND } from "@/lib/estimateClarificationQuestions";
 import { useJobPoller } from "@/lib/useJobPoller";
 
 const KIND_OPTIONS = [
@@ -20,6 +22,12 @@ const KIND_OPTIONS = [
 ] as const;
 
 type EstimateKind = (typeof KIND_OPTIONS)[number]["id"];
+type ClarificationUploadPayload = {
+  version: "v1";
+  estimate_kind: EstimateKind;
+  kind_title: string;
+  form: Record<string, { section: string; question: string; answers: string[] }>;
+};
 
 const KIND_LABEL = Object.fromEntries(
   KIND_OPTIONS.map((option) => [option.id, `${option.id}. ${option.title}`]),
@@ -51,13 +59,19 @@ export default function UploadPage() {
   const [startDate, setStartDate] = useState(new Date().toISOString().split("T")[0]);
   const [workers, setWorkers] = useState(3);
   const [estimateKind, setEstimateKind] = useState<EstimateKind | null>(null);
+  const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string[]>>({});
+  const [clarificationsConfirmed, setClarificationsConfirmed] = useState(false);
   const [complexMode, setComplexMode] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
+  const [mappingPayload, setMappingPayload] = useState<MappingPayload | null>(null);
   const [uploading, setUploading] = useState(false);
   const [ktpLoading, setKtpLoading] = useState<"groups" | "estimate" | null>(null);
 
   const { job, loading: polling } = useJobPoller(jobId);
-  const canUpload = estimateKind !== null;
+  const currentClarification = estimateKind ? CLARIFICATION_BY_KIND[estimateKind] : null;
+  const answeredCount = Object.values(clarificationAnswers).filter((answers) => answers.length > 0).length;
+  const questionsCount = currentClarification?.sections.reduce((sum, section) => sum + section.questions.length, 0) ?? 0;
+  const canUpload = estimateKind !== null && clarificationsConfirmed;
 
   const handleDrop = useCallback((files: FileList | null) => {
     if (!canUpload) return;
@@ -74,13 +88,69 @@ export default function UploadPage() {
 
     setUploading(true);
     try {
-      const res = await estimates.upload(id, file, startDate, workers, estimateKind, complexMode);
+      const res = await estimates.upload(id, file, startDate, workers, estimateKind, complexMode, buildClarificationPayload());
       setJobId(res.job_id);
     } catch (e: any) {
+      if (e?.mappingPayload) {
+        setMappingPayload(e.mappingPayload);
+        return;
+      }
       alert(e.message);
     } finally {
       setUploading(false);
     }
+  }
+
+  function buildClarificationPayload(): ClarificationUploadPayload | undefined {
+    if (!estimateKind || !currentClarification) return undefined;
+
+    const form: ClarificationUploadPayload["form"] = {};
+    for (const section of currentClarification.sections) {
+      for (const question of section.questions) {
+        const answers = (clarificationAnswers[question.id] ?? [])
+          .map((answer) => answer.trim())
+          .filter((answer) => answer && answer !== "Требуется уточнить");
+        if (answers.length) {
+          form[question.id] = {
+            section: section.title,
+            question: question.text,
+            answers,
+          };
+        }
+      }
+    }
+
+    if (!Object.keys(form).length) return undefined;
+
+    return {
+      version: "v1",
+      estimate_kind: estimateKind,
+      kind_title: currentClarification.title,
+      form,
+    };
+  }
+
+  function resetClarifications(nextKind: EstimateKind | null) {
+    setEstimateKind(nextKind);
+    setClarificationAnswers({});
+    setClarificationsConfirmed(false);
+    setFile(null);
+    setJobId(null);
+    setMappingPayload(null);
+  }
+
+  function toggleClarification(questionId: string, option: string) {
+    setClarificationAnswers((prev) => {
+      const current = prev[questionId] ?? [];
+      const next = current.includes(option)
+        ? current.filter((item) => item !== option)
+        : [...current, option];
+
+      return {
+        ...prev,
+        [questionId]: next,
+      };
+    });
   }
 
   const status = job?.status;
@@ -122,7 +192,7 @@ export default function UploadPage() {
         <div>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>Загрузка сметы</h2>
           <div style={{ fontSize: 12, color: "var(--muted)", maxWidth: 620 }}>
-            Сначала выберите тип объекта, затем загрузите файл. В режиме <b style={{ color: "var(--text)" }}>Комплекс</b> новая смета добавится как отдельный блок работ внутри этого объекта.
+            Сначала выберите тип объекта, затем заполните уточнения. Форма загрузки файла появится после этого шага.
           </div>
         </div>
         <label
@@ -163,7 +233,7 @@ export default function UploadPage() {
           <select
             id="estimate-kind"
             value={estimateKind ?? ""}
-            onChange={(e) => setEstimateKind(e.target.value ? Number(e.target.value) as EstimateKind : null)}
+            onChange={(e) => resetClarifications(e.target.value ? Number(e.target.value) as EstimateKind : null)}
             style={{
               width: "100%",
               padding: "11px 12px",
@@ -185,13 +255,104 @@ export default function UploadPage() {
 
         <div>
           <div style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
-            2. Загрузите смету
+            2. Уточните исходные данные
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
-            До выбора типа объекта загрузка файла неактивна.
+            Для каждого вопроса выберите один или несколько чекбоксов. После подтверждения появится загрузка файла.
           </div>
         </div>
       </div>
+
+      {currentClarification && !clarificationsConfirmed && !status && (
+        <div style={{ marginBottom: 20, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+          <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{currentClarification.title}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                Отмечено вопросов: {answeredCount} из {questionsCount}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setClarificationsConfirmed(true)}
+              style={{
+                padding: "9px 14px",
+                background: "var(--blue-dark)",
+                color: "#fff",
+                border: "none",
+                borderRadius: 6,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              Перейти к загрузке
+            </button>
+          </div>
+
+          <div style={{ display: "grid", gap: 16, padding: 16 }}>
+            {currentClarification.sections.map((section) => (
+              <section key={section.title} style={{ display: "grid", gap: 10 }}>
+                <h3 style={{ fontSize: 13, fontWeight: 700, color: "var(--hdr3)" }}>{section.title}</h3>
+                {section.questions.map((question) => (
+                  <div key={question.id} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 10 }}>
+                      {question.id}. {question.text}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {question.options.map((option) => {
+                        const checked = clarificationAnswers[question.id]?.includes(option) ?? false;
+                        return (
+                          <label
+                            key={option}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 7,
+                              padding: "7px 9px",
+                              border: `1px solid ${checked ? "rgba(29,78,216,.55)" : "var(--border)"}`,
+                              borderRadius: 6,
+                              background: checked ? "rgba(59,130,246,.08)" : "rgba(248,250,252,.75)",
+                              fontSize: 12,
+                              cursor: "pointer",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => toggleClarification(question.id, option)}
+                            />
+                            <span>{option}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </section>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {currentClarification && clarificationsConfirmed && !status && (
+        <div style={{ marginBottom: 20, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,.25)", background: "rgba(34,197,94,.06)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+          <div style={{ fontSize: 12, color: "#166534" }}>
+            Уточнения заполнены: {answeredCount} из {questionsCount}. Теперь можно загрузить смету.
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              setClarificationsConfirmed(false);
+              setFile(null);
+            }}
+            style={{ padding: "6px 10px", border: "1px solid rgba(22,101,52,.35)", borderRadius: 5, background: "var(--surface)", color: "#166534", fontSize: 12, cursor: "pointer", whiteSpace: "nowrap" }}
+          >
+            Изменить уточнения
+          </button>
+        </div>
+      )}
 
       <div
         style={{
@@ -230,7 +391,7 @@ export default function UploadPage() {
         ))}
       </div>
 
-      {!status && (
+      {!status && clarificationsConfirmed && !mappingPayload && (
         <div
           onClick={() => {
             if (canUpload) {
@@ -270,19 +431,19 @@ export default function UploadPage() {
           />
           <div style={{ fontSize: 36, marginBottom: 10 }}>{file ? "📊" : canUpload ? "⬆" : "🔒"}</div>
           <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
-            {file ? file.name : canUpload ? "Перетащите смету сюда" : "Сначала выберите тип объекта"}
+            {file ? file.name : canUpload ? "Перетащите смету сюда" : "Сначала заполните уточнения"}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
             {file
               ? `${(file.size / 1024).toFixed(1)} KB · нажмите для замены`
               : canUpload
                 ? "Поддерживаются .xlsx, .xls, .pdf · ГрандСмета, CourtDoc, PDF-сметы"
-                : "После выбора типа объекта поле загрузки станет активным"}
+                : "После уточнений поле загрузки станет активным"}
           </div>
         </div>
       )}
 
-      {file && !status && canUpload && (
+      {file && !status && canUpload && !mappingPayload && (
         <button
           onClick={handleUpload}
           disabled={uploading || polling}
@@ -302,6 +463,28 @@ export default function UploadPage() {
         >
           {uploading ? "Отправляем..." : complexMode ? "→ Добавить смету в комплекс" : "→ Загрузить смету"}
         </button>
+      )}
+
+      {mappingPayload && estimateKind && !status && (
+        <div style={{ marginTop: 18, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "0 16px" }}>
+          <ColumnMapper
+            payload={mappingPayload}
+            projectId={id}
+            startDate={startDate}
+            workers={workers}
+            estimateKind={estimateKind}
+            complexMode={complexMode}
+            clarificationAnswers={buildClarificationPayload() ?? {}}
+            onConfirm={(nextJobId) => {
+              setMappingPayload(null);
+              setJobId(nextJobId);
+            }}
+            onCancel={() => {
+              setMappingPayload(null);
+              setFile(null);
+            }}
+          />
+        </div>
       )}
 
       {(status === "pending" || status === "processing") && (

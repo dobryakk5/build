@@ -49,6 +49,7 @@ export interface EstimateBatch {
   workers_count?: number | null;
   hours_per_day?: number | null;
   source_filename?: string | null;
+  clarification_answers?: Record<string, unknown> | null;
   estimates_count: number;
   gantt_tasks_count: number;
   fer_matched_count: number;

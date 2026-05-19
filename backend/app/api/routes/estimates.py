@@ -3,14 +3,16 @@
 Fix 4: Асинхронный upload → 202 + job_id
 """
 from datetime import date, datetime, timezone
+import json
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, UploadFile, File, Query, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, Form, Query, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps         import require_action, get_db, get_current_user
+from app.core.clarifications import UNKNOWN_CLARIFICATION_MARKERS
 from app.core.permissions import Action
 from app.models           import Estimate, EstimateBatch, FerWordsEntry, GanttTask, ProjectMember
 from app.schemas          import EstimateBatchResponse, EstimateRow, EstimateSummary, JobStartResponse, UploadStartResponse, JobResponse
@@ -38,6 +40,117 @@ router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
 
 ESTIMATE_ITEM_TYPE_WORK = "work"
 ESTIMATE_ITEM_TYPE_MECHANISM = "mechanism"
+CLARIFICATION_PAYLOAD_VERSION = "v1"
+MAX_CLARIFICATION_BYTES = 50_000
+MAX_CLARIFICATION_QUESTIONS = 250
+MAX_CLARIFICATION_TEXT_LENGTH = 500
+
+
+def _ensure_no_reserved_keys(value, path: str = "clarification_answers") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key)
+            if key_text.startswith("__"):
+                raise HTTPException(400, f"Служебный ключ {path}.{key_text} запрещён")
+            _ensure_no_reserved_keys(child, f"{path}.{key_text}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _ensure_no_reserved_keys(child, f"{path}[{index}]")
+
+
+def _clean_clarification_text(value, max_length: int = MAX_CLARIFICATION_TEXT_LENGTH) -> str:
+    return " ".join(str(value or "").split()).strip()[:max_length]
+
+
+def _clean_clarification_answers(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    answers: list[str] = []
+    for item in value:
+        answer = _clean_clarification_text(item, 200)
+        if not answer or answer in UNKNOWN_CLARIFICATION_MARKERS or answer in answers:
+            continue
+        answers.append(answer)
+    return answers
+
+
+def _normalize_clarification_payload(payload: dict | None) -> dict | None:
+    if not payload:
+        return None
+    _ensure_no_reserved_keys(payload)
+    if payload.get("version") != CLARIFICATION_PAYLOAD_VERSION:
+        raise HTTPException(400, "Неподдерживаемая версия уточнений")
+    if not isinstance(payload.get("form"), dict):
+        raise HTTPException(400, "Уточнения должны содержать объект form")
+
+    source_form = payload["form"]
+    form: dict[str, dict] = {}
+    for raw_key, raw_value in source_form.items():
+        key = _clean_clarification_text(raw_key, 64)
+        if not key or key.startswith("_"):
+            continue
+
+        if isinstance(raw_value, dict):
+            answers = _clean_clarification_answers(raw_value.get("answers"))
+            question = _clean_clarification_text(
+                raw_value.get("question") or raw_value.get("question_text") or key,
+                200,
+            )
+            section = _clean_clarification_text(raw_value.get("section"), 120)
+        else:
+            answers = _clean_clarification_answers(raw_value)
+            question = key
+            section = ""
+
+        if answers:
+            form[key] = {
+                "question": question,
+                "answers": answers,
+            }
+            if section:
+                form[key]["section"] = section
+        if len(form) > MAX_CLARIFICATION_QUESTIONS:
+            raise HTTPException(400, "Слишком много уточнений")
+
+    if not form:
+        return None
+
+    normalized = {
+        "version": CLARIFICATION_PAYLOAD_VERSION,
+        "form": form,
+    }
+    estimate_kind = payload.get("estimate_kind")
+    if isinstance(estimate_kind, int):
+        normalized["estimate_kind"] = estimate_kind
+    kind_title = _clean_clarification_text(payload.get("kind_title"), 160)
+    if kind_title:
+        normalized["kind_title"] = kind_title
+    return normalized
+
+
+def _parse_clarification_answers(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    if len(raw.encode("utf-8")) > MAX_CLARIFICATION_BYTES:
+        raise HTTPException(400, "Слишком большой JSON уточнений")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Некорректный JSON уточнений")
+    if not isinstance(parsed, dict):
+        raise HTTPException(400, "Уточнения должны быть JSON-объектом")
+    return _normalize_clarification_payload(parsed)
+
+
+def _public_clarification_answers(value: dict | None) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    public = {
+        key: val
+        for key, val in value.items()
+        if key in {"version", "estimate_kind", "kind_title", "form"}
+    }
+    return public or None
 
 
 def _estimate_item_type(estimate: Estimate) -> str:
@@ -78,6 +191,7 @@ async def _load_group_estimates(db: AsyncSession, estimate: Estimate) -> list[Es
 async def upload_estimate(
     project_id:       UUID,
     file:             UploadFile = File(...),
+    clarification_answers: str | None = Form(default=None),
     start_date:       date       = Query(default_factory=date.today),
     workers:          int        = Query(default=3, ge=1, le=20),
     estimate_kind:    int        = Query(ge=1, le=9),
@@ -91,6 +205,8 @@ async def upload_estimate(
     Парсинг сметы происходит в фоне. Гант строится отдельным действием со страницы сметы.
     Клиент опрашивает GET /jobs/{job_id} каждые 1-2 секунды.
     """
+    parsed_clarification_answers = _parse_clarification_answers(clarification_answers)
+
     job = await start_upload_job(
         file             = file,
         project_id       = str(project_id),
@@ -99,6 +215,7 @@ async def upload_estimate(
         workers          = workers,
         estimate_kind    = estimate_kind,
         complex_mode     = complex_mode,
+        clarification_answers = parsed_clarification_answers,
         db               = db,
     )
     return UploadStartResponse(job_id=job.id)
@@ -117,6 +234,7 @@ class ConfirmMappingRequest(BaseModel):
     workers:     int = 3
     estimate_kind: int
     complex_mode: bool = False
+    clarification_answers: dict | None = None
 
 
 @router.post("/estimates/upload/confirm-mapping", response_model=UploadStartResponse, status_code=202)
@@ -141,6 +259,7 @@ async def confirm_mapping(
         workers     = body.workers,
         estimate_kind = body.estimate_kind,
         complex_mode  = body.complex_mode,
+        clarification_answers = _normalize_clarification_payload(body.clarification_answers),
         db          = db,
     )
     return UploadStartResponse(job_id=job.id)
@@ -335,6 +454,7 @@ async def list_estimate_batches(
                 workers_count=batch.workers_count,
                 hours_per_day=float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY),
                 source_filename=batch.source_filename,
+                clarification_answers=_public_clarification_answers(batch.clarification_answers),
                 estimates_count=estimates_count or 0,
                 gantt_tasks_count=gantt_tasks_count or 0,
                 fer_matched_count=fer_matched_count or 0,

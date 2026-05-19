@@ -19,6 +19,9 @@ interface Props {
   projectId:  string;
   startDate:  string;
   workers:    number;
+  estimateKind: number;
+  complexMode: boolean;
+  clarificationAnswers: Record<string, unknown>;
   onConfirm:  (jobId: string) => void;
   onCancel:   () => void;
 }
@@ -47,6 +50,9 @@ export default function ColumnMapper({
   projectId,
   startDate,
   workers,
+  estimateKind,
+  complexMode,
+  clarificationAnswers,
   onConfirm,
   onCancel,
 }: Props) {
@@ -109,6 +115,9 @@ export default function ColumnMapper({
           col_mapping,
           start_date: startDate,
           workers,
+          estimate_kind: estimateKind,
+          complex_mode: complexMode,
+          clarification_answers: clarificationAnswers,
         }),
       });
 
@@ -126,7 +135,7 @@ export default function ColumnMapper({
       }
 
       const job = await res.json();
-      onConfirm(job.id);
+      onConfirm(job.job_id);
     } catch (e: any) {
       setError(e.message ?? "Ошибка при отправке");
     } finally {

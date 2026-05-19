@@ -4,7 +4,7 @@ import uuid
 from sqlalchemy import Date, ForeignKey, Numeric, SmallInteger, String, Text
 from sqlalchemy import TIMESTAMP
 from sqlalchemy import text as sa_text
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, SoftDeleteMixin
@@ -30,6 +30,7 @@ class EstimateBatch(Base, SoftDeleteMixin):
     workers_count: Mapped[int | None] = mapped_column(SmallInteger)
     hours_per_day: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, server_default=sa_text("8"))
     source_filename: Mapped[str | None] = mapped_column(Text)
+    clarification_answers: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ,
         server_default=sa_text("NOW()"),
