@@ -1,14 +1,14 @@
 from datetime import date, datetime, timezone
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps         import get_current_user, get_project_member, require_action, get_db, require_verified_user
 from app.core.permissions import Action
-from app.models           import Project, ProjectMember, User, GanttTask, Estimate, EstimateBatch
+from app.models           import ActivityEvent, Project, ProjectMember, User, GanttTask, Estimate, EstimateBatch
 from app.services.auth_service import is_effectively_email_verified
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -132,6 +132,7 @@ async def list_projects(
 @router.post("", status_code=201)
 async def create_project(
     body:         ProjectCreate,
+    request:      Request,
     current_user: User         = Depends(get_current_user),
     db:           AsyncSession = Depends(get_db),
 ):
@@ -154,6 +155,22 @@ async def create_project(
         project_id = project.id,
         user_id    = current_user.id,
         role       = "owner",
+    ))
+    db.add(ActivityEvent(
+        organization_id=current_user.organization_id,
+        project_id=project.id,
+        user_id=current_user.id,
+        event_type="PROJECT_CREATED",
+        entity_type="project",
+        entity_id=project.id,
+        path=str(request.url.path),
+        meta={
+            "project_name": project.name,
+            "address": project.address,
+            "start_date": str(project.start_date) if project.start_date else None,
+            "end_date": str(project.end_date) if project.end_date else None,
+            "color": project.color,
+        },
     ))
 
     await db.commit()

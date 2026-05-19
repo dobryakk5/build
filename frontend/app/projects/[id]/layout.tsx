@@ -74,10 +74,15 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
         if (!batchId) return;
 
         const session = await ktpEstimate.getSession(id, batchId);
-        if (cancelled || !session || !RESUMABLE_KTP_STATUSES.has(session.status)) return;
-        setUploadHref(ktpResumeHref(id, session));
+        if (cancelled || !session) return;
+
+        if (RESUMABLE_KTP_STATUSES.has(session.status)) {
+          setUploadHref(ktpResumeHref(id, session));
+        }
       } catch {
-        if (!cancelled) setUploadHref(fallbackHref);
+        if (!cancelled) {
+          setUploadHref(fallbackHref);
+        }
       }
     }
 
@@ -111,18 +116,16 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const myRole = currentUser?.projects?.find((project) => project.project_id === id)?.role ?? null;
   const canManage = myRole === "owner" || myRole === "pm";
   const withBatch = (path: string) =>
-    activeBatchId && (path.includes("/gantt") || path.includes("/estimate") || path.includes("/ktp") || path.includes("/work-plan"))
+    activeBatchId && (path.includes("/gantt") || path.includes("/estimate") || path.includes("/ktp"))
       ? `${path}?batch=${activeBatchId}`
       : path;
 
   const tabs = [
     { id: "gantt", label: "📊 ГПР", matchPath: `/projects/${id}/gantt`, href: withBatch(`/projects/${id}/gantt`) },
     { id: "estimate", label: "📋 Смета", matchPath: `/projects/${id}/estimate`, href: withBatch(`/projects/${id}/estimate`) },
-    { id: "work-plan", label: "📐 План", matchPath: `/projects/${id}/work-plan`, href: withBatch(`/projects/${id}/work-plan`) },
     { id: "journal", label: "🗒 Журнал", matchPath: `/projects/${id}/journal`, href: `/projects/${id}/journal` },
     { id: "references", label: "🧾 Справочники", matchPath: `/projects/${id}/fer`, href: `/projects/${id}/fer` },
     { id: "upload", label: "⬆ Загрузка", matchPath: `/projects/${id}/upload`, href: uploadHref },
-    { id: "ktp", label: "🗂 КТП", matchPath: `/projects/${id}/ktp`, href: withBatch(`/projects/${id}/ktp`) },
     ...(canManage ? [{ id: "settings", label: "⚙ Настройки", matchPath: `/projects/${id}/settings`, href: `/projects/${id}/settings` }] : []),
   ];
 

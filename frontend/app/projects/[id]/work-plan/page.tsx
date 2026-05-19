@@ -461,6 +461,20 @@ export default function WorkPlanPage() {
           to { transform: rotate(360deg); }
         }
       `}</style>
+      <div
+        style={{
+          marginBottom: 16,
+          padding: "12px 14px",
+          background: "rgba(148,163,184,.12)",
+          border: `1px solid ${COLORS.border}`,
+          borderRadius: 8,
+          color: COLORS.muted,
+          fontSize: 12,
+          lineHeight: 1.45,
+        }}
+      >
+        Архивный режим. Этот экран оставлен для просмотра и ручной работы со старым планом работ; основной сценарий теперь строит КТП и ГПР через вкладку КТП.
+      </div>
       {/* Top toolbar */}
       <div
         style={{

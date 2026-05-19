@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { ktp as ktpApi } from "@/lib/api";
+import { trackActivity } from "@/lib/activity";
 import { fmtMoney } from "@/lib/dateUtils";
 import type {
   KtpCard,
@@ -261,6 +262,16 @@ export default function KtpGroupPage() {
   async function generateForGroup(targetGroup: KtpGroup, answers: Record<string, string> = {}) {
     setState({ phase: "generating" });
     setError(null);
+    trackActivity("KTP_CARD_GENERATION_STARTED", {
+      projectId,
+      entityType: "ktp_group",
+      entityId: targetGroup.id,
+      metadata: {
+        estimate_batch_id: batchId,
+        group_title: targetGroup.title,
+        answers_count: Object.keys(answers).length,
+      },
+    });
 
     try {
       const response: KtpGenerateResponse = await ktpApi.generate(projectId, targetGroup.id, answers);
@@ -271,15 +282,43 @@ export default function KtpGroupPage() {
 
       if (!response.sufficient) {
         setState({ phase: "questions", questions: response.questions });
+        trackActivity("KTP_CARD_QUESTIONS_REQUIRED", {
+          projectId,
+          entityType: "ktp_group",
+          entityId: targetGroup.id,
+          metadata: {
+            estimate_batch_id: batchId,
+            questions_count: response.questions.length,
+          },
+        });
         return;
       }
 
       setState({ phase: "done", card: response.ktp });
+      trackActivity("KTP_CARD_GENERATED", {
+        projectId,
+        entityType: "ktp_group",
+        entityId: targetGroup.id,
+        metadata: {
+          estimate_batch_id: batchId,
+          card_id: response.ktp.id,
+          group_title: targetGroup.title,
+        },
+      });
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : "Ошибка генерации КТП");
       setState({ phase: "idle" });
     }
   }
+
+  useEffect(() => {
+    trackActivity("KTP_GROUP_PAGE_OPENED", {
+      projectId,
+      entityType: "ktp_group",
+      entityId: groupId,
+      metadata: { estimate_batch_id: batchId },
+    });
+  }, [batchId, groupId, projectId]);
 
   useEffect(() => {
     if (!batchId) return;
@@ -404,6 +443,21 @@ export default function KtpGroupPage() {
 
   return (
     <div style={{ height: "100%", overflow: "auto", padding: 24, maxWidth: 1080, margin: "0 auto", boxSizing: "border-box" }}>
+      <div
+        style={{
+          marginBottom: 18,
+          padding: "12px 14px",
+          background: "rgba(148,163,184,.08)",
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          color: "var(--muted)",
+          fontSize: 12,
+          lineHeight: 1.45,
+        }}
+      >
+        Архивный режим. Это старая карточка КТП по одной группе работ; основной сценарий теперь строит КТП по всей смете.
+      </div>
+
       <div style={{ display: "flex", justifyContent: "space-between", gap: 16, flexWrap: "wrap", marginBottom: 18 }}>
         <div>
           <Link

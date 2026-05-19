@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { ktpEstimate } from "@/lib/api";
+import { trackActivity } from "@/lib/activity";
 import { useJobPoller } from "@/lib/useJobPoller";
 import type {
   KtpEstimateCard,
@@ -107,6 +108,18 @@ export default function KtpEstimateWizardPage() {
   const status = session?.status;
   const batchId = session?.estimate_batch_id;
 
+  useEffect(() => {
+    trackActivity("KTP_ESTIMATE_WIZARD_OPENED", {
+      projectId,
+      entityType: "ktp_estimate_session",
+      entityId: sessionId,
+      metadata: {
+        estimate_batch_id: searchParams.get("batch"),
+        job_id: searchParams.get("job"),
+      },
+    });
+  }, [projectId, searchParams, sessionId]);
+
   const loadWbs = useCallback(async () => {
     try {
       setWbs(await ktpEstimate.getWbs(projectId, sessionId));
@@ -157,6 +170,17 @@ export default function KtpEstimateWizardPage() {
   useEffect(() => {
     if (!job) return;
     if (job.status === "done") {
+      if (status === "gpr_processing") {
+        trackActivity("GPR_BUILD_COMPLETED", {
+          projectId,
+          entityType: "ktp_estimate_session",
+          entityId: sessionId,
+          metadata: {
+            job_id: job.id,
+            estimate_batch_id: batchId,
+          },
+        });
+      }
       setActiveJobId(null);
       void loadWbs();
     } else if (job.status === "failed") {
@@ -255,6 +279,12 @@ export default function KtpEstimateWizardPage() {
             setBusy(true);
             try {
               await ktpEstimate.approveStage1(projectId, sessionId);
+              trackActivity("KTP_STAGE1_APPROVED", {
+                projectId,
+                entityType: "ktp_estimate_session",
+                entityId: sessionId,
+                metadata: { estimate_batch_id: batchId },
+              });
               await loadWbs();
             } catch (e: any) {
               setError(e.message);
@@ -288,6 +318,12 @@ export default function KtpEstimateWizardPage() {
           onBuild={async () => {
             setBusy(true);
             try {
+              trackActivity("GPR_BUILD_STARTED", {
+                projectId,
+                entityType: "ktp_estimate_session",
+                entityId: sessionId,
+                metadata: { estimate_batch_id: batchId },
+              });
               const { job_id } = await ktpEstimate.buildGpr(projectId, sessionId);
               setActiveJobId(job_id);
               await loadWbs();
@@ -296,7 +332,18 @@ export default function KtpEstimateWizardPage() {
               setBusy(false);
             }
           }}
-          onOpenGantt={() => router.push(`/projects/${projectId}/gantt?batch=${batchId}`)}
+          onOpenGantt={() => {
+            trackActivity("GPR_GANTT_OPENED", {
+              projectId,
+              entityType: "estimate_batch",
+              entityId: batchId ?? null,
+              metadata: {
+                estimate_batch_id: batchId,
+                ktp_estimate_session_id: sessionId,
+              },
+            });
+            router.push(`/projects/${projectId}/gantt?batch=${batchId}`);
+          }}
         />
       )}
     </div>
@@ -827,6 +874,15 @@ function Stage2({
               setBusy(true);
               try {
                 await ktpEstimate.approveStage2(projectId, sessionId);
+                trackActivity("KTP_STAGE2_APPROVED", {
+                  projectId,
+                  entityType: "ktp_estimate_session",
+                  entityId: sessionId,
+                  metadata: {
+                    estimate_batch_id: wbs.session.estimate_batch_id,
+                    groups_count: groupsWithWorks.length,
+                  },
+                });
                 await reload();
               } catch (e: any) {
                 setError(e.message);
@@ -901,14 +957,41 @@ function Stage2Group({
   const generate = async (withAnswers: Record<string, string>) => {
     setGenerating(true);
     setBusy(true);
+    trackActivity("KTP_STAGE2_CARD_GENERATION_STARTED", {
+      projectId,
+      entityType: "ktp_wbs_group",
+      entityId: group.id,
+      metadata: {
+        group_title: group.title,
+        answers_count: Object.keys(withAnswers).length,
+      },
+    });
     try {
       const res = await ktpEstimate.generateCard(projectId, group.id, withAnswers);
       setValidation(null);
       if (res.sufficient) {
         setQuestions(null);
         setCardData(res.card);
+        trackActivity("KTP_STAGE2_CARD_GENERATED", {
+          projectId,
+          entityType: "ktp_wbs_group",
+          entityId: group.id,
+          metadata: {
+            group_title: group.title,
+            card_status: res.card.status,
+          },
+        });
       } else {
         setQuestions(res.questions);
+        trackActivity("KTP_STAGE2_CARD_QUESTIONS_REQUIRED", {
+          projectId,
+          entityType: "ktp_wbs_group",
+          entityId: group.id,
+          metadata: {
+            group_title: group.title,
+            questions_count: res.questions.length,
+          },
+        });
       }
       await reload();
     } catch (e: any) {

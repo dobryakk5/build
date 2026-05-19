@@ -1,6 +1,7 @@
 // frontend/lib/api.ts
 import type {
   BaselineStatus,
+  ActivityEvent,
   CurrentUser,
   EnirCollectionSummary,
   EnirParagraphFull,
@@ -162,6 +163,17 @@ export const projects = {
   updateMember: (id: string, uid: string, body: any) =>
     request<any>(`/projects/${id}/members/${uid}`, { method: "PATCH", body: JSON.stringify(body) }),
   removeMember: (id: string, uid: string)  => request<void>(`/projects/${id}/members/${uid}`, { method: "DELETE" }),
+};
+
+export const activityEvents = {
+  list: (pid: string, params: { eventType?: string; limit?: number; offset?: number } = {}) => {
+    const search = new URLSearchParams();
+    if (params.eventType) search.set("event_type", params.eventType);
+    if (params.limit != null) search.set("limit", String(params.limit));
+    if (params.offset != null) search.set("offset", String(params.offset));
+    const query = search.toString();
+    return request<ActivityEvent[]>(`/projects/${pid}/activity-events${query ? `?${query}` : ""}`);
+  },
 };
 
 export const gantt = {

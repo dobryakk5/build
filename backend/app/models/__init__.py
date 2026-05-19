@@ -2,6 +2,7 @@ from .base         import Base, TimestampMixin, SoftDeleteMixin
 from .organization import Organization
 from .user         import User
 from .auth         import AuthSession, EmailVerificationToken, PasswordResetToken, AuthAuditEvent
+from .activity     import ActivityEvent
 from .project      import Project, ProjectMember
 from .estimate_batch import EstimateBatch
 from .estimate     import Estimate
@@ -68,6 +69,7 @@ __all__ = [
     "Base",
     "Organization", "User",
     "AuthSession", "EmailVerificationToken", "PasswordResetToken", "AuthAuditEvent",
+    "ActivityEvent",
     "Project", "ProjectMember",
     "EstimateBatch",
     "Estimate",

@@ -1,13 +1,14 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
-import { estimates, ktp as ktpApi, ktpEstimate } from "@/lib/api";
+import { estimates, ktpEstimate } from "@/lib/api";
 import ColumnMapper, { type MappingPayload } from "@/components/ColumnMapper";
 import { fmtMoney } from "@/lib/dateUtils";
 import { CLARIFICATION_BY_KIND } from "@/lib/estimateClarificationQuestions";
 import { useJobPoller } from "@/lib/useJobPoller";
+import { trackActivity } from "@/lib/activity";
 
 const KIND_OPTIONS = [
   { id: 1, title: "Земляные грунтовые работы" },
@@ -65,13 +66,80 @@ export default function UploadPage() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [mappingPayload, setMappingPayload] = useState<MappingPayload | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [ktpLoading, setKtpLoading] = useState<"groups" | "estimate" | null>(null);
+  const [ktpLoading, setKtpLoading] = useState<"estimate" | null>(null);
 
   const { job, loading: polling } = useJobPoller(jobId);
+  const status = job?.status;
+  const result = job?.result;
   const currentClarification = estimateKind ? CLARIFICATION_BY_KIND[estimateKind] : null;
   const answeredCount = Object.values(clarificationAnswers).filter((answers) => answers.length > 0).length;
   const questionsCount = currentClarification?.sections.reduce((sum, section) => sum + section.questions.length, 0) ?? 0;
+  const allClarificationsAnswered = questionsCount > 0 && answeredCount === questionsCount;
   const canUpload = estimateKind !== null && clarificationsConfirmed;
+  const wasAllClarificationsAnsweredRef = useRef(false);
+  const clarificationStartedRef = useRef(false);
+  const trackedJobTerminalStatusRef = useRef<string | null>(null);
+  const autoStartedKtpBatchRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    trackActivity("UPLOAD_PAGE_OPENED", {
+      projectId: id,
+      entityType: "project",
+      entityId: id,
+    });
+  }, [id]);
+
+  useEffect(() => {
+    const wasAllAnswered = wasAllClarificationsAnsweredRef.current;
+
+    if (allClarificationsAnswered && !wasAllAnswered && !clarificationsConfirmed && !status) {
+      setClarificationsConfirmed(true);
+      trackActivity("CLARIFICATIONS_COMPLETED", {
+        projectId: id,
+        entityType: "project",
+        entityId: id,
+        metadata: {
+          estimate_kind: estimateKind,
+          answered_count: answeredCount,
+          questions_count: questionsCount,
+        },
+      });
+    }
+
+    wasAllClarificationsAnsweredRef.current = allClarificationsAnswered;
+  }, [allClarificationsAnswered, answeredCount, clarificationsConfirmed, estimateKind, id, questionsCount, status]);
+
+  useEffect(() => {
+    if (!job || trackedJobTerminalStatusRef.current === `${job.id}:${job.status}`) return;
+
+    if (job.status === "done") {
+      trackedJobTerminalStatusRef.current = `${job.id}:${job.status}`;
+      trackActivity("ESTIMATE_UPLOAD_COMPLETED", {
+        projectId: id,
+        entityType: "estimate_batch",
+        entityId: result?.estimate_batch_id ?? null,
+        metadata: {
+          job_id: job.id,
+          estimate_batch_id: result?.estimate_batch_id,
+          estimate_batch_name: result?.estimate_batch_name,
+          estimates_count: result?.estimates_count,
+          total_price: result?.total_price,
+          complex_mode: result?.complex_mode ?? complexMode,
+        },
+      });
+    } else if (job.status === "failed") {
+      trackedJobTerminalStatusRef.current = `${job.id}:${job.status}`;
+      trackActivity("ESTIMATE_UPLOAD_FAILED", {
+        projectId: id,
+        entityType: "job",
+        entityId: job.id,
+        metadata: {
+          job_id: job.id,
+          error: result?.error,
+        },
+      });
+    }
+  }, [complexMode, id, job, result]);
 
   const handleDrop = useCallback((files: FileList | null) => {
     if (!canUpload) return;
@@ -80,21 +148,67 @@ export default function UploadPage() {
     if (nextFile && (nextFile.name.endsWith(".xlsx") || nextFile.name.endsWith(".xls") || nextFile.name.endsWith(".pdf"))) {
       setFile(nextFile);
       setJobId(null);
+      trackedJobTerminalStatusRef.current = null;
+      autoStartedKtpBatchRef.current = null;
+      trackActivity("ESTIMATE_FILE_SELECTED", {
+        projectId: id,
+        entityType: "project",
+        entityId: id,
+        metadata: {
+          file_name: nextFile.name,
+          file_size: nextFile.size,
+          estimate_kind: estimateKind,
+          complex_mode: complexMode,
+        },
+      });
     }
-  }, [canUpload]);
+  }, [canUpload, complexMode, estimateKind, id]);
 
   async function handleUpload() {
     if (!file || !estimateKind) return;
 
     setUploading(true);
+    autoStartedKtpBatchRef.current = null;
+    trackActivity("ESTIMATE_UPLOAD_STARTED", {
+      projectId: id,
+      entityType: "project",
+      entityId: id,
+      metadata: {
+        file_name: file.name,
+        file_size: file.size,
+        start_date: startDate,
+        workers,
+        estimate_kind: estimateKind,
+        complex_mode: complexMode,
+        answered_count: answeredCount,
+        questions_count: questionsCount,
+      },
+    });
     try {
       const res = await estimates.upload(id, file, startDate, workers, estimateKind, complexMode, buildClarificationPayload());
       setJobId(res.job_id);
+      trackActivity("ESTIMATE_UPLOAD_JOB_CREATED", {
+        projectId: id,
+        entityType: "job",
+        entityId: res.job_id,
+        metadata: { job_id: res.job_id },
+      });
     } catch (e: any) {
       if (e?.mappingPayload) {
         setMappingPayload(e.mappingPayload);
+        trackActivity("ESTIMATE_UPLOAD_MAPPING_REQUIRED", {
+          projectId: id,
+          entityType: "project",
+          entityId: id,
+        });
         return;
       }
+      trackActivity("ESTIMATE_UPLOAD_FAILED", {
+        projectId: id,
+        entityType: "project",
+        entityId: id,
+        metadata: { error: e.message },
+      });
       alert(e.message);
     } finally {
       setUploading(false);
@@ -137,9 +251,36 @@ export default function UploadPage() {
     setFile(null);
     setJobId(null);
     setMappingPayload(null);
+    autoStartedKtpBatchRef.current = null;
+    clarificationStartedRef.current = false;
+    wasAllClarificationsAnsweredRef.current = false;
+    if (nextKind) {
+      trackActivity("ESTIMATE_KIND_SELECTED", {
+        projectId: id,
+        entityType: "project",
+        entityId: id,
+        metadata: {
+          estimate_kind: nextKind,
+          kind_title: KIND_LABEL[nextKind],
+        },
+      });
+    }
   }
 
   function toggleClarification(questionId: string, option: string) {
+    if (!clarificationStartedRef.current) {
+      clarificationStartedRef.current = true;
+      trackActivity("CLARIFICATIONS_STARTED", {
+        projectId: id,
+        entityType: "project",
+        entityId: id,
+        metadata: {
+          estimate_kind: estimateKind,
+          questions_count: questionsCount,
+        },
+      });
+    }
+
     setClarificationAnswers((prev) => {
       const current = prev[questionId] ?? [];
       const next = current.includes(option)
@@ -153,30 +294,31 @@ export default function UploadPage() {
     });
   }
 
-  const status = job?.status;
-  const result = job?.result;
-
-  async function handleKtpGroups(batchId: string) {
-    setKtpLoading("groups");
-    try {
-      await ktpApi.buildGroups(id, batchId).catch(() => null);
-      router.replace(`/projects/${id}/ktp?batch=${batchId}`);
-    } finally {
-      setKtpLoading(null);
-    }
-  }
-
-  async function handleKtpEstimate(batchId: string) {
+  const handleKtpEstimate = useCallback(async (batchId: string) => {
     setKtpLoading("estimate");
     try {
       const { job_id, session_id } = await ktpEstimate.startSession(id, batchId);
+      trackActivity("KTP_ESTIMATE_SESSION_STARTED", {
+        projectId: id,
+        entityType: "ktp_estimate_session",
+        entityId: session_id,
+        metadata: { estimate_batch_id: batchId, job_id },
+      });
       const suffix = job_id ? `?job=${job_id}` : "";
       router.replace(`/projects/${id}/ktp-estimate/${session_id}${suffix}`);
     } catch (e: any) {
       alert(e.message);
       setKtpLoading(null);
     }
-  }
+  }, [id, router]);
+
+  useEffect(() => {
+    const batchId = result?.estimate_batch_id;
+    if (status !== "done" || !batchId || autoStartedKtpBatchRef.current === batchId) return;
+
+    autoStartedKtpBatchRef.current = batchId;
+    void handleKtpEstimate(batchId);
+  }, [handleKtpEstimate, result?.estimate_batch_id, status]);
 
   return (
     <div
@@ -275,19 +417,21 @@ export default function UploadPage() {
             <button
               type="button"
               onClick={() => setClarificationsConfirmed(true)}
+              disabled={!allClarificationsAnswered}
               style={{
                 padding: "9px 14px",
-                background: "var(--blue-dark)",
+                background: allClarificationsAnswered ? "var(--blue-dark)" : "#94a3b8",
                 color: "#fff",
                 border: "none",
                 borderRadius: 6,
                 fontSize: 13,
                 fontWeight: 600,
-                cursor: "pointer",
+                cursor: allClarificationsAnswered ? "pointer" : "default",
+                opacity: allClarificationsAnswered ? 1 : 0.75,
                 whiteSpace: "nowrap",
               }}
             >
-              Перейти к загрузке
+              {allClarificationsAnswered ? "Перейти к загрузке" : "Ответьте на все вопросы"}
             </button>
           </div>
 
@@ -513,25 +657,6 @@ export default function UploadPage() {
           </div>
           <div style={{ marginTop: 16, display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button
-              onClick={() => handleKtpGroups(result.estimate_batch_id!)}
-              disabled={ktpLoading !== null}
-              style={{
-                flex: 1,
-                minWidth: 180,
-                padding: "11px 16px",
-                background: "var(--surface)",
-                color: "var(--text)",
-                border: "1px solid var(--border2)",
-                borderRadius: 6,
-                fontSize: 13,
-                fontWeight: 600,
-                cursor: ktpLoading !== null ? "default" : "pointer",
-                opacity: ktpLoading !== null ? 0.7 : 1,
-              }}
-            >
-              {ktpLoading === "groups" ? "Формируем группы..." : "КТП по группам"}
-            </button>
-            <button
               onClick={() => handleKtpEstimate(result.estimate_batch_id!)}
               disabled={ktpLoading !== null}
               style={{
@@ -562,6 +687,7 @@ export default function UploadPage() {
             onClick={() => {
               setJobId(null);
               setFile(null);
+              autoStartedKtpBatchRef.current = null;
             }}
             style={{ marginTop: 10, padding: "6px 14px", border: "1px solid var(--border2)", borderRadius: 4, background: "var(--surface)", fontSize: 12, cursor: "pointer" }}
           >

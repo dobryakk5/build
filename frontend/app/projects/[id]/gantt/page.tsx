@@ -3,6 +3,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { estimates, gantt as ganttApi, projects } from "@/lib/api";
+import { trackActivity } from "@/lib/activity";
 import type { BaselineStatus, EstimateBatch, EstimateMaterial, Task } from "@/lib/types";
 
 const DEFAULT_DAY_W = 24;
@@ -682,6 +683,15 @@ export default function App() {
   const [baselineLoading, setBaselineLoading] = useState(false);
   const [baselineReason, setBaselineReason] = useState("");
   const [actsSaving, setActsSaving] = useState(false);
+
+  useEffect(() => {
+    trackActivity("GANTT_PAGE_OPENED", {
+      projectId: pid,
+      entityType: batchFromUrl ? "estimate_batch" : "project",
+      entityId: batchFromUrl ?? pid,
+      metadata: { estimate_batch_id: batchFromUrl },
+    });
+  }, [batchFromUrl, pid]);
   const [clearingGantt, setClearingGantt] = useState(false);
   const [hoveredTaskTooltip, setHoveredTaskTooltip] = useState<HoveredTaskTooltip | null>(null);
 

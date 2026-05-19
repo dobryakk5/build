@@ -10,7 +10,7 @@ from app.api.deps import get_current_user
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import hash_password, verify_password
-from app.models import ProjectMember, User, Organization
+from app.models import ActivityEvent, ProjectMember, User, Organization
 from app.services.auth_service import (
     clear_auth_cookies,
     consume_email_verification_token,
@@ -283,6 +283,19 @@ async def login(
     user.last_login_at = utcnow()
     _, raw_refresh_token, access_token = await create_session(db, user=user, request=request)
     await log_auth_event(db, event_type="login_success", request=request, user=user)
+    db.add(ActivityEvent(
+        organization_id=user.organization_id,
+        user_id=user.id,
+        event_type="USER_LOGIN",
+        entity_type="user",
+        entity_id=user.id,
+        path=str(request.url.path),
+        meta={
+            "email": user.email,
+            "ip": request.client.host if request.client else None,
+            "user_agent": request.headers.get("user-agent"),
+        },
+    ))
     await db.commit()
 
     set_auth_cookies(response, access_token=access_token, refresh_token=raw_refresh_token)

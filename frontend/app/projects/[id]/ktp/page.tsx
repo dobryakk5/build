@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { estimates, ktp as ktpApi } from "@/lib/api";
+import { trackActivity } from "@/lib/activity";
 import { fmtMoney } from "@/lib/dateUtils";
 import type { EstimateBatch, KtpGroup } from "@/lib/types";
 
@@ -52,6 +53,15 @@ export default function KtpGroupsPage() {
   const [hasBatches, setHasBatches] = useState(true);
 
   useEffect(() => {
+    trackActivity("KTP_GROUPS_PAGE_OPENED", {
+      projectId,
+      entityType: batchId ? "estimate_batch" : "project",
+      entityId: batchId ?? projectId,
+      metadata: { estimate_batch_id: batchId },
+    });
+  }, [batchId, projectId]);
+
+  useEffect(() => {
     setResolvedBatchId(batchId);
   }, [batchId]);
 
@@ -90,7 +100,18 @@ export default function KtpGroupsPage() {
 
     ktpApi
       .buildGroups(projectId, resolvedBatchId)
-      .then(setGroups)
+      .then((nextGroups) => {
+        setGroups(nextGroups);
+        trackActivity("KTP_GROUPS_BUILT", {
+          projectId,
+          entityType: "estimate_batch",
+          entityId: resolvedBatchId,
+          metadata: {
+            estimate_batch_id: resolvedBatchId,
+            groups_count: nextGroups.length,
+          },
+        });
+      })
       .catch((nextError: Error) => setError(nextError.message))
       .finally(() => setLoading(false));
   }, [projectId, resolvedBatchId]);
@@ -161,6 +182,21 @@ export default function KtpGroupsPage() {
     <div style={{ height: "100%", overflow: "auto", padding: 24, maxWidth: 1080, margin: "0 auto", boxSizing: "border-box" }}>
       <div
         style={{
+          marginBottom: 18,
+          padding: "12px 14px",
+          background: "rgba(148,163,184,.08)",
+          border: "1px solid var(--border)",
+          borderRadius: 8,
+          color: "var(--muted)",
+          fontSize: 12,
+          lineHeight: 1.45,
+        }}
+      >
+        Архивный режим. Этот экран оставлен для просмотра и ручного запуска старого сценария КТП по группам; основной сценарий теперь строит КТП по всей смете.
+      </div>
+
+      <div
+        style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "flex-start",
@@ -184,8 +220,19 @@ export default function KtpGroupsPage() {
                 setMatchingAi(true);
                 setError(null);
                 try {
+                  trackActivity("KTP_GROUPS_AI_MATCH_STARTED", {
+                    projectId,
+                    entityType: "estimate_batch",
+                    entityId: resolvedBatchId,
+                  });
                   const nextGroups = await ktpApi.matchAi(projectId, resolvedBatchId, true);
                   setGroups(nextGroups);
+                  trackActivity("KTP_GROUPS_AI_MATCH_COMPLETED", {
+                    projectId,
+                    entityType: "estimate_batch",
+                    entityId: resolvedBatchId,
+                    metadata: { groups_count: nextGroups.length },
+                  });
                 } catch (nextError) {
                   setError(nextError instanceof Error ? nextError.message : "Ошибка ИИ-матчинга");
                 } finally {
