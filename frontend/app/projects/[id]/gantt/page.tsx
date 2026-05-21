@@ -9,11 +9,12 @@ import type { BaselineStatus, EstimateBatch, EstimateMaterial, Task } from "@/li
 const DEFAULT_DAY_W = 24;
 const DEFAULT_HOURS_PER_DAY = 8;
 const GANTT_PAGE_SIZE = 500;
-const MIN_DAY_W = 12;
+const MIN_DAY_W = 0.25;
 const MAX_DAY_W = 56;
 const MOBILE_BREAKPOINT = 980;
 const MIN_RIGHT_PANEL_W = 520;
 const ROW_H = 32;
+const TASK_COLOR_OPTIONS = ["#3b82f6", "#7c3aed", "#059669", "#f59e0b", "#ef4444"] as const;
 
 type TaskRow = Task & {
   depth: number;
@@ -79,7 +80,6 @@ type HoveredTaskTooltip = {
 
 const z = (n: number | string) => String(n).padStart(2, "0");
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
-const clampDayWidth = (n: number) => clamp(n, MIN_DAY_W, MAX_DAY_W);
 const pd = (s: string) => {
   const [y, m, d] = s.split("-");
   return new Date(Number(y), Number(m) - 1, Number(d));
@@ -282,6 +282,24 @@ function getVisibleRows(tasks: Task[], collapsed: Set<string>): TaskRow[] {
   return rows;
 }
 
+function getDefaultCollapsedRows(tasks: Task[], visibleTaskId?: string | null): Set<string> {
+  const byId = new Map(tasks.map((task) => [task.id, task]));
+  const parentIds = new Set(tasks.map((task) => task.pid).filter((id): id is string => Boolean(id)));
+  const collapsed = new Set(parentIds);
+
+  tasks.forEach((task) => {
+    if (task.is_group) collapsed.add(task.id);
+  });
+
+  let current = visibleTaskId ? byId.get(visibleTaskId) : null;
+  while (current?.pid) {
+    collapsed.delete(current.pid);
+    current = byId.get(current.pid) ?? null;
+  }
+
+  return collapsed;
+}
+
 function getAllDescendants(tasks: Task[], id: string): string[] {
   const res: string[] = [];
   const q: string[] = [id];
@@ -442,17 +460,7 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .rn{width:30px;min-width:30px;justify-content:center;color:var(--muted);font-family:var(--mono);font-size:10px;}
 
 /* right / gantt */
-.right{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;background:var(--surface);}
-.zoom-bar{
-  display:flex;align-items:center;gap:8px;padding:8px 10px;background:#f8fafc;
-  border-bottom:1px solid var(--border);flex-shrink:0;
-}
-.zoom-btn{
-  min-width:32px;height:32px;padding:0 10px;border-radius:8px;border:1px solid var(--border);
-  background:#fff;color:var(--text);font:600 13px var(--sans);cursor:pointer;
-}
-.zoom-btn:hover{border-color:#93c5fd;color:#1d4ed8;}
-.zoom-val{margin-left:auto;font-size:11px;color:var(--muted);font-family:var(--mono);}
+.right{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden;background:var(--surface);position:relative;}
 .ghdr{height:52px;min-height:52px;overflow:hidden;background:var(--hdr2);border-bottom:1px solid var(--hdr3);flex-shrink:0;}
 .mr{display:flex;height:26px;border-bottom:1px solid var(--hdr3);}
 .mc{display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#cbd5e1;border-right:1px solid var(--hdr3);flex-shrink:0;}
@@ -461,6 +469,21 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .gbw{flex:1;overflow:scroll;position:relative;}
 .gbw.zoomable{touch-action:pan-x pan-y;overscroll-behavior:contain;}
 .gb{position:relative;}
+.timeline-zoom{
+  position:absolute;right:12px;bottom:12px;z-index:45;display:flex;align-items:center;gap:6px;
+  padding:6px;border:1px solid rgba(148,163,184,.35);border-radius:8px;
+  background:rgba(255,255,255,.94);box-shadow:0 8px 24px rgba(15,23,42,.14);
+  backdrop-filter:blur(8px);
+}
+.timeline-zoom button{
+  height:28px;min-width:30px;padding:0 9px;border:1px solid var(--border);border-radius:6px;
+  background:#fff;color:var(--text);font:600 12px var(--sans);cursor:pointer;
+}
+.timeline-zoom button:hover{border-color:#93c5fd;color:#1d4ed8;}
+.timeline-zoom .zoom-fit{font-family:var(--mono);min-width:52px;}
+.timeline-zoom .zoom-readout{
+  min-width:46px;text-align:center;font:600 11px var(--mono);color:var(--muted);
+}
 .gl{position:absolute;top:0;bottom:0;width:1px;background:var(--border);pointer-events:none;}
 .gl.m{background:#e2e8f0;}
 .gr{position:relative;height:32px;display:flex;align-items:center;border-bottom:1px solid var(--border);}
@@ -516,6 +539,14 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
   font:inherit;color:var(--text);background:#fff;outline:none;
 }
 .pfield-input:focus{border-color:var(--blue);}
+.color-swatches{display:flex;align-items:center;gap:8px;margin-top:8px;}
+.color-swatch{
+  width:28px;height:28px;border-radius:6px;border:2px solid transparent;cursor:pointer;
+  box-shadow:inset 0 0 0 1px rgba(15,23,42,.12);transition:transform .12s,box-shadow .12s,border-color .12s;
+}
+.color-swatch:hover{transform:translateY(-1px);}
+.color-swatch.sel{border-color:var(--text);box-shadow:0 0 0 2px #fff,0 0 0 4px currentColor;}
+.color-swatch:disabled{cursor:default;opacity:.65;transform:none;}
 .panel-actions{display:flex;align-items:center;gap:10px;justify-content:flex-end;margin-top:12px;}
 .panel-save-error{margin-right:auto;font-size:12px;color:#dc2626;line-height:1.4;}
 .panel-save-btn{
@@ -663,6 +694,7 @@ export default function App() {
   const [editVal, setEditVal] = useState("");
   const [leftW, setLeftW] = useState(620);
   const [dayWidth, setDayWidth] = useState(DEFAULT_DAY_W);
+  const [timelineViewportW, setTimelineViewportW] = useState(0);
   const [viewportW, setViewportW] = useState(1280);
   const [isTouchDevice, setIsTouchDevice] = useState(false);
   const [pname, setPname] = useState("Объект");
@@ -704,6 +736,7 @@ export default function App() {
   const inpRef = useRef<HTMLInputElement | null>(null);
   const dateInpRef = useRef<HTMLInputElement | null>(null);
   const dayWidthRef = useRef(DEFAULT_DAY_W);
+  const userZoomedTimelineRef = useRef(false);
   const pinchRef = useRef<{ startDistance: number; startDayWidth: number } | null>(null);
   const suppressProjectNameBlurRef = useRef(false);
 
@@ -734,6 +767,7 @@ export default function App() {
   const loadTasks = useCallback(async (preferredTaskId?: string | null, batchIdOverride?: string | null) => {
     if (!pid) return;
     const targetBatchId = batchIdOverride !== undefined ? batchIdOverride : activeBatchId;
+    userZoomedTimelineRef.current = false;
     setTasks([]);
     setColl(new Set());
     setSel(null);
@@ -752,10 +786,13 @@ export default function App() {
       }
 
       if (apiTasks.length > 0) {
-        setTasks(resolveDates(apiTasks.map((task) => syncTaskDerivedFields(apiToLocal(task)))));
+        const loadedTasks = resolveDates(apiTasks.map((task) => syncTaskDerivedFields(apiToLocal(task))));
+        setTasks(loadedTasks);
+        setColl(getDefaultCollapsedRows(loadedTasks, preferredTaskId));
         setSel(preferredTaskId ?? apiTasks[0]?.id ?? null);
       } else {
         setTasks([]);
+        setColl(new Set());
       }
     } catch (error: unknown) {
       setTasks([]);
@@ -895,7 +932,9 @@ export default function App() {
       workers: panelTask.workers_count != null ? String(panelTask.workers_count) : "",
       prog: String(panelTask.prog),
       depends_on: depNums.join(","),
-      color: panelTask.clr ?? "#3b82f6",
+      color: TASK_COLOR_OPTIONS.includes(panelTask.clr as typeof TASK_COLOR_OPTIONS[number])
+        ? panelTask.clr
+        : TASK_COLOR_OPTIONS[0],
     });
     setPanelSaveError(null);
   }, [panelTask, rows]);
@@ -913,8 +952,15 @@ export default function App() {
   const isCompactLayout = isTouchDevice || viewportW < MOBILE_BREAKPOINT;
   const effectiveLeftW = isCompactLayout ? clamp(Math.round(viewportW * 0.42), 300, 360) : leftW;
   const splitMinWidth = isCompactLayout ? effectiveLeftW + MIN_RIGHT_PANEL_W : 0;
-  const showZoomControls = isTouchDevice || viewportW < MOBILE_BREAKPOINT;
   const canResizeSplit = !isCompactLayout;
+  const fitDayWidth = useMemo(() => {
+    const fallbackRightW = isCompactLayout ? MIN_RIGHT_PANEL_W : Math.max(320, viewportW - effectiveLeftW - 4);
+    const availableW = Math.max(1, timelineViewportW || fallbackRightW);
+    return totalDays > 0 ? Math.max(MIN_DAY_W, availableW / totalDays) : DEFAULT_DAY_W;
+  }, [effectiveLeftW, isCompactLayout, timelineViewportW, totalDays, viewportW]);
+  const minTimelineDayWidth = fitDayWidth;
+  const maxTimelineDayWidth = Math.max(MAX_DAY_W, fitDayWidth * 8);
+  const timelineZoomPercent = Math.max(1, Math.round((dayWidth / fitDayWidth) * 100));
   const W = totalDays * dayWidth;
 
   const showTaskTooltip = useCallback((event: MouseEvent<HTMLElement>, name: string) => {
@@ -1016,6 +1062,25 @@ export default function App() {
     ssync.current = false;
   }, []);
 
+  useEffect(() => {
+    const container = rbRef.current;
+    if (!container) return;
+
+    const updateTimelineViewport = () => {
+      setTimelineViewportW(container.clientWidth);
+    };
+
+    updateTimelineViewport();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateTimelineViewport);
+      return () => window.removeEventListener("resize", updateTimelineViewport);
+    }
+
+    const observer = new ResizeObserver(updateTimelineViewport);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
   const syncTimelineScroll = useCallback((nextScrollLeft: number) => {
     if (!rbRef.current) return;
     const maxScroll = Math.max(0, rbRef.current.scrollWidth - rbRef.current.clientWidth);
@@ -1027,7 +1092,8 @@ export default function App() {
   }, []);
 
   const zoomTimeline = useCallback((nextWidth: number, anchorClientX?: number) => {
-    const clampedWidth = clampDayWidth(nextWidth);
+    userZoomedTimelineRef.current = true;
+    const clampedWidth = clamp(nextWidth, minTimelineDayWidth, maxTimelineDayWidth);
     const container = rbRef.current;
     if (!container) {
       setDayWidth(clampedWidth);
@@ -1043,7 +1109,27 @@ export default function App() {
     requestAnimationFrame(() => {
       syncTimelineScroll(anchorDay * clampedWidth - anchorX);
     });
-  }, [syncTimelineScroll]);
+  }, [maxTimelineDayWidth, minTimelineDayWidth, syncTimelineScroll]);
+
+  const fitTimeline = useCallback(() => {
+    userZoomedTimelineRef.current = false;
+    setDayWidth(fitDayWidth);
+    requestAnimationFrame(() => {
+      syncTimelineScroll(0);
+    });
+  }, [fitDayWidth, syncTimelineScroll]);
+
+  useEffect(() => {
+    if (!Number.isFinite(fitDayWidth)) return;
+    if (userZoomedTimelineRef.current) {
+      setDayWidth((current) => clamp(current, minTimelineDayWidth, maxTimelineDayWidth));
+      return;
+    }
+    setDayWidth(fitDayWidth);
+    requestAnimationFrame(() => {
+      syncTimelineScroll(0);
+    });
+  }, [fitDayWidth, maxTimelineDayWidth, minTimelineDayWidth, syncTimelineScroll]);
 
   useEffect(() => {
     const mv = (e: globalThis.MouseEvent) => {
@@ -1096,7 +1182,7 @@ export default function App() {
       event.preventDefault();
       const scale = currentDistance / pinchRef.current.startDistance;
       const centerClientX = (firstTouch.clientX + secondTouch.clientX) / 2;
-      const nextDayWidth = clampDayWidth(pinchRef.current.startDayWidth * scale);
+      const nextDayWidth = clamp(pinchRef.current.startDayWidth * scale, minTimelineDayWidth, maxTimelineDayWidth);
       zoomTimeline(nextDayWidth, centerClientX);
       pinchRef.current = {
         startDistance: currentDistance,
@@ -1114,7 +1200,7 @@ export default function App() {
       container.removeEventListener("touchend", clearPinch);
       container.removeEventListener("touchcancel", clearPinch);
     };
-  }, [zoomTimeline]);
+  }, [maxTimelineDayWidth, minTimelineDayWidth, zoomTimeline]);
 
   const startEdit = (id: string, field: EditingField, value: string | number | null | undefined) => {
     setEditing({ id, field });
@@ -1765,14 +1851,6 @@ export default function App() {
 
           {/* RIGHT GANTT */}
           <div className="right" style={isCompactLayout ? { minWidth: MIN_RIGHT_PANEL_W } : undefined}>
-            {showZoomControls && (
-              <div className="zoom-bar">
-                <button className="zoom-btn" onClick={() => zoomTimeline(dayWidthRef.current / 1.2)} aria-label="Уменьшить масштаб">−</button>
-                <button className="zoom-btn" onClick={() => zoomTimeline(DEFAULT_DAY_W)} aria-label="Сбросить масштаб">100%</button>
-                <button className="zoom-btn" onClick={() => zoomTimeline(dayWidthRef.current * 1.2)} aria-label="Увеличить масштаб">+</button>
-                <span className="zoom-val">{Math.round((dayWidth / DEFAULT_DAY_W) * 100)}%</span>
-              </div>
-            )}
             <div className="ghdr" ref={rhRef} style={{overflowX:'hidden'}}>
               <div style={{width:W}}>
                 <div className="mr">
@@ -1784,7 +1862,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className={`gbw${showZoomControls ? " zoomable" : ""}`} ref={rbRef} onScroll={onRS}>
+            <div className={`gbw${isTouchDevice ? " zoomable" : ""}`} ref={rbRef} onScroll={onRS}>
               <div className="gb" style={{width:W,minHeight:rows.length*ROW_H+120}}>
 
                 {/* Rows — plain flow, no other siblings so nth-child is clean */}
@@ -1864,6 +1942,12 @@ export default function App() {
 
               </div>
             </div>
+            <div className="timeline-zoom" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+              <button onClick={() => zoomTimeline(dayWidthRef.current / 1.25)} aria-label="Уменьшить масштаб">−</button>
+              <button className="zoom-fit" onClick={fitTimeline} aria-label="Показать весь проект">100%</button>
+              <button onClick={() => zoomTimeline(dayWidthRef.current * 1.25)} aria-label="Увеличить масштаб">+</button>
+              <span className="zoom-readout">{timelineZoomPercent}%</span>
+            </div>
           </div>
         </div>
         </div>
@@ -1899,12 +1983,17 @@ export default function App() {
         const computedPanelDuration = panelTaskHasKids
           ? panelTask.dur
           : calculateDurationDays(panelLaborHours, panelWorkers, panelHoursPerDay, panelTask.dur);
+        const selectedPanelColor = panelForm?.color ?? (
+          TASK_COLOR_OPTIONS.includes(panelTask.clr as typeof TASK_COLOR_OPTIONS[number])
+            ? panelTask.clr
+            : TASK_COLOR_OPTIONS[0]
+        );
         return(
           <div className="panel-overlay" onClick={()=>setPanelId(null)}>
             <div className="panel" onClick={e=>e.stopPropagation()}>
 
               {/* color accent */}
-              <div className="panel-color-bar" style={{background:panelTask.clr}}/>
+              <div className="panel-color-bar" style={{background:selectedPanelColor}}/>
 
               {/* header */}
               <div className="panel-hdr">
@@ -2016,14 +2105,19 @@ export default function App() {
                     </div>
                     <div className="pfield">
                       <div className="pfield-label">Цвет</div>
-                      {canEditPanelTask && panelForm
-                        ? <input
-                            className="pfield-input"
-                            value={panelForm.color}
-                            onChange={e=>setPanelForm(current => current ? { ...current, color: e.target.value } : current)}
+                      <div className="color-swatches">
+                        {TASK_COLOR_OPTIONS.map((color) => (
+                          <button
+                            key={color}
+                            type="button"
+                            className={`color-swatch${selectedPanelColor === color ? " sel" : ""}`}
+                            style={{ background: color, color }}
+                            aria-label={`Выбрать цвет ${color}`}
+                            disabled={!canEditPanelTask || !panelForm}
+                            onClick={() => setPanelForm(current => current ? { ...current, color } : current)}
                           />
-                        : <div className="pfield-val mono">{panelTask.clr}</div>
-                      }
+                        ))}
+                      </div>
                     </div>
                     <div className="pfield" style={{gridColumn:'1/-1'}}>
                       <div className="pfield-label">Прогресс</div>
