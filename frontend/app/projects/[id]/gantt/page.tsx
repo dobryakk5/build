@@ -284,12 +284,14 @@ function getVisibleRows(tasks: Task[], collapsed: Set<string>): TaskRow[] {
 
 function getDefaultCollapsedRows(tasks: Task[], visibleTaskId?: string | null): Set<string> {
   const byId = new Map(tasks.map((task) => [task.id, task]));
+  const rootIds = new Set(tasks.filter((task) => !task.pid).map((task) => task.id));
   const parentIds = new Set(tasks.map((task) => task.pid).filter((id): id is string => Boolean(id)));
   const collapsed = new Set(parentIds);
 
   tasks.forEach((task) => {
-    if (task.is_group) collapsed.add(task.id);
+    if (task.is_group && !rootIds.has(task.id)) collapsed.add(task.id);
   });
+  rootIds.forEach((id) => collapsed.delete(id));
 
   let current = visibleTaskId ? byId.get(visibleTaskId) : null;
   while (current?.pid) {
@@ -470,7 +472,7 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .gbw.zoomable{touch-action:pan-x pan-y;overscroll-behavior:contain;}
 .gb{position:relative;}
 .timeline-zoom{
-  position:absolute;right:12px;bottom:12px;z-index:45;display:flex;align-items:center;gap:6px;
+  position:fixed;right:24px;bottom:24px;z-index:45;display:flex;align-items:center;gap:6px;
   padding:6px;border:1px solid rgba(148,163,184,.35);border-radius:8px;
   background:rgba(255,255,255,.94);box-shadow:0 8px 24px rgba(15,23,42,.14);
   backdrop-filter:blur(8px);
