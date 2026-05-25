@@ -1121,6 +1121,12 @@ export default function App() {
     });
   }, [fitDayWidth, syncTimelineScroll]);
 
+  const zoomTimelineFromLeft = useCallback((nextWidth: number) => {
+    const container = rbRef.current;
+    const leftEdge = container?.getBoundingClientRect().left;
+    zoomTimeline(nextWidth, leftEdge);
+  }, [zoomTimeline]);
+
   useEffect(() => {
     if (!Number.isFinite(fitDayWidth)) return;
     if (userZoomedTimelineRef.current) {
@@ -1945,9 +1951,9 @@ export default function App() {
               </div>
             </div>
             <div className="timeline-zoom" onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
-              <button onClick={() => zoomTimeline(dayWidthRef.current / 1.25)} aria-label="Уменьшить масштаб">−</button>
+              <button onClick={() => zoomTimelineFromLeft(dayWidthRef.current / 1.25)} aria-label="Уменьшить масштаб">−</button>
               <button className="zoom-fit" onClick={fitTimeline} aria-label="Показать весь проект">100%</button>
-              <button onClick={() => zoomTimeline(dayWidthRef.current * 1.25)} aria-label="Увеличить масштаб">+</button>
+              <button onClick={() => zoomTimelineFromLeft(dayWidthRef.current * 1.25)} aria-label="Увеличить масштаб">+</button>
               <span className="zoom-readout">{timelineZoomPercent}%</span>
             </div>
           </div>
