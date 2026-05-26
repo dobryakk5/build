@@ -14,6 +14,7 @@ const MAX_DAY_W = 56;
 const MOBILE_BREAKPOINT = 980;
 const MIN_RIGHT_PANEL_W = 520;
 const ROW_H = 32;
+const SPLIT_EDGE_MARGIN = 20;
 const TASK_COLOR_OPTIONS = ["#3b82f6", "#7c3aed", "#059669", "#f59e0b", "#ef4444"] as const;
 
 type TaskRow = Task & {
@@ -421,10 +422,10 @@ body,html,#root{height:100%;font-family:var(--sans);color:var(--text);background
 .splitter.disabled{cursor:default;background:#cbd5e1;opacity:.55;pointer-events:none;}
 
 /* left */
-.left{display:flex;flex-direction:column;min-height:0;background:var(--surface);border-right:2px solid var(--hdr);flex-shrink:0;}
+.left{display:flex;flex-direction:column;min-height:0;background:var(--surface);border-right:2px solid var(--hdr);flex-shrink:0;overflow:hidden;}
 .thead{background:var(--hdr2);display:flex;align-items:stretch;border-bottom:1px solid var(--hdr3);flex-shrink:0;height:52px;padding-right:8px;}
 .th{display:flex;align-items:center;padding:0 7px;font-size:10px;color:#94a3b8;text-transform:uppercase;letter-spacing:.07em;font-family:var(--mono);border-right:1px solid var(--hdr3);white-space:nowrap;flex-shrink:0;}
-.th.g{flex:1;}
+.th.g{flex:1;min-width:0;}
 .tbody{flex:1;overflow-y:scroll;overflow-x:hidden;}
 
 /* rows */
@@ -694,7 +695,7 @@ export default function App() {
   const [sel, setSel] = useState<string | null>("1");
   const [editing, setEditing] = useState<EditingState | null>(null);
   const [editVal, setEditVal] = useState("");
-  const [leftW, setLeftW] = useState(620);
+  const [leftW, setLeftW] = useState(700);
   const [dayWidth, setDayWidth] = useState(DEFAULT_DAY_W);
   const [timelineViewportW, setTimelineViewportW] = useState(0);
   const [viewportW, setViewportW] = useState(1280);
@@ -732,6 +733,7 @@ export default function App() {
   const lbRef = useRef<HTMLDivElement | null>(null);
   const rbRef = useRef<HTMLDivElement | null>(null);
   const rhRef = useRef<HTMLDivElement | null>(null);
+  const splitRef = useRef<HTMLDivElement | null>(null);
   const splRef = useRef<HTMLDivElement | null>(null);
   const drg = useRef(false);
   const ssync = useRef(false);
@@ -1142,7 +1144,10 @@ export default function App() {
   useEffect(() => {
     const mv = (e: globalThis.MouseEvent) => {
       if (!drg.current) return;
-      setLeftW(Math.max(280, Math.min(900, e.clientX)));
+      const splitRect = splitRef.current?.getBoundingClientRect();
+      const splitWidth = splitRect?.width ?? window.innerWidth;
+      const splitLeft = splitRect?.left ?? 0;
+      setLeftW(clamp(e.clientX - splitLeft, SPLIT_EDGE_MARGIN, Math.max(SPLIT_EDGE_MARGIN, splitWidth - SPLIT_EDGE_MARGIN)));
     };
     const up = () => {
       drg.current = false;
@@ -1669,6 +1674,7 @@ export default function App() {
         {/* SPLIT */}
         <div className={`split-vp${isCompactLayout ? " narrow" : ""}`}>
         <div
+          ref={splitRef}
           className="split"
           style={isCompactLayout ? { width: splitMinWidth, minWidth: splitMinWidth } : undefined}
         >
