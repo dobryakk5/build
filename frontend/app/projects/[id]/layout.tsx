@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useParams, usePathname, useRouter, useSearchParams } from "next/navigation";
 
 import EmailVerificationBanner from "@/components/EmailVerificationBanner";
-import { auth, estimates, ktpEstimate, notifications as notifApi } from "@/lib/api";
+import { auth, estimates, ktpEstimate, notifications as notifApi, projects } from "@/lib/api";
 import type { EstimateBatch, KtpEstimateSession } from "@/lib/types";
 import { useUser } from "@/lib/UserContext";
 
@@ -45,6 +45,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   const [notifs, setNotifs] = useState<any[]>([]);
   const [resendingVerification, setResendingVerification] = useState(false);
   const [uploadHref, setUploadHref] = useState(`/projects/${id}/upload`);
+  const [projectName, setProjectName] = useState("");
   const activeBatchId = searchParams.get("batch");
 
   useEffect(() => {
@@ -56,6 +57,25 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
   useEffect(() => {
     notifApi.listQuiet(true).then((items) => setUnread(items.length)).catch(() => {});
   }, [pathname]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    setProjectName("");
+    if (userLoading || !currentUser) return;
+
+    projects.get(id)
+      .then((project) => {
+        if (!cancelled) setProjectName(project.name);
+      })
+      .catch(() => {
+        if (!cancelled) setProjectName("");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, id, userLoading]);
 
   useEffect(() => {
     let cancelled = false;
@@ -181,6 +201,23 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
             >
               ⚡ Admin
             </Link>
+          )}
+
+          {projectName && (
+            <div
+              title={projectName}
+              style={{
+                maxWidth: "min(36vw, 360px)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                color: "var(--text)",
+                fontSize: 13,
+                fontWeight: 600,
+              }}
+            >
+              {projectName}
+            </div>
           )}
 
           <div style={{ position: "relative" }}>

@@ -477,7 +477,7 @@ function Spinner() {
 }
 
 function Steps({ current, onNewEstimate }: { current: number; onNewEstimate: () => void }) {
-  const labels = ["Новая смета", "Структура работ", "Карточки КТП", "ГПР"];
+  const labels = ["Новая смета", "Структура работ", "КТП", "ГПР"];
   return (
     <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
       {labels.map((label, i) => {
@@ -853,20 +853,38 @@ function Stage2({
   const allReady = groupsWithWorks.every((g) => g.status === "card_generated");
   const [approving, setApproving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [generatingGroupIds, setGeneratingGroupIds] = useState<Set<string>>(new Set());
   const missingCards = groupsWithWorks.filter((g) => g.status !== "card_generated").length;
+  const hasGeneratingCards = generatingGroupIds.size > 0;
+
+  const markGenerating = useCallback((groupId: string, generating: boolean) => {
+    setGeneratingGroupIds((prev) => {
+      const next = new Set(prev);
+      if (generating) {
+        next.add(groupId);
+      } else {
+        next.delete(groupId);
+      }
+      return next;
+    });
+  }, []);
 
   return (
     <div>
       <Header
-        title="Карточки КТП"
-        hint="Сгенерируйте карточку технологического процесса для каждой группы. ИИ может задать уточняющие вопросы."
+        title="КТП"
+        hint="Создайте КТП для каждой группы работ. ИИ может задать уточняющие вопросы."
         right={
           <button
-            style={buttonStyle("primary", busy)}
-            disabled={busy}
+            style={buttonStyle("primary", busy || hasGeneratingCards)}
+            disabled={busy || hasGeneratingCards}
             onClick={async () => {
+              if (hasGeneratingCards) {
+                setNotice(`Дождитесь завершения создания КТП. В работе: ${generatingGroupIds.size}.`);
+                return;
+              }
               if (!allReady) {
-                setNotice(`Сначала сгенерируйте все карточки. Осталось: ${missingCards}.`);
+                setNotice(`Сначала создайте все КТП. Осталось: ${missingCards}.`);
                 return;
               }
               setNotice(null);
@@ -914,9 +932,9 @@ function Stage2({
           group={g}
           projectId={projectId}
           busy={busy}
-          setBusy={setBusy}
           setError={setError}
           reload={reload}
+          onGeneratingChange={markGenerating}
         />
       ))}
     </div>
@@ -927,16 +945,16 @@ function Stage2Group({
   group,
   projectId,
   busy,
-  setBusy,
   setError,
   reload,
+  onGeneratingChange,
 }: {
   group: KtpWbsGroup;
   projectId: string;
   busy: boolean;
-  setBusy: (v: boolean) => void;
   setError: (v: string | null) => void;
   reload: () => Promise<void>;
+  onGeneratingChange: (groupId: string, generating: boolean) => void;
 }) {
   const [questions, setQuestions] = useState<KtpQuestion[] | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
@@ -955,8 +973,9 @@ function Stage2Group({
   }, [projectId, group.id, group.status]);
 
   const generate = async (withAnswers: Record<string, string>) => {
+    if (generating) return;
     setGenerating(true);
-    setBusy(true);
+    onGeneratingChange(group.id, true);
     trackActivity("KTP_STAGE2_CARD_GENERATION_STARTED", {
       projectId,
       entityType: "ktp_wbs_group",
@@ -998,7 +1017,7 @@ function Stage2Group({
       setError(e.message);
     } finally {
       setGenerating(false);
-      setBusy(false);
+      onGeneratingChange(group.id, false);
     }
   };
 
@@ -1070,9 +1089,9 @@ function Stage2Group({
           >
             {statusLabel[group.status]}
           </span>
-          <button style={buttonStyle("ghost", busy)} disabled={busy} onClick={() => generate(answers)}>
+          <button style={buttonStyle("ghost", busy || generating)} disabled={busy || generating} onClick={() => generate(answers)}>
             <ButtonContent loading={generating}>
-              {group.status === "card_generated" ? "Перегенерировать" : "Сгенерировать карточку"}
+              {group.status === "card_generated" ? "Пересоздать КТП" : "Создать КТП"}
             </ButtonContent>
           </button>
         </div>
@@ -1144,17 +1163,17 @@ function Stage2Group({
             </div>
           )}
           <button
-            style={buttonStyle("primary", busy)}
-            disabled={busy}
+            style={buttonStyle("primary", busy || generating)}
+            disabled={busy || generating}
             onClick={() => {
               if (requiredAnswersMissing) {
-                setValidation("Заполните ответы на вопросы, чтобы сгенерировать карточку.");
+                setValidation("Заполните ответы на вопросы, чтобы создать КТП.");
                 return;
               }
               void generate(answers);
             }}
           >
-            <ButtonContent loading={generating}>Ответить и сгенерировать</ButtonContent>
+            <ButtonContent loading={generating}>Ответить и создать КТП</ButtonContent>
           </button>
         </div>
       )}
@@ -1162,15 +1181,12 @@ function Stage2Group({
       {cardData && cardData.status === "card_generated" && (
         <CardView
           card={cardData}
-          busy={busy}
+          busy={busy || generating}
           onSave={async (patch) => {
-            setBusy(true);
             try {
               setCardData(await ktpEstimate.updateCard(projectId, group.id, patch));
             } catch (e: any) {
               setError(e.message);
-            } finally {
-              setBusy(false);
             }
           }}
         />

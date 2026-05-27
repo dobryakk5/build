@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     KTP_MAX_TOKENS: int = 3000
     KTP_ESTIMATE_MAX_TOKENS: int = 6000
     KTP_ESTIMATE_CHUNK_ROWS: int = 80
+    KTP_STAGE1_GAP_FILL_ENABLED: bool = True
+    KTP_STAGE1_PER_GROUP_GAP_FILL_ENABLED: bool = True
+    KTP_STAGE1_PROJECT_GAP_FILL_ENABLED: bool = True
 
     # Token lifetimes
     EMAIL_VERIFICATION_EXPIRE_HOURS: int = 24
