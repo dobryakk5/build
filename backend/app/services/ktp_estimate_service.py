@@ -367,6 +367,14 @@ async def get_session(
     )
 
 
+async def reset_session(
+    db: AsyncSession, project_id: str, session_id: str
+) -> None:
+    session = await get_session_by_id(db, project_id, session_id)
+    await db.delete(session)
+    await db.commit()
+
+
 async def get_session_by_id(
     db: AsyncSession, project_id: str, session_id: str
 ) -> KtpEstimateSession:

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { estimates, ktpEstimate } from "@/lib/api";
 import ColumnMapper, { type MappingPayload } from "@/components/ColumnMapper";
@@ -9,6 +9,7 @@ import { fmtMoney } from "@/lib/dateUtils";
 import { CLARIFICATION_BY_KIND } from "@/lib/estimateClarificationQuestions";
 import { useJobPoller } from "@/lib/useJobPoller";
 import { trackActivity } from "@/lib/activity";
+import type { EstimateBatch } from "@/lib/types";
 
 const KIND_OPTIONS = [
   { id: 1, title: "Земляные грунтовые работы" },
@@ -50,10 +51,30 @@ function formatEstimateKind(kind: number | string | null | undefined) {
   return "—";
 }
 
+function restoreClarificationAnswers(batch: EstimateBatch): Record<string, string[]> {
+  const form = batch.clarification_answers?.form;
+  if (!form || typeof form !== "object") return {};
+
+  const restored: Record<string, string[]> = {};
+  for (const [questionId, value] of Object.entries(form)) {
+    if (!value || typeof value !== "object") continue;
+    const answers = (value as { answers?: unknown }).answers;
+    if (!Array.isArray(answers)) continue;
+    restored[questionId] = answers
+      .map((answer) => String(answer).trim())
+      .filter(Boolean);
+  }
+  return restored;
+}
+
 export default function UploadPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const fileRef = useRef<HTMLInputElement>(null);
+  const batchIdFromQuery = searchParams.get("batch");
+  const sessionIdFromQuery = searchParams.get("session");
+  const fromKtpFlow = searchParams.get("fromKtp") === "1";
 
   const [file, setFile] = useState<File | null>(null);
   const [drag, setDrag] = useState(false);
@@ -67,6 +88,8 @@ export default function UploadPage() {
   const [mappingPayload, setMappingPayload] = useState<MappingPayload | null>(null);
   const [uploading, setUploading] = useState(false);
   const [ktpLoading, setKtpLoading] = useState<"estimate" | null>(null);
+  const [resetting, setResetting] = useState(false);
+  const [resetNotice, setResetNotice] = useState<string | null>(null);
 
   const { job, loading: polling } = useJobPoller(jobId);
   const status = job?.status;
@@ -80,6 +103,7 @@ export default function UploadPage() {
   const clarificationStartedRef = useRef(false);
   const trackedJobTerminalStatusRef = useRef<string | null>(null);
   const autoStartedKtpBatchRef = useRef<string | null>(null);
+  const restoredBatchRef = useRef<string | null>(null);
 
   useEffect(() => {
     trackActivity("UPLOAD_PAGE_OPENED", {
@@ -92,7 +116,7 @@ export default function UploadPage() {
   useEffect(() => {
     const wasAllAnswered = wasAllClarificationsAnsweredRef.current;
 
-    if (allClarificationsAnswered && !wasAllAnswered && !clarificationsConfirmed && !status) {
+    if (allClarificationsAnswered && !wasAllAnswered && !clarificationsConfirmed && !status && !fromKtpFlow) {
       setClarificationsConfirmed(true);
       trackActivity("CLARIFICATIONS_COMPLETED", {
         projectId: id,
@@ -107,7 +131,38 @@ export default function UploadPage() {
     }
 
     wasAllClarificationsAnsweredRef.current = allClarificationsAnswered;
-  }, [allClarificationsAnswered, answeredCount, clarificationsConfirmed, estimateKind, id, questionsCount, status]);
+  }, [allClarificationsAnswered, answeredCount, clarificationsConfirmed, estimateKind, fromKtpFlow, id, questionsCount, status]);
+
+  useEffect(() => {
+    if (!batchIdFromQuery || restoredBatchRef.current === batchIdFromQuery) return;
+
+    let cancelled = false;
+    estimates
+      .batches(id)
+      .then((batches) => {
+        if (cancelled) return;
+        const batch = batches.find((item) => item.id === batchIdFromQuery);
+        if (!batch) return;
+
+        restoredBatchRef.current = batch.id;
+        setEstimateKind(batch.estimate_kind as EstimateKind);
+        setStartDate(batch.start_date || new Date().toISOString().split("T")[0]);
+        setWorkers(batch.workers_count || 3);
+        setClarificationAnswers(restoreClarificationAnswers(batch));
+        setClarificationsConfirmed(!fromKtpFlow);
+        setFile(null);
+        setJobId(null);
+        setMappingPayload(null);
+        trackedJobTerminalStatusRef.current = null;
+        autoStartedKtpBatchRef.current = null;
+        wasAllClarificationsAnsweredRef.current = true;
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
+  }, [batchIdFromQuery, fromKtpFlow, id]);
 
   useEffect(() => {
     if (!job || trackedJobTerminalStatusRef.current === `${job.id}:${job.status}`) return;
@@ -212,6 +267,37 @@ export default function UploadPage() {
       alert(e.message);
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function handleResetProgress() {
+    if (!sessionIdFromQuery) return;
+    const confirmed = window.confirm("Сбросить прогресс КТП и начать заново с шага «Новая смета»?");
+    if (!confirmed) return;
+
+    setResetting(true);
+    setResetNotice(null);
+    try {
+      await ktpEstimate.resetSession(id, sessionIdFromQuery);
+      setFile(null);
+      setJobId(null);
+      setMappingPayload(null);
+      autoStartedKtpBatchRef.current = null;
+      trackedJobTerminalStatusRef.current = null;
+      setClarificationsConfirmed(false);
+      setResetNotice("Прогресс КТП сброшен. Ответы сохранены, можно изменить их или загрузить смету заново.");
+      trackActivity("KTP_ESTIMATE_SESSION_RESET", {
+        projectId: id,
+        entityType: "ktp_estimate_session",
+        entityId: sessionIdFromQuery,
+        metadata: { estimate_batch_id: batchIdFromQuery },
+      });
+      const suffix = batchIdFromQuery ? `?batch=${batchIdFromQuery}` : "";
+      router.replace(`/projects/${id}/upload${suffix}`);
+    } catch (e: any) {
+      alert(e.message);
+    } finally {
+      setResetting(false);
     }
   }
 
@@ -337,27 +423,62 @@ export default function UploadPage() {
             Сначала выберите тип объекта, затем заполните уточнения. Форма загрузки файла появится после этого шага.
           </div>
         </div>
-        <label
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            padding: "10px 14px",
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            cursor: "pointer",
-            whiteSpace: "nowrap",
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={complexMode}
-            onChange={(e) => setComplexMode(e.target.checked)}
-          />
-          <span style={{ fontSize: 13, fontWeight: 600 }}>Комплекс</span>
-        </label>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+          {sessionIdFromQuery && (
+            <button
+              type="button"
+              onClick={handleResetProgress}
+              disabled={resetting}
+              style={{
+                padding: "10px 14px",
+                background: "rgba(239,68,68,.08)",
+                border: "1px solid rgba(239,68,68,.24)",
+                borderRadius: 8,
+                color: "var(--red)",
+                cursor: resetting ? "default" : "pointer",
+                fontSize: 13,
+                fontWeight: 600,
+                opacity: resetting ? 0.7 : 1,
+                whiteSpace: "nowrap",
+              }}
+            >
+              {resetting ? "Сбрасываем..." : "Сброс"}
+            </button>
+          )}
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              padding: "10px 14px",
+              background: "var(--surface)",
+              border: "1px solid var(--border)",
+              borderRadius: 8,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={complexMode}
+              onChange={(e) => setComplexMode(e.target.checked)}
+            />
+            <span style={{ fontSize: 13, fontWeight: 600 }}>Комплекс</span>
+          </label>
+        </div>
       </div>
+
+      {fromKtpFlow && (
+        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(59,130,246,.22)", background: "rgba(59,130,246,.06)", color: "var(--blue-dark)", fontSize: 12, lineHeight: 1.45 }}>
+          Это шаг «Новая смета» текущего мастера КТП. Сохранённые ответы восстановлены; чтобы начать заново, нажмите «Сброс».
+        </div>
+      )}
+
+      {resetNotice && (
+        <div style={{ marginBottom: 16, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,.25)", background: "rgba(34,197,94,.06)", color: "#166534", fontSize: 12 }}>
+          {resetNotice}
+        </div>
+      )}
 
       <div style={{ display: "grid", gap: 18, marginBottom: 20 }}>
         <div>

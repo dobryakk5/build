@@ -538,6 +538,10 @@ export const ktpEstimate = {
     ),
   getWbs: (projectId: string, sessionId: string) =>
     request<KtpWbs>(`/projects/${projectId}/ktp-estimate/sessions/${sessionId}/wbs`),
+  resetSession: (projectId: string, sessionId: string) =>
+    request<void>(`/projects/${projectId}/ktp-estimate/sessions/${sessionId}`, {
+      method: "DELETE",
+    }),
   updateItem: (
     projectId: string,
     itemId: string,

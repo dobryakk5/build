@@ -10,15 +10,6 @@ import { auth, estimates, ktpEstimate, notifications as notifApi, projects } fro
 import type { EstimateBatch, KtpEstimateSession } from "@/lib/types";
 import { useUser } from "@/lib/UserContext";
 
-const RESUMABLE_KTP_STATUSES = new Set<KtpEstimateSession["status"]>([
-  "stage1_pending",
-  "stage1_processing",
-  "stage1_review",
-  "stage2_review",
-  "gpr_pending",
-  "gpr_processing",
-]);
-
 function latestBatch(batches: EstimateBatch[]) {
   return [...batches].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)).at(-1) ?? null;
 }
@@ -96,9 +87,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
         const session = await ktpEstimate.getSession(id, batchId);
         if (cancelled || !session) return;
 
-        if (RESUMABLE_KTP_STATUSES.has(session.status)) {
-          setUploadHref(ktpResumeHref(id, session));
-        }
+        setUploadHref(ktpResumeHref(id, session));
       } catch {
         if (!cancelled) {
           setUploadHref(fallbackHref);
@@ -211,9 +200,10 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
-                color: "var(--text)",
-                fontSize: 13,
-                fontWeight: 600,
+                color: "#64748b",
+                fontSize: 12,
+                fontWeight: 400,
+                padding: "4px 8px",
               }}
             >
               {projectName}

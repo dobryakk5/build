@@ -2,16 +2,7 @@
 import { useEffect } from "react";
 import { useRouter, useParams } from "next/navigation";
 import { estimates, gantt, ktpEstimate } from "@/lib/api";
-import type { EstimateBatch, KtpEstimateSession } from "@/lib/types";
-
-const RESUMABLE_KTP_STATUSES = new Set<KtpEstimateSession["status"]>([
-  "stage1_pending",
-  "stage1_processing",
-  "stage1_review",
-  "stage2_review",
-  "gpr_pending",
-  "gpr_processing",
-]);
+import type { EstimateBatch } from "@/lib/types";
 
 function latestBatch(batches: EstimateBatch[]) {
   return [...batches].sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at)).at(-1) ?? null;
@@ -40,7 +31,7 @@ export default function ProjectPage() {
           if (!batch) { router.replace(uploadFallback); return; }
 
           const session = await ktpEstimate.getSession(id, batch.id);
-          if (!session || !RESUMABLE_KTP_STATUSES.has(session.status)) {
+          if (!session) {
             router.replace(uploadFallback);
             return;
           }

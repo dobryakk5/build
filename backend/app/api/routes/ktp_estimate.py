@@ -267,6 +267,20 @@ async def get_wbs(
     return WbsOut.of(payload)
 
 
+@router.delete("/sessions/{session_id}", status_code=204)
+async def reset_session(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        await svc.reset_session(db, str(project_id), str(session_id))
+    except ValueError as exc:
+        raise _value_error(exc)
+    return None
+
+
 @router.patch("/items/{item_id}", response_model=WbsOut)
 async def patch_item(
     project_id: UUID,

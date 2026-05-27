@@ -264,7 +264,9 @@ export default function KtpEstimateWizardPage() {
       <Steps
         current={stepIndex}
         onNewEstimate={() =>
-          router.push(`/projects/${projectId}/estimate${batchId ? `?batch=${batchId}` : ""}`)
+          router.push(
+            `/projects/${projectId}/upload${batchId ? `?batch=${batchId}&session=${sessionId}&fromKtp=1` : ""}`,
+          )
         }
       />
 
@@ -643,7 +645,10 @@ function Stage1Group({
           style={{ ...inputStyle, fontWeight: 600, flex: 1 }}
         />
         {group.wt_code && (
-          <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>
+          <span
+            title={group.wt_name || group.wt_code}
+            style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}
+          >
             WT {group.wt_code}
           </span>
         )}
