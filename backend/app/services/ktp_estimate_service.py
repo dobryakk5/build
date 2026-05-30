@@ -2352,3 +2352,122 @@ async def approve_stage2(
     await db.commit()
     await db.refresh(session)
     return session
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ПОСЛЕДОВАТЕЛЬНОСТЬ ГРУПП (подшаг ГПР, 2-й уровень) — ревьюемый порядок
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SEQUENCE_ALLOWED_STATUSES = {
+    "gpr_pending",
+    "gpr_sequence_review",
+    "gpr_ready",
+    "gpr_failed",
+    "gpr_done",
+}
+
+
+def _is_fallback_group_title(title: str | None) -> bool:
+    return (title or "").strip() in {FALLBACK_DISPLAY_TITLE, FALLBACK_GROUP_TITLE}
+
+
+async def _load_session_groups(
+    db: AsyncSession, session_id: str
+) -> list[KtpWbsGroup]:
+    return list(
+        await db.scalars(
+            select(KtpWbsGroup)
+            .where(KtpWbsGroup.session_id == session_id)
+            .order_by(KtpWbsGroup.sort_order, KtpWbsGroup.created_at)
+        )
+    )
+
+
+def _reassign_sequence_sort_order(
+    ordered_normal: list[KtpWbsGroup],
+    fallback_groups: list[KtpWbsGroup],
+) -> None:
+    """Линейный порядок: обычные группы 1000, 2000, …; fallback всегда в конце."""
+    step = 1000.0
+    order = step
+    for g in ordered_normal:
+        g.sort_order = order
+        g.updated_at = _now()
+        order += step
+    for g in fallback_groups:
+        g.sort_order = order
+        g.updated_at = _now()
+        order += step
+
+
+async def propose_group_sequence(
+    db: AsyncSession, project_id: str, session_id: str
+) -> dict[str, Any]:
+    """ИИ выстраивает технологическую последовательность групп (линейный порядок).
+
+    Fallback-группа «прочих» работ всегда ставится в конец списка. Результат —
+    обновлённый sort_order; статус сессии → gpr_sequence_review. Оператор затем
+    правит порядок вручную (PATCH /groups/{id}) и подтверждает approve-sequence.
+    """
+    from app.services.ktp_gpr_service import _ai_order_groups
+
+    session = await get_session_by_id(db, project_id, session_id)
+    if session.status not in _SEQUENCE_ALLOWED_STATUSES:
+        raise ValueError(
+            "Последовательность групп можно строить только после утверждения "
+            "карточек КТП (этап 2)"
+        )
+
+    groups = await _load_session_groups(db, session_id)
+    normal = [g for g in groups if not _is_fallback_group_title(g.title)]
+    fallback = [g for g in groups if _is_fallback_group_title(g.title)]
+
+    if normal:
+        ordered_ids = await _ai_order_groups(normal)
+        by_id = {g.id: g for g in normal}
+        ordered_normal = [by_id[gid] for gid in ordered_ids if gid in by_id]
+        # добор на случай, если что-то не вернулось из упорядочивания
+        for g in normal:
+            if g not in ordered_normal:
+                ordered_normal.append(g)
+    else:
+        ordered_normal = []
+
+    _reassign_sequence_sort_order(ordered_normal, fallback)
+
+    session.status = "gpr_sequence_review"
+    session.updated_at = _now()
+    await db.commit()
+    return await get_wbs(db, project_id, session_id)
+
+
+async def approve_group_sequence(
+    db: AsyncSession, project_id: str, session_id: str
+) -> KtpEstimateSession:
+    """Фиксирует порядок групп. Fallback-группа принудительно ставится в конец."""
+    session = await get_session_by_id(db, project_id, session_id)
+    if session.status not in {"gpr_sequence_review", "gpr_ready", "gpr_pending"}:
+        raise ValueError("Нет последовательности групп для утверждения")
+
+    groups = await _load_session_groups(db, session_id)
+    fallback = [g for g in groups if _is_fallback_group_title(g.title)]
+    if fallback:
+        max_normal = max(
+            (
+                float(g.sort_order)
+                for g in groups
+                if not _is_fallback_group_title(g.title)
+            ),
+            default=0.0,
+        )
+        order = max_normal + 1000.0
+        for g in fallback:
+            g.sort_order = order
+            g.updated_at = _now()
+            order += 1000.0
+
+    session.status = "gpr_ready"
+    session.updated_at = _now()
+    await db.commit()
+    await db.refresh(session)
+    return session

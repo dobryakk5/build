@@ -46,9 +46,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_BRIGADE_SIZE = 3
 MAX_DURATION_DAYS = 365
 
+# Статусы подшага «последовательность групп» внутри фазы ГПР.
+SEQUENCE_REVIEW_STATUS = "gpr_sequence_review"
+SEQUENCE_READY_STATUS = "gpr_ready"
+
+# Заголовки fallback-группы «прочих» работ (текущий + legacy).
+FALLBACK_GROUP_TITLES = {"Прочие позиции сметы", "Прочие работы сметы"}
+
 
 def _uuid() -> str:
     return str(uuid.uuid4())
+
+
+def _is_fallback_group(title: str | None) -> bool:
+    return (title or "").strip() in FALLBACK_GROUP_TITLES
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,7 +76,14 @@ async def start_gpr_job(
     )
     if not session:
         raise ValueError(f"Сеанс КТП {session_id} не найден в проекте {project_id}")
-    if session.status not in {"gpr_pending", "gpr_processing", "gpr_failed", "gpr_done"}:
+    if session.status not in {
+        "gpr_pending",
+        SEQUENCE_REVIEW_STATUS,
+        SEQUENCE_READY_STATUS,
+        "gpr_processing",
+        "gpr_failed",
+        "gpr_done",
+    }:
         raise ValueError(
             "ГПР можно строить только после утверждения карточек КТП (этап 2)"
         )
@@ -411,12 +429,76 @@ async def _ai_pick_norms(
 # ШАГ 4 — ЗАВИСИМОСТИ МЕЖДУ ГРУППАМИ
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _ai_order_groups(groups: list[KtpWbsGroup]) -> list[str]:
+    """Возвращает технологически упорядоченный список group_id (линейный порядок).
+
+    Fallback-группа («Прочие позиции сметы») в упорядочивании не участвует —
+    она всегда стоит в конце списка. При сбое ИИ возвращается текущий порядок
+    (по sort_order), что делает функцию безопасной для авто-вызова.
+    """
+    orderable = [g for g in groups if not _is_fallback_group(g.title)]
+    if len(orderable) < 2:
+        return [g.id for g in orderable]
+
+    lines = "\n".join(
+        f"  [{g.id}] {g.title}" + (f" (WT {g.wt_code})" if g.wt_code else "")
+        for g in orderable
+    )
+    prompt = f"""Ты эксперт по организации строительства. Расставь ГРУППЫ работ
+в правильной технологической последовательности выполнения
+(подготовительные → демонтаж → земляные → фундаменты → … → отделка →
+пусконаладка → благоустройство). Это линейный порядок второго уровня, НЕ
+дроби группы и НЕ придумывай новые.
+
+ГРУППЫ:
+{lines}
+
+Верни строго JSON без markdown — массив group_id в нужном порядке:
+{{"order": ["<id>", "<id>", ...]}}
+Включи КАЖДЫЙ id ровно один раз."""
+
+    valid_ids = [g.id for g in orderable]
+    valid_set = set(valid_ids)
+    try:
+        raw = await create_chat_completion(
+            model=settings.KTP_GENERATION_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=2000,
+            response_format={"type": "json_object"},
+        )
+        parsed = parse_json_object(raw)
+        ai_order = [str(x) for x in (parsed.get("order") or []) if str(x) in valid_set]
+    except Exception:  # noqa: BLE001
+        logger.exception("AI group ordering failed")
+        return valid_ids
+
+    # Дедуп с сохранением порядка + добор пропущенных в исходном порядке.
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for gid in ai_order:
+        if gid not in seen:
+            seen.add(gid)
+            ordered.append(gid)
+    for gid in valid_ids:
+        if gid not in seen:
+            ordered.append(gid)
+            seen.add(gid)
+    return ordered
+
+
 async def _resolve_group_dependencies(
     groups: list[KtpWbsGroup], warnings: list[str]
 ) -> list[tuple[str, str]]:
-    """Возвращает рёбра (group_id, depends_on_group_id) без циклов."""
+    """Возвращает рёбра (group_id, depends_on_group_id) без циклов.
+
+    Fallback-группа «прочих» работ исключается из зависимостей: у неё нет
+    предшественников и от неё никто не зависит — в ГПР она стартует с самого
+    начала проекта параллельно остальным.
+    """
     if len(groups) < 2:
         return []
+    fallback_ids = {g.id for g in groups if _is_fallback_group(g.title)}
 
     lines = "\n".join(
         f"  [{g.id}] {g.title}" + (f" (WT {g.wt_code})" if g.wt_code else "")
@@ -449,6 +531,8 @@ async def _resolve_group_dependencies(
                 continue
             gid = str(dep.get("group_id") or "")
             dep_gid = str(dep.get("depends_on_group_id") or "")
+            if gid in fallback_ids or dep_gid in fallback_ids:
+                continue  # «прочие» работы независимы — стартуют с начала проекта
             if gid in valid_ids and dep_gid in valid_ids and gid != dep_gid:
                 edges.append((gid, dep_gid))
     except Exception as exc:  # noqa: BLE001

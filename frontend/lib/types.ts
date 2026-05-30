@@ -610,6 +610,8 @@ export type KtpEstimateStatus =
   | "stage1_failed"
   | "stage2_review"
   | "gpr_pending"
+  | "gpr_sequence_review"
+  | "gpr_ready"
   | "gpr_processing"
   | "gpr_done"
   | "gpr_failed";

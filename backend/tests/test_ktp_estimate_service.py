@@ -1,6 +1,6 @@
 from pathlib import Path
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -475,3 +475,93 @@ def test_materialize_wbs_handles_ai_added_with_null_row_key():
     assert by_origin["ai_added"].estimate_id is None
     assert by_origin["ai_added"].review_status == "pending"
     assert by_origin["ai_added"].ai_reason == "защита"
+
+
+# ── последовательность групп (2-й уровень) ───────────────────────────────────
+
+def make_group_row(gid: str, title: str, sort_order: float = 1000.0):
+    g = MagicMock()
+    g.id = gid
+    g.title = title
+    g.sort_order = sort_order
+    return g
+
+
+def test_is_fallback_group_title_detects_titles():
+    from app.services.ktp_estimate_service import _is_fallback_group_title
+
+    assert _is_fallback_group_title("Прочие позиции сметы")
+    assert _is_fallback_group_title("Прочие работы сметы")
+    assert not _is_fallback_group_title("Фундамент")
+
+
+def test_reassign_sequence_sort_order_pins_fallback_last():
+    from app.services.ktp_estimate_service import _reassign_sequence_sort_order
+
+    a = make_group_row("a", "Земляные")
+    b = make_group_row("b", "Фундамент")
+    z = make_group_row("z", "Прочие позиции сметы")
+    _reassign_sequence_sort_order([b, a], [z])  # порядок b,a
+
+    assert b.sort_order == 1000.0
+    assert a.sort_order == 2000.0
+    assert z.sort_order == 3000.0  # fallback после всех обычных
+
+
+@pytest.mark.asyncio
+async def test_propose_group_sequence_orders_and_sets_status():
+    import app.services.ktp_estimate_service as svc
+
+    session = MagicMock()
+    session.status = "gpr_pending"
+    groups = [
+        make_group_row("a", "Отделка", 1000.0),
+        make_group_row("b", "Земляные", 2000.0),
+        make_group_row("z", "Прочие позиции сметы", 3000.0),
+    ]
+    db = AsyncMock()
+
+    with (
+        patch.object(svc, "get_session_by_id", AsyncMock(return_value=session)),
+        patch.object(svc, "_load_session_groups", AsyncMock(return_value=groups)),
+        patch(
+            "app.services.ktp_gpr_service._ai_order_groups",
+            AsyncMock(return_value=["b", "a"]),  # ИИ: Земляные → Отделка
+        ),
+        patch.object(svc, "get_wbs", AsyncMock(return_value={"groups": []})),
+    ):
+        await svc.propose_group_sequence(db, "p1", "s1")
+
+    by_id = {g.id: g for g in groups}
+    assert by_id["b"].sort_order == 1000.0
+    assert by_id["a"].sort_order == 2000.0
+    assert by_id["z"].sort_order == 3000.0  # fallback в конце
+    assert session.status == "gpr_sequence_review"
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_approve_group_sequence_repins_fallback_and_sets_ready():
+    import app.services.ktp_estimate_service as svc
+
+    session = MagicMock()
+    session.status = "gpr_sequence_review"
+    # оператор по ошибке поставил fallback в середину
+    groups = [
+        make_group_row("a", "Земляные", 1000.0),
+        make_group_row("z", "Прочие позиции сметы", 1500.0),
+        make_group_row("b", "Отделка", 2000.0),
+    ]
+    db = AsyncMock()
+
+    with (
+        patch.object(svc, "get_session_by_id", AsyncMock(return_value=session)),
+        patch.object(svc, "_load_session_groups", AsyncMock(return_value=groups)),
+    ):
+        result = await svc.approve_group_sequence(db, "p1", "s1")
+
+    by_id = {g.id: g for g in groups}
+    # fallback пере-пинится после максимального обычного (2000) → 3000
+    assert by_id["z"].sort_order == 3000.0
+    assert session.status == "gpr_ready"
+    assert result is session

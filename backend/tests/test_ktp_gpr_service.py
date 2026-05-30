@@ -8,13 +8,15 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 
-def make_group(gid: str, duration_days: int = 1, items=None):
+def make_group(gid: str, duration_days: int = 1, items=None, title: str = "", wt_code=None):
     g = MagicMock()
     g.id = gid
     g.duration_days = duration_days
     g.start_date = None
     g.items = items or []
     g.accepted_items = items or []
+    g.title = title or gid
+    g.wt_code = wt_code
     return g
 
 
@@ -177,3 +179,93 @@ async def test_compute_durations_fallback_when_no_norm_or_quantity():
     assert it.norm_kind == "fallback"
     assert it.duration_days == 1
     assert any("норму" in w for w in warnings)
+
+
+# ── последовательность групп (2-й уровень) ───────────────────────────────────
+
+def test_is_fallback_group_matches_current_and_legacy_titles():
+    from app.services.ktp_gpr_service import _is_fallback_group
+
+    assert _is_fallback_group("Прочие позиции сметы")
+    assert _is_fallback_group("  Прочие работы сметы ")
+    assert not _is_fallback_group("Кровля")
+    assert not _is_fallback_group(None)
+
+
+@pytest.mark.asyncio
+async def test_ai_order_groups_dedups_and_appends_missing():
+    from app.services.ktp_gpr_service import _ai_order_groups
+
+    groups = [
+        make_group("a", title="Земляные"),
+        make_group("b", title="Фундамент"),
+        make_group("c", title="Отделка"),
+    ]
+    # ИИ вернул дубль b и забыл c
+    raw = '{"order": ["b", "b", "a"]}'
+    with patch(
+        "app.services.ktp_gpr_service.create_chat_completion",
+        AsyncMock(return_value=raw),
+    ):
+        order = await _ai_order_groups(groups)
+
+    assert order == ["b", "a", "c"]  # дедуп + добор пропущенного в исходном порядке
+
+
+@pytest.mark.asyncio
+async def test_ai_order_groups_excludes_fallback_and_falls_back_on_error():
+    from app.services.ktp_gpr_service import _ai_order_groups
+
+    groups = [
+        make_group("a", title="Земляные"),
+        make_group("b", title="Фундамент"),
+        make_group("z", title="Прочие позиции сметы"),
+    ]
+    with patch(
+        "app.services.ktp_gpr_service.create_chat_completion",
+        AsyncMock(side_effect=RuntimeError("LLM down")),
+    ):
+        order = await _ai_order_groups(groups)
+
+    # fallback не входит; при сбое — исходный порядок обычных групп
+    assert order == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_group_dependencies_drops_fallback_edges():
+    from app.services.ktp_gpr_service import _resolve_group_dependencies
+
+    groups = [
+        make_group("a", title="Земляные"),
+        make_group("b", title="Фундамент"),
+        make_group("z", title="Прочие позиции сметы"),
+    ]
+    raw = (
+        '{"dependencies": ['
+        '{"group_id": "b", "depends_on_group_id": "a"},'
+        '{"group_id": "z", "depends_on_group_id": "a"},'   # fallback зависит — выкинуть
+        '{"group_id": "b", "depends_on_group_id": "z"}'     # зависит от fallback — выкинуть
+        ']}'
+    )
+    warnings: list[str] = []
+    with patch(
+        "app.services.ktp_gpr_service.create_chat_completion",
+        AsyncMock(return_value=raw),
+    ):
+        edges = await _resolve_group_dependencies(groups, warnings)
+
+    assert edges == [("b", "a")]
+
+
+def test_schedule_groups_fallback_starts_at_project_start():
+    """Без рёбер (как после фильтрации) fallback стартует с начала проекта."""
+    from app.services.ktp_gpr_service import _schedule_groups
+
+    a = make_group("a", duration_days=5, title="Земляные")
+    b = make_group("b", duration_days=2, title="Фундамент")
+    z = make_group("z", duration_days=1, title="Прочие позиции сметы")
+    _schedule_groups([a, b, z], [("b", "a")], date(2026, 1, 1))
+
+    assert a.start_date == date(2026, 1, 1)
+    assert z.start_date == date(2026, 1, 1)  # независим → старт проекта
+    assert b.start_date == date(2026, 1, 6)

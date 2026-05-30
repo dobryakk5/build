@@ -469,8 +469,42 @@ async def approve_stage2(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ЭТАП 3 — ГПР
+# ЭТАП 3 — ПОСЛЕДОВАТЕЛЬНОСТЬ ГРУПП (2-й уровень) + ГПР
 # ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/sessions/{session_id}/propose-sequence", response_model=WbsOut)
+async def propose_sequence(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        payload = await svc.propose_group_sequence(
+            db, str(project_id), str(session_id)
+        )
+    except ValueError as exc:
+        raise _value_error(exc)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Ошибка построения последовательности: {exc}")
+    return WbsOut.of(payload)
+
+
+@router.post("/sessions/{session_id}/approve-sequence", response_model=SessionOut)
+async def approve_sequence(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        session = await svc.approve_group_sequence(
+            db, str(project_id), str(session_id)
+        )
+    except ValueError as exc:
+        raise _value_error(exc)
+    return SessionOut.of(session)
+
 
 @router.post("/sessions/{session_id}/build-gpr", response_model=BuildGprResponse)
 async def build_gpr(

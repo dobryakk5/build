@@ -626,6 +626,20 @@ export const ktpEstimate = {
       `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-stage2`,
       { method: "POST" },
     ),
+  // Подшаг ГПР: ИИ строит линейную последовательность групп (2-й уровень).
+  // Возвращает WBS с группами в предложенном порядке (статус → gpr_sequence_review).
+  proposeSequence: (projectId: string, sessionId: string) =>
+    request<KtpWbs>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/propose-sequence`,
+      { method: "POST" },
+    ),
+  // Оператор правит порядок через updateGroup({sort_order}); затем фиксирует.
+  // Группа «Прочие позиции сметы» принудительно ставится в конец (статус → gpr_ready).
+  approveSequence: (projectId: string, sessionId: string) =>
+    request<KtpEstimateSession>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-sequence`,
+      { method: "POST" },
+    ),
   buildGpr: (projectId: string, sessionId: string) =>
     request<{ job_id: string }>(
       `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/build-gpr`,
