@@ -5,6 +5,8 @@ import uuid
 from datetime import date
 
 from sqlalchemy import (
+    BigInteger,
+    Boolean,
     Date,
     ForeignKey,
     Integer,
@@ -159,6 +161,40 @@ class KtpWbsItem(Base, TimestampMixin):
     gantt_task_id: Mapped[str | None] = mapped_column(
         ForeignKey("gantt_tasks.id", ondelete="SET NULL")
     )
+
+    # Диспозиция строки сметы: work | excluded (субитоги/ИТОГО/несторительные).
+    disposition: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="work"
+    )
+    disposition_reason: Mapped[str | None] = mapped_column(Text)
+    # regex | llm | manual
+    disposition_source: Mapped[str | None] = mapped_column(String(16))
+
+    # NW-скоуп (диагностический — только для сужения области поиска ФЕР).
+    nw_item_code: Mapped[str | None] = mapped_column(String(10))
+    # keyword | broad | manual
+    nw_match_source: Mapped[str | None] = mapped_column(String(16))
+    nw_match_reason: Mapped[str | None] = mapped_column(Text)
+    nw_match_candidates: Mapped[list | None] = mapped_column(JSONB)
+    nw_manual_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
+    # Сопоставление с конкретной строкой ФЕР (источник трудоёмкости h_hour).
+    fer_table_id: Mapped[int | None] = mapped_column(BigInteger)
+    fer_row_id: Mapped[int | None] = mapped_column(BigInteger)
+    # auto | review | manual
+    fer_match_source: Mapped[str | None] = mapped_column(String(16))
+    fer_match_score: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    fer_match_candidates: Mapped[list | None] = mapped_column(JSONB)
+    fer_manual_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    # Трудоёмкость подобранной строки ФЕР (чел-ч на единицу ФЕР).
+    fer_h_hour: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    # Единица измерения ФЕР (эвристически извлечённая) и множитель (напр. «на 100 м2»).
+    fer_unit: Mapped[str | None] = mapped_column(String(32))
+    fer_unit_multiplier: Mapped[float | None] = mapped_column(Numeric(12, 4))
 
     group: Mapped["KtpWbsGroup"] = relationship(back_populates="items")
 

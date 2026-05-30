@@ -53,6 +53,7 @@ class HybridCandidate:
     vec_score: float
     fts_score: float
     final_score: float
+    row_id: int | None = None
 
 
 @dataclass(slots=True)
@@ -144,6 +145,7 @@ async def hybrid_search_candidates(
     normalized_text: str,
     embedding_literal: str,
     allowed_section_ids: Sequence[int] | None = None,
+    allowed_table_ids: Sequence[int] | None = None,
     filter_section_id: int | None = None,
     filter_collection_id: int | None = None,
     top_k: int | None = None,
@@ -153,6 +155,8 @@ async def hybrid_search_candidates(
     if filter_section_id is not None and filter_collection_id is not None:
         raise RuntimeError("Only one group filter can be applied at a time.")
     if allowed_section_ids is not None and len(allowed_section_ids) == 0:
+        return []
+    if allowed_table_ids is not None and len(allowed_table_ids) == 0:
         return []
 
     fts_config = await resolve_fts_config(db)
@@ -177,6 +181,10 @@ async def hybrid_search_candidates(
     elif allowed_section_ids:
         scope_filter = "AND t.section_id = ANY(:allowed_section_ids)"
         params["allowed_section_ids"] = [int(section_id) for section_id in allowed_section_ids]
+    # Table-level narrowing combines with any of the above (e.g. NW→ФЕР tables).
+    if allowed_table_ids:
+        scope_filter += " AND vi.table_id = ANY(:allowed_table_ids)"
+        params["allowed_table_ids"] = [int(table_id) for table_id in allowed_table_ids]
 
     stmt = text(
         f"""
@@ -239,6 +247,7 @@ async def hybrid_search_candidates(
         SELECT
             vi.id AS vector_index_id,
             vi.table_id,
+            vi.row_id,
             COALESCE(NULLIF(t.common_work_name, ''), t.table_title, vi.source_text) AS work_type,
             vi.source_text,
             vi.search_text,
@@ -261,16 +270,24 @@ async def hybrid_search_candidates(
         LIMIT :top_k
         """
     )
+    array_binds = []
     if allowed_section_ids and filter_section_id is None and filter_collection_id is None:
-        stmt = stmt.bindparams(
-            bindparam("allowed_section_ids", type_=postgresql.ARRAY(Integer)),
+        array_binds.append(
+            bindparam("allowed_section_ids", type_=postgresql.ARRAY(Integer))
         )
+    if allowed_table_ids:
+        array_binds.append(
+            bindparam("allowed_table_ids", type_=postgresql.ARRAY(Integer))
+        )
+    if array_binds:
+        stmt = stmt.bindparams(*array_binds)
 
     rows = (await db.execute(stmt, params)).mappings().all()
     return [
         HybridCandidate(
             vector_index_id=int(row["vector_index_id"]),
             table_id=int(row["table_id"]) if row["table_id"] is not None else None,
+            row_id=int(row["row_id"]) if row["row_id"] is not None else None,
             work_type=str(row["work_type"]).strip(),
             source_text=str(row["source_text"] or "").strip(),
             search_text=str(row["search_text"] or "").strip(),

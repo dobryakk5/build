@@ -43,6 +43,7 @@ from app.services.ktp_service import (
     _build_wt_palette,
     _format_wt_palette_for_prompt,
 )
+from app.services.ktp_item_fer_service import match_session_items
 from app.services.nw_palette_service import get_palette
 from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
 
@@ -566,6 +567,29 @@ async def _process_stage1(job_id: str) -> None:
             for it in items:
                 db.add(it)
 
+            # Сопоставление позиций с ФЕР (источник трудоёмкости для длительностей).
+            # Обогащение — сбой здесь не должен валить Stage 1.
+            fer_match_stats: dict[str, int] | None = None
+            if settings.KTP_ITEM_FER_MATCH_ENABLED:
+                try:
+                    fer_match_stats = await match_session_items(
+                        db,
+                        session,
+                        batch.estimate_kind,
+                        groups,
+                        items,
+                        _progress,
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Item ФЕР matching failed for session %s", session.id
+                    )
+                    warnings_pre = list(coverage_warnings)
+                    warnings_pre.append(
+                        "Сопоставление с ФЕР не выполнено — длительности будут оценены ИИ"
+                    )
+                    coverage_warnings = warnings_pre
+
             # хвостовые предупреждения по битым чанкам ИИ
             chunk_errors = diagnostics.get("chunk_errors") or []
             warnings_out = list(coverage_warnings)
@@ -598,6 +622,7 @@ async def _process_stage1(job_id: str) -> None:
                 "item_count": len(items),
                 "ai_added_count": ai_added,
                 "coverage_warnings": warnings_out,
+                "fer_match_stats": fer_match_stats,
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("KTP estimate stage1 failed for job %s", job_id)

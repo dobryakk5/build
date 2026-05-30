@@ -72,6 +72,19 @@ class Settings(BaseSettings):
     KTP_STAGE1_PER_GROUP_GAP_FILL_ENABLED: bool = True
     KTP_STAGE1_PROJECT_GAP_FILL_ENABLED: bool = True
 
+    # Item-level NW→ФЕР matching (calibration targets — NOT quality gates yet).
+    # Toggles the post-Stage-1 pass that matches each estimate item to a ФЕР row
+    # so that durations are grounded in fer_rows.h_hour instead of LLM guesses.
+    KTP_ITEM_FER_MATCH_ENABLED: bool = True
+    # Which keyword-confidence levels of estimate_nw_matcher are auto-accepted as NW scope.
+    NW_KEYWORD_AUTO_LEVELS: list[str] = ["high"]
+    # Batching / concurrency for the ФЕР matching pass.
+    FER_MATCH_BATCH_SIZE: int = 40
+    FER_MATCH_CONCURRENCY: int = 8
+    # WT vote thresholds (group-level work-type assignment from item NW votes).
+    WT_VOTE_AUTO_SHARE: float = 0.6
+    WT_VOTE_REVIEW_SHARE: float = 0.3
+
     # Token lifetimes
     EMAIL_VERIFICATION_EXPIRE_HOURS: int = 24
     PASSWORD_RESET_EXPIRE_HOURS: int = 2

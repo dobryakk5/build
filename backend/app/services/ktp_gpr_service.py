@@ -154,9 +154,12 @@ async def _process_gpr(job_id: str) -> None:
                 raise ValueError("В КТП нет принятых работ для построения ГПР")
 
             hours_per_day = float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY)
+            default_brigade = max(1, int(batch.workers_count or DEFAULT_BRIGADE_SIZE))
 
             # Шаг 3 — длительности
-            await _compute_durations(db, groups, hours_per_day, warnings, _progress)
+            await _compute_durations(
+                db, groups, hours_per_day, warnings, _progress, default_brigade
+            )
             await _progress("Расставляем зависимости между группами…")
 
             # Шаг 4 — зависимости между группами
@@ -202,19 +205,68 @@ async def _process_gpr(job_id: str) -> None:
 # ШАГ 3 — ДЛИТЕЛЬНОСТИ
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _apply_fer_norm(
+    it: KtpWbsItem, hours_per_day: float, default_brigade: int
+) -> bool:
+    """Ground duration directly from a matched ФЕР row (bypasses the LLM picker).
+
+    Groundable only when the item was auto/manually matched to a ФЕР row, the
+    row carries h_hour, the unit reconciled (→ multiplier known) and we have a
+    quantity. Otherwise returns False and the item falls through to _ai_pick_norms.
+    """
+    if it.fer_match_source not in ("auto", "manual"):
+        return False
+    if it.fer_h_hour is None or it.fer_unit_multiplier is None or it.quantity is None:
+        return False
+    multiplier = float(it.fer_unit_multiplier) or 1.0
+    if multiplier <= 0:
+        multiplier = 1.0
+    quantity = float(it.quantity)
+    norm_value = float(it.fer_h_hour) / multiplier  # чел-ч на единицу сметы
+    labor = quantity * norm_value
+    brigade = max(1, int(it.brigade_size or default_brigade or DEFAULT_BRIGADE_SIZE))
+    duration = calculate_working_days(labor, brigade, hours_per_day) or 1
+
+    it.brigade_size = brigade
+    it.norm_source = "fer"
+    it.norm_kind = "norm_time"
+    it.norm_value = round(norm_value, 4)
+    it.norm_unit = (it.unit or it.fer_unit or "")[:32] or None
+    it.norm_ref = f"ФЕР таб.{it.fer_table_id}/стр.{it.fer_row_id}"[:64]
+    it.labor_hours = float(labor)
+    it.duration_days = max(1, min(MAX_DURATION_DAYS, int(duration)))
+    return True
+
+
 async def _compute_durations(
     db: AsyncSession,
     groups: list[KtpWbsGroup],
     hours_per_day: float,
     warnings: list[str],
     on_progress: Callable[[str], Awaitable[None]] | None = None,
+    default_brigade: int = DEFAULT_BRIGADE_SIZE,
 ) -> None:
     items = [it for g in groups for it in g.accepted_items]
-    hints = await _ground_norms(db, items)
 
-    norms = await _ai_pick_norms(groups, items, hints, warnings, on_progress)
+    # Шаг 3a — длительности из подобранных строк ФЕР (без ИИ).
+    grounded: set[str] = set()
+    for it in items:
+        if _apply_fer_norm(it, hours_per_day, default_brigade):
+            grounded.add(it.id)
+    if grounded and on_progress:
+        await on_progress(
+            f"Длительность по ФЕР для {len(grounded)} из {len(items)} работ…"
+        )
+
+    # Шаг 3b — остальное оцениваем ИИ (как раньше).
+    hints = await _ground_norms(db, [it for it in items if it.id not in grounded])
+    norms = await _ai_pick_norms(
+        groups, items, hints, warnings, on_progress, skip_ids=grounded
+    )
 
     for it in items:
+        if it.id in grounded:
+            continue
         norm = norms.get(it.id, {})
         # объём
         quantity = float(it.quantity) if it.quantity is not None else None
@@ -331,9 +383,14 @@ async def _ai_pick_norms_for_group(
     group: KtpWbsGroup,
     hints: dict[str, dict],
     warnings: list[str],
+    skip_ids: set[str] | None = None,
 ) -> dict[str, dict]:
+    skip_ids = skip_ids or set()
+    pending = [it for it in group.accepted_items if it.id not in skip_ids]
+    if not pending:
+        return {}
     lines: list[str] = []
-    for it in group.accepted_items:
+    for it in pending:
         qty = (
             f"{float(it.quantity):g} {it.unit or ''}".strip()
             if it.quantity is not None
@@ -402,17 +459,23 @@ async def _ai_pick_norms(
     hints: dict[str, dict],
     warnings: list[str],
     on_progress: Callable[[str], Awaitable[None]] | None = None,
+    skip_ids: set[str] | None = None,
 ) -> dict[str, dict]:
-    if not groups:
+    skip_ids = skip_ids or set()
+    # Только группы, где остались позиции без ФЕР-нормы.
+    pending_groups = [
+        g for g in groups if any(it.id not in skip_ids for it in g.accepted_items)
+    ]
+    if not pending_groups:
         return {}
 
-    total = len(groups)
+    total = len(pending_groups)
     if on_progress:
         await on_progress(f"Оцениваем нормы для {total} групп работ…")
 
     tasks = [
-        asyncio.create_task(_ai_pick_norms_for_group(g, hints, warnings))
-        for g in groups
+        asyncio.create_task(_ai_pick_norms_for_group(g, hints, warnings, skip_ids))
+        for g in pending_groups
     ]
     merged: dict[str, dict] = {}
     completed = 0
