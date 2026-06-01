@@ -377,6 +377,8 @@ async def match_session_items(
     #    cannot service concurrent db.execute() calls (mirrors the batch loop in
     #    estimate_fer_matcher). The rerank inside _decide is also serialized here.
     decisions: dict[str, tuple[HybridCandidate | None, str, float | None, list[dict]]] = {}
+    if on_progress:
+        await on_progress(f"ФЕР-поиск 0/{len(to_match)}…")
     for idx, it in enumerate(to_match, start=1):
         vec = embeddings.get(it.id)
         if vec is None:

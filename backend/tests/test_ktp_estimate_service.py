@@ -196,6 +196,40 @@ def test_parse_json_object_strips_line_comments():
     assert result == {"groups": [{"title": "Г1"}]}
 
 
+def test_stage1_job_stale_detection_uses_started_at():
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.ktp_estimate_service import _is_stale_stage1_job
+
+    job = MagicMock()
+    job.type = "ktp_estimate_stage1"
+    job.status = "processing"
+    job.started_at = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
+    job.created_at = job.started_at - timedelta(minutes=1)
+
+    assert _is_stale_stage1_job(
+        job,
+        now=job.started_at + timedelta(hours=3),
+    )
+
+
+def test_non_stage1_job_is_not_stale_for_ktp_recovery():
+    from datetime import datetime, timedelta, timezone
+
+    from app.services.ktp_estimate_service import _is_stale_stage1_job
+
+    job = MagicMock()
+    job.type = "estimate_upload"
+    job.status = "processing"
+    job.started_at = datetime(2026, 5, 30, 18, 0, tzinfo=timezone.utc)
+    job.created_at = job.started_at
+
+    assert not _is_stale_stage1_job(
+        job,
+        now=job.started_at + timedelta(days=1),
+    )
+
+
 # ── section_key и python_groups ─────────────────────────────────────────────
 
 def test_make_section_key_stable_and_versioned():

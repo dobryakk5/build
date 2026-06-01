@@ -16,7 +16,7 @@ import re
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -361,6 +361,15 @@ async def _load_work_estimates(
 async def get_session(
     db: AsyncSession, project_id: str, estimate_batch_id: str
 ) -> KtpEstimateSession | None:
+    session = await _get_session_raw(db, project_id, estimate_batch_id)
+    if session:
+        await _expire_stale_stage1_session(db, session)
+    return session
+
+
+async def _get_session_raw(
+    db: AsyncSession, project_id: str, estimate_batch_id: str
+) -> KtpEstimateSession | None:
     return await db.scalar(
         select(KtpEstimateSession)
         .where(KtpEstimateSession.project_id == project_id)
@@ -391,6 +400,7 @@ async def get_session_by_id(
 
 async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[str, Any]:
     session = await get_session_by_id(db, project_id, session_id)
+    await _expire_stale_stage1_session(db, session)
     groups = list(
         await db.scalars(
             select(KtpWbsGroup)
@@ -412,6 +422,55 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
         else []
     )
     return {"session": session, "groups": groups, "group_dependencies": deps}
+
+
+def _job_reference_time(job: Job) -> datetime | None:
+    return job.started_at or job.created_at
+
+
+def _is_stale_stage1_job(job: Job, now: datetime | None = None) -> bool:
+    if job.type != "ktp_estimate_stage1" or job.status not in {"pending", "processing"}:
+        return False
+    ref_time = _job_reference_time(job)
+    if ref_time is None:
+        return False
+    if now is None:
+        now = datetime.now(ref_time.tzinfo) if ref_time.tzinfo else datetime.utcnow()
+    elif ref_time.tzinfo and now.tzinfo is None:
+        now = now.replace(tzinfo=ref_time.tzinfo)
+    stale_after = timedelta(seconds=max(60, int(settings.KTP_STAGE1_STALE_AFTER_SECONDS)))
+    return now - ref_time > stale_after
+
+
+async def _expire_stale_stage1_session(
+    db: AsyncSession, session: KtpEstimateSession
+) -> bool:
+    if session.status not in {"stage1_pending", "stage1_processing"}:
+        return False
+    if not session.stage1_job_id:
+        return False
+
+    job = await db.get(Job, session.stage1_job_id)
+    if not job or not _is_stale_stage1_job(job):
+        return False
+
+    last_progress = (
+        (job.result or {}).get("_progress") if isinstance(job.result, dict) else None
+    )
+    message = (
+        "Обработка КТП зависла и была остановлена автоматически. "
+        "Запустите построение КТП заново."
+    )
+    if last_progress:
+        message = f"{message} Последний шаг: {last_progress}"
+
+    job.status = "failed"
+    job.result = {"error": message, "stale": True, "last_progress": last_progress}
+    job.finished_at = datetime.utcnow()
+    session.status = "stage1_failed"
+    session.error_message = message
+    await db.commit()
+    return True
 
 
 async def _get_group(
@@ -459,10 +518,14 @@ async def start_stage1_job(
     """
     await _assert_batch_belongs_to_project(db, project_id, estimate_batch_id)
 
-    existing = await get_session(db, project_id, estimate_batch_id)
-    if existing and not force:
+    existing = await _get_session_raw(db, project_id, estimate_batch_id)
+    existing_was_stale = False
+    if existing:
+        existing_was_stale = await _expire_stale_stage1_session(db, existing)
+
+    if existing and not force and not existing_was_stale:
         return None, existing
-    if existing and force:
+    if existing and (force or existing_was_stale):
         await db.delete(existing)
         await db.flush()
 

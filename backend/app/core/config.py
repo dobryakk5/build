@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     KTP_STAGE1_GAP_FILL_ENABLED: bool = True
     KTP_STAGE1_PER_GROUP_GAP_FILL_ENABLED: bool = True
     KTP_STAGE1_PROJECT_GAP_FILL_ENABLED: bool = True
+    KTP_STAGE1_STALE_AFTER_SECONDS: int = 2 * 60 * 60
 
     # Item-level NW→ФЕР matching (calibration targets — NOT quality gates yet).
     # Toggles the post-Stage-1 pass that matches each estimate item to a ФЕР row
