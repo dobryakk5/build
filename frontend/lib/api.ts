@@ -626,6 +626,26 @@ export const ktpEstimate = {
       `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-stage2`,
       { method: "POST" },
     ),
+  matchFer: (projectId: string, sessionId: string) =>
+    request<{ job_id: string }>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/match-fer`,
+      { method: "POST" },
+    ),
+  approveFer: (projectId: string, sessionId: string) =>
+    request<KtpEstimateSession>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-fer`,
+      { method: "POST" },
+    ),
+  updateItemFer: (projectId: string, itemId: string, ferTableId: number | null) =>
+    request<KtpWbs>(`/projects/${projectId}/ktp-estimate/items/${itemId}/fer`, {
+      method: "PATCH",
+      body: JSON.stringify({ fer_table_id: ferTableId }),
+    }),
+  matchItemFer: (projectId: string, itemId: string) =>
+    request<KtpWbs>(
+      `/projects/${projectId}/ktp-estimate/items/${itemId}/match-fer`,
+      { method: "POST" },
+    ),
   // Подшаг ГПР: ИИ строит линейную последовательность групп (2-й уровень).
   // Возвращает WBS с группами в предложенном порядке (статус → gpr_sequence_review).
   proposeSequence: (projectId: string, sessionId: string) =>

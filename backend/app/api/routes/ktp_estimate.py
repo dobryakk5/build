@@ -60,9 +60,25 @@ class ItemOut(BaseModel):
     brigade_size: int | None = None
     labor_hours: float | None = None
     duration_days: int | None = None
+    fer_table_id: int | None = None
+    fer_row_id: int | None = None
+    fer_match_source: str | None = None
+    fer_match_score: float | None = None
+    fer_h_hour: float | None = None
+    fer_unit: str | None = None
+    fer_unit_multiplier: float | None = None
+    fer_match_label: str | None = None
 
     @classmethod
     def of(cls, it: KtpWbsItem) -> "ItemOut":
+        fer_match_label = None
+        if it.fer_match_candidates:
+            for candidate in it.fer_match_candidates:
+                if isinstance(candidate, dict) and candidate.get("table_id") == it.fer_table_id:
+                    fer_match_label = candidate.get("work_type")
+                    break
+            if fer_match_label is None and isinstance(it.fer_match_candidates[0], dict):
+                fer_match_label = it.fer_match_candidates[0].get("work_type")
         return cls(
             id=it.id,
             group_id=it.group_id,
@@ -82,6 +98,14 @@ class ItemOut(BaseModel):
             brigade_size=it.brigade_size,
             labor_hours=float(it.labor_hours) if it.labor_hours is not None else None,
             duration_days=it.duration_days,
+            fer_table_id=int(it.fer_table_id) if it.fer_table_id is not None else None,
+            fer_row_id=int(it.fer_row_id) if it.fer_row_id is not None else None,
+            fer_match_source=it.fer_match_source,
+            fer_match_score=float(it.fer_match_score) if it.fer_match_score is not None else None,
+            fer_h_hour=float(it.fer_h_hour) if it.fer_h_hour is not None else None,
+            fer_unit=it.fer_unit,
+            fer_unit_multiplier=float(it.fer_unit_multiplier) if it.fer_unit_multiplier is not None else None,
+            fer_match_label=fer_match_label,
         )
 
 
@@ -201,6 +225,14 @@ class CardPatch(BaseModel):
 
 class BuildGprResponse(BaseModel):
     job_id: str
+
+
+class FerJobResponse(BaseModel):
+    job_id: str
+
+
+class ItemFerPatch(BaseModel):
+    fer_table_id: int | None = None
 
 
 def _value_error(exc: ValueError) -> HTTPException:
@@ -466,6 +498,77 @@ async def approve_stage2(
     except ValueError as exc:
         raise _value_error(exc)
     return SessionOut.of(session)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ЭТАП 2.5 — НАЗНАЧЕНИЕ ФЕР
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/sessions/{session_id}/match-fer", response_model=FerJobResponse)
+async def match_fer(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+):
+    try:
+        job = await svc.start_fer_match_job(
+            db,
+            str(project_id),
+            str(session_id),
+            member.user_id,
+        )
+    except ValueError as exc:
+        raise _value_error(exc)
+    return FerJobResponse(job_id=job.id)
+
+
+@router.post("/sessions/{session_id}/approve-fer", response_model=SessionOut)
+async def approve_fer(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        session = await svc.approve_fer_matches(db, str(project_id), str(session_id))
+    except ValueError as exc:
+        raise _value_error(exc)
+    return SessionOut.of(session)
+
+
+@router.patch("/items/{item_id}/fer", response_model=WbsOut)
+async def patch_item_fer(
+    project_id: UUID,
+    item_id: UUID,
+    body: ItemFerPatch,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        payload = await svc.update_item_fer(
+            db,
+            str(project_id),
+            str(item_id),
+            body.fer_table_id,
+        )
+    except ValueError as exc:
+        raise _value_error(exc)
+    return WbsOut.of(payload)
+
+
+@router.post("/items/{item_id}/match-fer", response_model=WbsOut)
+async def match_item_fer(
+    project_id: UUID,
+    item_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        payload = await svc.auto_match_item_fer(db, str(project_id), str(item_id))
+    except ValueError as exc:
+        raise _value_error(exc)
+    return WbsOut.of(payload)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

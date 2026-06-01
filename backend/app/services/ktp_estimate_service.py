@@ -19,7 +19,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -43,7 +43,7 @@ from app.services.ktp_service import (
     _build_wt_palette,
     _format_wt_palette_for_prompt,
 )
-from app.services.ktp_item_fer_service import match_session_items
+from app.services.ktp_item_fer_service import extract_fer_unit, match_session_items, normalize_unit
 from app.services.nw_palette_service import get_palette
 from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
 
@@ -630,29 +630,6 @@ async def _process_stage1(job_id: str) -> None:
             for it in items:
                 db.add(it)
 
-            # Сопоставление позиций с ФЕР (источник трудоёмкости для длительностей).
-            # Обогащение — сбой здесь не должен валить Stage 1.
-            fer_match_stats: dict[str, int] | None = None
-            if settings.KTP_ITEM_FER_MATCH_ENABLED:
-                try:
-                    fer_match_stats = await match_session_items(
-                        db,
-                        session,
-                        batch.estimate_kind,
-                        groups,
-                        items,
-                        _progress,
-                    )
-                except Exception:  # noqa: BLE001
-                    logger.exception(
-                        "Item ФЕР matching failed for session %s", session.id
-                    )
-                    warnings_pre = list(coverage_warnings)
-                    warnings_pre.append(
-                        "Сопоставление с ФЕР не выполнено — длительности будут оценены ИИ"
-                    )
-                    coverage_warnings = warnings_pre
-
             # хвостовые предупреждения по битым чанкам ИИ
             chunk_errors = diagnostics.get("chunk_errors") or []
             warnings_out = list(coverage_warnings)
@@ -685,7 +662,6 @@ async def _process_stage1(job_id: str) -> None:
                 "item_count": len(items),
                 "ai_added_count": ai_added,
                 "coverage_warnings": warnings_out,
-                "fer_match_stats": fer_match_stats,
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("KTP estimate stage1 failed for job %s", job_id)
@@ -2435,7 +2411,240 @@ async def approve_stage2(
             raise ValueError(
                 "Не для всех групп с принятыми работами сгенерированы карточки КТП"
             )
+    session.status = "fer_pending"
+    session.updated_at = _now()
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ЭТАП 2.5 — НАЗНАЧЕНИЕ ФЕР ПОЗИЦИЯМ КТП
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def start_fer_match_job(
+    db: AsyncSession,
+    project_id: str,
+    session_id: str,
+    user_id: str,
+) -> Job:
+    session = await get_session_by_id(db, project_id, session_id)
+    if session.status not in {"fer_pending", "fer_review", "fer_failed"}:
+        raise ValueError("ФЕР можно назначать только после утверждения карточек КТП")
+
+    job = Job(
+        id=_uuid(),
+        type="ktp_fer_match",
+        status="pending",
+        project_id=project_id,
+        created_by=user_id,
+        input={"session_id": session_id},
+    )
+    db.add(job)
+    await db.flush()
+    session.gpr_job_id = job.id
+    session.status = "fer_processing"
+    session.error_message = None
+    await db.commit()
+
+    asyncio.create_task(_process_fer_match(job.id))
+    return job
+
+
+async def _process_fer_match(job_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        job = await db.get(Job, job_id)
+        if not job:
+            return
+        session_id = job.input.get("session_id")
+        session = await db.get(KtpEstimateSession, session_id)
+        if not session:
+            return
+
+        job.status = "processing"
+        job.started_at = datetime.utcnow()
+        session.status = "fer_processing"
+        await db.commit()
+
+        async def _progress(msg: str) -> None:
+            job.result = {"_progress": msg}
+            await db.commit()
+
+        try:
+            batch = await db.get(EstimateBatch, session.estimate_batch_id)
+            groups = list(
+                await db.scalars(
+                    select(KtpWbsGroup)
+                    .where(KtpWbsGroup.session_id == session_id)
+                    .options(selectinload(KtpWbsGroup.items))
+                    .order_by(KtpWbsGroup.sort_order)
+                )
+            )
+            groups = [
+                g
+                for g in groups
+                if any(it.review_status != "rejected" for it in g.items)
+            ]
+            if not groups:
+                raise ValueError("В КТП нет принятых работ для назначения ФЕР")
+
+            items = [it for g in groups for it in g.items if it.review_status != "rejected"]
+            await _progress("Назначаем ФЕР по группам КТП…")
+            fer_stats = await match_session_items(
+                db,
+                session,
+                batch.estimate_kind if batch else 1,
+                groups,
+                items,
+                _progress,
+            )
+
+            session.status = "fer_review"
+            session.error_message = None
+            job.status = "done"
+            job.result = {"session_id": session_id, "fer_match_stats": fer_stats}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("KTP FER match failed for job %s", job_id)
+            session.status = "fer_failed"
+            session.error_message = str(exc)
+            job.status = "failed"
+            job.result = {"error": str(exc)}
+        finally:
+            job.finished_at = datetime.utcnow()
+            await db.commit()
+
+
+async def _apply_manual_fer_table(
+    db: AsyncSession,
+    item: KtpWbsItem,
+    fer_table_id: int | None,
+) -> None:
+    if fer_table_id is None:
+        item.fer_table_id = None
+        item.fer_row_id = None
+        item.fer_match_source = None
+        item.fer_match_score = None
+        item.fer_match_candidates = None
+        item.fer_h_hour = None
+        item.fer_unit = None
+        item.fer_unit_multiplier = None
+        return
+
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    t.id,
+                    t.table_title,
+                    t.common_work_name,
+                    COALESCE(SUM(fr.h_hour), 0) AS h_hour,
+                    (
+                        COALESCE(c.ignored, FALSE)
+                        OR COALESCE(s.ignored, FALSE)
+                        OR COALESCE(ss.ignored, FALSE)
+                        OR COALESCE(t.ignored, FALSE)
+                    ) AS effective_ignored
+                FROM fer.fer_tables t
+                JOIN fer.collections c ON c.id = t.collection_id
+                LEFT JOIN fer.sections s ON s.id = t.section_id
+                LEFT JOIN fer.subsections ss ON ss.id = t.subsection_id
+                LEFT JOIN fer.fer_rows fr ON fr.table_id = t.id
+                WHERE t.id = :table_id
+                GROUP BY t.id, t.table_title, t.common_work_name, c.ignored, s.ignored, ss.ignored, t.ignored
+                """
+            ),
+            {"table_id": fer_table_id},
+        )
+    ).mappings().first()
+    if row is None:
+        raise ValueError("Таблица ФЕР не найдена")
+    if row.get("effective_ignored"):
+        raise ValueError("Таблица ФЕР помечена как игнорируемая")
+
+    work_type = (row["common_work_name"] or "").strip() or str(row["table_title"]).strip()
+    fer_unit, multiplier = extract_fer_unit(str(row["table_title"]))
+    item_unit = normalize_unit(item.unit)
+
+    item.fer_table_id = int(row["id"])
+    item.fer_row_id = None
+    item.fer_match_source = "manual"
+    item.fer_match_score = 1.0
+    item.fer_match_candidates = [
+        {
+            "table_id": int(row["id"]),
+            "row_id": None,
+            "work_type": work_type,
+            "final_score": 1.0,
+        }
+    ]
+    h_hour = float(row["h_hour"]) if row["h_hour"] is not None else None
+    item.fer_h_hour = h_hour if h_hour and h_hour > 0 else None
+    item.fer_unit = fer_unit
+    item.fer_unit_multiplier = (
+        multiplier
+        if fer_unit is not None and item_unit is not None and fer_unit == item_unit
+        else None
+    )
+
+
+async def update_item_fer(
+    db: AsyncSession,
+    project_id: str,
+    item_id: str,
+    fer_table_id: int | None,
+) -> dict[str, Any]:
+    item = await db.scalar(
+        select(KtpWbsItem)
+        .join(KtpWbsGroup, KtpWbsGroup.id == KtpWbsItem.group_id)
+        .where(KtpWbsItem.id == item_id)
+        .where(KtpWbsGroup.project_id == project_id)
+    )
+    if not item:
+        raise ValueError("Позиция КТП не найдена")
+    await _apply_manual_fer_table(db, item, fer_table_id)
+    session = await db.get(KtpEstimateSession, item.session_id)
+    if session and session.status in {"fer_pending", "fer_failed"}:
+        session.status = "fer_review"
+    await db.commit()
+    return await get_wbs(db, project_id, item.session_id)
+
+
+async def auto_match_item_fer(
+    db: AsyncSession,
+    project_id: str,
+    item_id: str,
+) -> dict[str, Any]:
+    item = await db.scalar(
+        select(KtpWbsItem)
+        .join(KtpWbsGroup, KtpWbsGroup.id == KtpWbsItem.group_id)
+        .where(KtpWbsItem.id == item_id)
+        .where(KtpWbsGroup.project_id == project_id)
+    )
+    if not item:
+        raise ValueError("Позиция КТП не найдена")
+    group = await db.get(KtpWbsGroup, item.group_id)
+    session = await db.get(KtpEstimateSession, item.session_id)
+    batch = await db.get(EstimateBatch, session.estimate_batch_id) if session else None
+    if not group or not session or not batch:
+        raise ValueError("Контекст позиции КТП не найден")
+    await match_session_items(db, session, batch.estimate_kind, [group], [item], None)
+    if session.status in {"fer_pending", "fer_failed"}:
+        session.status = "fer_review"
+    await db.commit()
+    return await get_wbs(db, project_id, item.session_id)
+
+
+async def approve_fer_matches(
+    db: AsyncSession,
+    project_id: str,
+    session_id: str,
+) -> KtpEstimateSession:
+    session = await get_session_by_id(db, project_id, session_id)
+    if session.status not in {"fer_review", "fer_pending", "fer_failed"}:
+        raise ValueError("К ГПР можно перейти после этапа назначения ФЕР")
     session.status = "gpr_pending"
+    session.error_message = None
     session.updated_at = _now()
     await db.commit()
     await db.refresh(session)

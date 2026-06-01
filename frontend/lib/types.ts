@@ -609,6 +609,10 @@ export type KtpEstimateStatus =
   | "stage1_review"
   | "stage1_failed"
   | "stage2_review"
+  | "fer_pending"
+  | "fer_processing"
+  | "fer_review"
+  | "fer_failed"
   | "gpr_pending"
   | "gpr_sequence_review"
   | "gpr_ready"
@@ -645,6 +649,14 @@ export interface KtpWbsItem {
   brigade_size?: number | null;
   labor_hours?: number | null;
   duration_days?: number | null;
+  fer_table_id?: number | null;
+  fer_row_id?: number | null;
+  fer_match_source?: string | null;
+  fer_match_score?: number | null;
+  fer_h_hour?: number | null;
+  fer_unit?: string | null;
+  fer_unit_multiplier?: number | null;
+  fer_match_label?: string | null;
 }
 
 export interface KtpWbsGroup {
