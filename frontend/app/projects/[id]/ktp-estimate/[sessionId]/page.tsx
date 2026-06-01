@@ -207,6 +207,34 @@ export default function KtpEstimateWizardPage() {
   const stage1Processing = status === "stage1_processing" || status === "stage1_pending";
   const gprProcessing = status === "gpr_processing";
 
+  const restartStage1 = useCallback(async () => {
+    if (!batchId) return;
+    setBusy(true);
+    try {
+      const started = await ktpEstimate.startSession(projectId, batchId, true);
+      trackActivity("KTP_ESTIMATE_SESSION_RESTARTED", {
+        projectId,
+        entityType: "ktp_estimate_session",
+        entityId: started.session_id,
+        metadata: { estimate_batch_id: batchId, previous_session_id: sessionId, job_id: started.job_id },
+      });
+      const suffix = started.job_id ? `?job=${started.job_id}` : "";
+      router.replace(`/projects/${projectId}/ktp-estimate/${started.session_id}${suffix}`);
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [batchId, projectId, router, sessionId]);
+
+  const openUploadStep = useCallback(() => {
+    router.push(
+      `/projects/${projectId}/upload${
+        batchId ? `?batch=${batchId}&session=${sessionId}&fromKtp=1` : ""
+      }`,
+    );
+  }, [batchId, projectId, router, sessionId]);
+
   // ── состояния загрузки ───────────────────────────────────────────────
   if (!wbs && activeJobId) {
     return (
@@ -249,8 +277,23 @@ export default function KtpEstimateWizardPage() {
   if (status === "stage1_failed" || status === "gpr_failed") {
     return (
       <Centered>
-        <div style={{ color: "var(--red)", fontSize: 13 }}>
+        <div style={{ color: "var(--red)", fontSize: 13, maxWidth: 560, lineHeight: 1.5 }}>
           ❌ {session.error_message || "Ошибка обработки"}
+        </div>
+        <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", justifyContent: "center" }}>
+          {status === "stage1_failed" && (
+            <button
+              type="button"
+              style={buttonStyle("primary", busy)}
+              disabled={busy || !batchId}
+              onClick={() => void restartStage1()}
+            >
+              <ButtonContent loading={busy}>Запустить заново</ButtonContent>
+            </button>
+          )}
+          <button type="button" style={btn()} onClick={openUploadStep}>
+            К шагу «Новая смета»
+          </button>
         </div>
       </Centered>
     );
