@@ -34,12 +34,30 @@ from app.services.fer_words_service import (
 )
 from app.services.gantt_calculations import DEFAULT_HOURS_PER_DAY, calculate_working_days
 from app.services.gantt_service import resolve_project_dates
-from app.services.upload_service import build_gantt_for_estimate_batch, start_upload_job, start_upload_job_with_mapping
+from app.services.upload_service import (
+    build_gantt_for_estimate_batch,
+    confirm_upload_job,
+    preview_upload_job,
+    start_upload_job,
+    start_upload_job_with_mapping,
+)
+from app.services.parser_factory import VALID_PARSER_PROFILES, UI_PROFILES, PROFILE_AUTO
+from app.services.preview_session import (
+    PreviewStorageUnavailable,
+    get_preview_session,
+    set_preview_status,
+    try_consume_preview_session,
+    update_preview_session,
+)
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
 
-ESTIMATE_ITEM_TYPE_WORK = "work"
-ESTIMATE_ITEM_TYPE_MECHANISM = "mechanism"
+from app.core.estimate_types import (
+    ESTIMATE_ITEM_TYPE_WORK,
+    ESTIMATE_ITEM_TYPE_MECHANISM,
+    resolve_item_type,
+)
+
 CLARIFICATION_PAYLOAD_VERSION = "v1"
 MAX_CLARIFICATION_BYTES = 50_000
 MAX_CLARIFICATION_QUESTIONS = 250
@@ -154,12 +172,7 @@ def _public_clarification_answers(value: dict | None) -> dict | None:
 
 
 def _estimate_item_type(estimate: Estimate) -> str:
-    raw_data = getattr(estimate, "raw_data", None)
-    if isinstance(raw_data, dict):
-        item_type = raw_data.get("item_type")
-        if item_type in {ESTIMATE_ITEM_TYPE_WORK, ESTIMATE_ITEM_TYPE_MECHANISM}:
-            return item_type
-    return ESTIMATE_ITEM_TYPE_WORK
+    return resolve_item_type(estimate)
 
 
 def _is_mechanism_estimate(estimate: Estimate) -> bool:
@@ -235,6 +248,7 @@ class ConfirmMappingRequest(BaseModel):
     estimate_kind: int
     complex_mode: bool = False
     clarification_answers: dict | None = None
+    parser_profile: str = "manual_mapping"
 
 
 @router.post("/estimates/upload/confirm-mapping", response_model=UploadStartResponse, status_code=202)
@@ -262,6 +276,102 @@ async def confirm_mapping(
         clarification_answers = _normalize_clarification_payload(body.clarification_answers),
         db          = db,
     )
+    return UploadStartResponse(job_id=job.id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Двухшаговый импорт по профилю: preview → confirm
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/estimates/parser-profiles")
+async def list_parser_profiles(
+    member: ProjectMember = Depends(require_action(Action.VIEW)),
+):
+    """Профили импорта для выпадашки на фронте (только готовые)."""
+    return {"profiles": UI_PROFILES}
+
+
+@router.post("/estimates/upload/preview")
+async def preview_estimate(
+    project_id:       UUID,
+    file:             UploadFile = File(...),
+    clarification_answers: str | None = Form(default=None),
+    start_date:       date       = Query(default_factory=date.today),
+    workers:          int        = Query(default=3, ge=1, le=20),
+    estimate_kind:    int        = Query(ge=1, le=9),
+    complex_mode:     bool       = Query(default=False),
+    parser_profile:   str        = Query(default=PROFILE_AUTO),
+    build_gantt:      bool       = Query(default=True),
+    current_user      = Depends(get_current_user),
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession  = Depends(get_db),
+):
+    """
+    Шаг 1: парсит файл во временное хранилище и возвращает разбивку по типам
+    (работы/материалы/механизмы/накладные/сомнительные) БЕЗ записи в БД.
+    Возвращает preview_id для подтверждения импорта.
+    """
+    if parser_profile not in VALID_PARSER_PROFILES:
+        raise HTTPException(400, f"Неизвестный профиль импорта: {parser_profile}")
+
+    try:
+        return await preview_upload_job(
+            file             = file,
+            project_id       = str(project_id),
+            user_id          = current_user.id,
+            parser_profile   = parser_profile,
+            start_date       = start_date,
+            workers          = workers,
+            estimate_kind    = estimate_kind,
+            complex_mode     = complex_mode,
+            build_gantt      = build_gantt,
+            clarification_answers = _parse_clarification_answers(clarification_answers),
+        )
+    except PreviewStorageUnavailable:
+        raise HTTPException(503, "Временное хранилище импорта недоступно. Повторите позже.")
+
+
+class ConfirmImportRequest(BaseModel):
+    preview_id:  str
+    build_gantt: bool | None = None
+
+
+@router.post("/estimates/upload/confirm", response_model=UploadStartResponse, status_code=202)
+async def confirm_import(
+    project_id:   UUID,
+    body:         ConfirmImportRequest,
+    current_user  = Depends(get_current_user),
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Шаг 2: подтверждает импорт по preview_id. Профиль берётся из preview-сессии.
+    Только здесь происходит замена старой сметы (после успешного парсинга).
+    """
+    try:
+        preview = await get_preview_session(body.preview_id)
+    except PreviewStorageUnavailable:
+        raise HTTPException(503, "Временное хранилище импорта недоступно. Повторите позже.")
+
+    if not preview:
+        raise HTTPException(410, "Превью истекло. Загрузите файл заново.")
+    if preview.get("project_id") != str(project_id) or preview.get("user_id") != current_user.id:
+        raise HTTPException(403, "Превью принадлежит другому проекту или пользователю.")
+
+    outcome = await try_consume_preview_session(body.preview_id)
+    if outcome == "missing":
+        raise HTTPException(410, "Превью истекло. Загрузите файл заново.")
+    if outcome == "already_consumed":
+        raise HTTPException(409, "Этот импорт уже подтверждён.")
+
+    try:
+        job = await confirm_upload_job(preview, body.build_gantt, db)
+    except Exception:
+        # Откатываем сессию в ready, чтобы пользователь мог повторить попытку.
+        await set_preview_status(body.preview_id, "ready")
+        raise
+
+    await update_preview_session(body.preview_id, job_id=job.id)
     return UploadStartResponse(job_id=job.id)
 
 

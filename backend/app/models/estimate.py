@@ -59,6 +59,7 @@ class Estimate(Base, SoftDeleteMixin):
 
     @property
     def item_type(self) -> str:
+        from app.core.estimate_types import normalize_item_type
+
         raw_data = self.raw_data if isinstance(self.raw_data, dict) else {}
-        item_type = raw_data.get("item_type")
-        return item_type if item_type in {"work", "mechanism"} else "work"
+        return normalize_item_type(raw_data.get("item_type"))

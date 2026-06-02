@@ -36,6 +36,7 @@ from sqlalchemy import bindparam, select, delete, func, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.date_utils             import working_days_between, task_end_date
+from app.core.estimate_types         import resolve_item_type
 from app.models                      import Job, GanttTask, Estimate, EstimateBatch, TaskDependency
 from app.services.excel_parser       import (
     ExcelEstimateParser,
@@ -55,12 +56,7 @@ TMP_TTL_SECONDS = 3600
 
 
 def _estimate_item_type(estimate: Estimate) -> str:
-    raw_data = getattr(estimate, "raw_data", None)
-    if isinstance(raw_data, dict):
-        item_type = raw_data.get("item_type")
-        if item_type in {"work", "mechanism"}:
-            return item_type
-    return "work"
+    return resolve_item_type(estimate)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -163,6 +159,204 @@ async def start_upload_job_with_mapping(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PREVIEW (parse to tmp, no DB writes) + CONFIRM
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ITEM_TYPE_ORDER = ("work", "material", "mechanism", "overhead", "unknown")
+_LOW_CONFIDENCE = 0.7
+
+
+def _row_preview_dict(row) -> dict:
+    raw = getattr(row, "raw_data", None) or {}
+    return {
+        "section":     row.section,
+        "item_type":   resolve_item_type(row),
+        "name":        row.work_name,
+        "spec":        raw.get("spec"),
+        "unit":        row.unit,
+        "quantity":    float(row.quantity) if row.quantity is not None else None,
+        "total_price": float(row.total_price) if row.total_price is not None else None,
+        "confidence":  raw.get("classification_confidence"),
+        "reason":      raw.get("classification_reason"),
+    }
+
+
+def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
+    breakdown = {t: {"count": 0, "total": 0.0} for t in _ITEM_TYPE_ORDER}
+    unknown_rows: list[dict] = []
+    low_confidence_rows: list[dict] = []
+
+    for row in rows:
+        item_type = resolve_item_type(row)
+        bucket = breakdown.setdefault(item_type, {"count": 0, "total": 0.0})
+        bucket["count"] += 1
+        bucket["total"] += float(row.total_price or 0)
+
+        raw = getattr(row, "raw_data", None) or {}
+        if item_type == "unknown" and len(unknown_rows) < 20:
+            unknown_rows.append(_row_preview_dict(row))
+        conf = raw.get("classification_confidence")
+        if conf is not None and conf < _LOW_CONFIDENCE and len(low_confidence_rows) < 20:
+            low_confidence_rows.append(_row_preview_dict(row))
+
+    computed_total = round(sum(float(r.total_price or 0) for r in rows), 2)
+
+    declared_total = _declared_total_from_meta(meta) or _declared_total_price(subtotal_rows)
+    difference = (
+        round(declared_total - computed_total, 2) if declared_total is not None else None
+    )
+    difference_reason = None
+    if difference is not None and abs(difference) > 1:
+        difference_reason = (
+            "Сумма строк отличается от итоговой суммы сметы. Возможны строки в сводной "
+            "без детального листа или расхождение в исходном файле — проверьте перед импортом."
+        )
+
+    return {
+        "type_breakdown": breakdown,
+        "computed_total_all_rows": computed_total,
+        "declared_total": declared_total,
+        "difference": difference,
+        "difference_reason": difference_reason,
+        "unknown_count": breakdown.get("unknown", {}).get("count", 0),
+        "unknown_rows": unknown_rows,
+        "low_confidence_rows": low_confidence_rows,
+        "sample_rows": [_row_preview_dict(r) for r in rows[:20]],
+        "ignored_subtotal_rows_count": len(subtotal_rows),
+        "declared_totals": meta.get("declared_totals"),
+    }
+
+
+def _declared_total_from_meta(meta: dict) -> float | None:
+    """Pick the grand total from a parser's declared_totals (PDF), if present."""
+    totals = meta.get("declared_totals")
+    if not isinstance(totals, list):
+        return None
+    for kind in ("grand_total", "section_total"):
+        values = [t.get("total") for t in totals if t.get("kind") == kind and t.get("total") is not None]
+        if values:
+            return float(sum(values)) if kind == "section_total" else float(values[-1])
+    return None
+
+
+async def preview_upload_job(
+    file:             UploadFile,
+    project_id:       str,
+    user_id:          str,
+    parser_profile:   str,
+    start_date:       date,
+    workers:          int,
+    estimate_kind:    int,
+    complex_mode:     bool,
+    build_gantt:      bool,
+    clarification_answers: dict | None,
+) -> dict:
+    """Parse the upload to a tmp file and return a typed breakdown WITHOUT any DB
+    writes. Stores a Redis preview session and returns its preview_id."""
+    from app.services.parser_factory import (
+        parse_estimate, ParserProfileNotImplemented, FORMAT_SCAN, FORMAT_UNKNOWN,
+    )
+    from app.services.preview_session import save_preview_session
+
+    allowed = (".xlsx", ".xls", ".pdf")
+    if not file.filename.lower().endswith(allowed):
+        raise HTTPException(400, f"Поддерживаются: {', '.join(allowed)}")
+
+    suffix = _get_suffix(file.filename)
+    tmp_path = _save_tmp(await file.read(), suffix)
+
+    try:
+        rows, meta = parse_estimate(tmp_path, parser_profile=parser_profile)
+    except NeedsMappingError as e:
+        # Legacy column-mapping flow (Excel auto, low confidence) — keep as-is.
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "needs_mapping": True,
+                "filename":      e.filename,
+                "sheet":         e.sheet,
+                "preview_rows":  e.preview_rows,
+                "col_count":     e.col_count,
+                "tmp_path":      tmp_path,
+            },
+        )
+    except ParserProfileNotImplemented as e:
+        _cleanup_tmp(tmp_path)
+        raise HTTPException(400, {"detail": "Parser profile is not implemented yet",
+                                  "parser_profile": e.parser_profile})
+    except ValueError as e:
+        _cleanup_tmp(tmp_path)
+        raise HTTPException(400, str(e))
+
+    if meta.get("format") in (FORMAT_SCAN, FORMAT_UNKNOWN) or not rows:
+        _cleanup_tmp(tmp_path)
+        raise HTTPException(422, "Не удалось распознать строки сметы в выбранном формате.")
+
+    rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
+    preview = _compute_preview(rows, subtotal_rows, meta)
+
+    preview_id = await save_preview_session({
+        "project_id":     str(project_id),
+        "user_id":        str(user_id),
+        "tmp_path":       tmp_path,
+        "filename":       file.filename,
+        "parser_profile": meta.get("parser_profile", parser_profile),
+        "build_gantt":    bool(build_gantt),
+        "estimate_kind":  estimate_kind,
+        "start_date":     str(start_date),
+        "workers":        workers,
+        "complex_mode":   complex_mode,
+        "clarification_answers": clarification_answers,
+        "type_breakdown": preview["type_breakdown"],
+        "strategy":       meta.get("strategy"),
+        "detected_format": meta.get("format"),
+        "confidence":     meta.get("confidence"),
+    })
+
+    return {
+        "preview_id":     preview_id,
+        "filename":       file.filename,
+        "parser_profile": meta.get("parser_profile", parser_profile),
+        "detected_format": meta.get("format"),
+        "strategy":       meta.get("strategy"),
+        "confidence":     meta.get("confidence"),
+        **preview,
+    }
+
+
+async def confirm_upload_job(preview: dict, build_gantt: bool | None, db: AsyncSession) -> Job:
+    """Start the real import job from a (already consumed) preview session."""
+    tmp_path = preview.get("tmp_path")
+    if not tmp_path or not os.path.exists(tmp_path):
+        raise HTTPException(404, "Временный файл не найден или устарел. Загрузите файл заново.")
+
+    effective_gantt = preview.get("build_gantt", True) if build_gantt is None else bool(build_gantt)
+
+    return await _create_and_run_job(
+        tmp_path    = tmp_path,
+        filename    = preview.get("filename") or os.path.basename(tmp_path),
+        project_id  = preview["project_id"],
+        user_id     = preview["user_id"],
+        start_date  = date.fromisoformat(preview["start_date"]),
+        workers     = int(preview["workers"]),
+        estimate_kind = int(preview["estimate_kind"]),
+        complex_mode  = bool(preview.get("complex_mode")),
+        clarification_answers = preview.get("clarification_answers"),
+        db          = db,
+        parser_profile = preview.get("parser_profile", "auto"),
+        build_gantt = effective_gantt,
+    )
+
+
+def _cleanup_tmp(tmp_path: str | None) -> None:
+    if tmp_path and os.path.exists(tmp_path):
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ОБЩИЙ СОЗДАТЕЛЬ JOB
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -179,6 +373,8 @@ async def _create_and_run_job(
     db:          AsyncSession,
     col_mapping: dict[int, str] | None = None,
     sheet:       str | None = None,
+    parser_profile: str = "auto",
+    build_gantt: bool = True,
 ) -> Job:
     job = Job(
         id         = str(uuid4()),
@@ -196,6 +392,8 @@ async def _create_and_run_job(
             "clarification_answers": clarification_answers,
             "col_mapping": col_mapping,   # None = авто
             "sheet":       sheet,
+            "parser_profile": parser_profile,
+            "build_gantt": build_gantt,
         },
     )
     db.add(job)
@@ -231,19 +429,17 @@ async def _process_upload(job_id: str) -> None:
             clarification_answers = job.input.get("clarification_answers")
             col_mapping = job.input.get("col_mapping")   # None → авто
             sheet       = job.input.get("sheet")
+            parser_profile = job.input.get("parser_profile", "auto")
+            build_gantt = bool(job.input.get("build_gantt", True))
 
-            # ── 1. В обычном режиме заменяем текущую смету объекта ───────────
-            if not complex_mode:
-                await _soft_replace_project_estimates(job.project_id, db)
-
-            # ── 2. Парсим файл ────────────────────────────────────────────────
+            # ── 1. Парсим файл (ДО любого удаления старой сметы) ──────────────
             if col_mapping is not None:
                 # Ручной маппинг: ключи из JSON пришли как строки → конвертим
                 int_mapping = {int(k): v for k, v in col_mapping.items()}
                 rows, meta = _parser.parse_mapped(tmp_path, int_mapping, sheet=sheet)
             else:
                 from app.services.parser_factory import parse_estimate, FORMAT_SCAN, FORMAT_UNKNOWN
-                rows, meta = parse_estimate(tmp_path)
+                rows, meta = parse_estimate(tmp_path, parser_profile=parser_profile)
                 if meta.get("format") == FORMAT_SCAN:
                     raise ValueError(
                         "PDF содержит только изображения (скан). "
@@ -267,6 +463,13 @@ async def _process_upload(job_id: str) -> None:
                     "но не считаются работами."
                 )
 
+            # ── 2. Парсинг успешен — теперь безопасно заменить старую смету ───
+            #     (перенос soft-replace ПОСЛЕ парсинга: ошибка парсера больше не
+            #      уничтожает прежнюю смету проекта).
+            if not complex_mode:
+                await _soft_replace_project_estimates(job.project_id, db)
+
+            preview_stats = _compute_preview(rows, subtotal_rows, meta)
             batch = EstimateBatch(
                 id=str(uuid4()),
                 project_id=job.project_id,
@@ -277,6 +480,20 @@ async def _process_upload(job_id: str) -> None:
                 hours_per_day=DEFAULT_HOURS_PER_DAY,
                 source_filename=job.input.get("filename"),
                 clarification_answers=clarification_answers,
+                parser_profile=parser_profile,
+                import_meta={
+                    "parser_profile":   parser_profile,
+                    "detected_format":  meta.get("format"),
+                    "strategy":         meta.get("strategy"),
+                    "confidence":       meta.get("confidence"),
+                    "declared_totals":  meta.get("declared_totals"),
+                    "type_breakdown":   preview_stats["type_breakdown"],
+                    "computed_total_all_rows": preview_stats["computed_total_all_rows"],
+                    "declared_total":   preview_stats["declared_total"],
+                    "difference":       preview_stats["difference"],
+                    "difference_reason": preview_stats["difference_reason"],
+                    "unknown_count":    preview_stats["unknown_count"],
+                },
             )
             db.add(batch)
             await db.flush()
@@ -308,12 +525,23 @@ async def _process_upload(job_id: str) -> None:
             total_price = sum(
                 float(e.total_price) for e in estimates if e.total_price
             )
-            declared_total_price = _declared_total_price(subtotal_rows)
+            declared_total_price = _declared_total_from_meta(meta) or _declared_total_price(subtotal_rows)
             subtotal_difference = (
                 round(total_price - declared_total_price, 2)
                 if declared_total_price is not None
                 else None
             )
+
+            # ── unknown-строки: импорт не блокируем, в Гант пойдут только work ─
+            unknown_count = preview_stats["unknown_count"]
+            warnings: list[str] = []
+            if unknown_count:
+                warnings.append(
+                    f"Не классифицировано строк: {unknown_count}. "
+                    "Они сохранены в смете, но не попадут в Гант — проверьте их тип."
+                )
+            if preview_stats["difference_reason"]:
+                warnings.append(preview_stats["difference_reason"])
 
             job.status = "done"
             job.result = {
@@ -323,13 +551,18 @@ async def _process_upload(job_id: str) -> None:
                 "estimate_batch_name": batch.name,
                 "estimate_kind": estimate_kind,
                 "complex_mode": complex_mode,
+                "parser_profile": parser_profile,
+                "build_gantt": build_gantt,
                 "strategy":          meta.get("strategy"),
                 "confidence":        meta.get("confidence"),
                 "total_price":       total_price,
+                "type_breakdown":    preview_stats["type_breakdown"],
+                "unknown_count":     unknown_count,
                 "ignored_subtotal_rows_count": len(subtotal_rows),
                 "declared_total_price": declared_total_price,
                 "subtotal_difference": subtotal_difference,
                 "subtotal_rows": subtotal_rows[:50],
+                "warnings": warnings,
             }
 
         except Exception as exc:

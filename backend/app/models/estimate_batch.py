@@ -31,6 +31,8 @@ class EstimateBatch(Base, SoftDeleteMixin):
     hours_per_day: Mapped[float] = mapped_column(Numeric(6, 2), nullable=False, server_default=sa_text("8"))
     source_filename: Mapped[str | None] = mapped_column(Text)
     clarification_answers: Mapped[dict | None] = mapped_column(JSONB)
+    parser_profile: Mapped[str | None] = mapped_column(String(64))
+    import_meta: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ,
         server_default=sa_text("NOW()"),

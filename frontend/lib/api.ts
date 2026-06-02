@@ -18,6 +18,7 @@ import type {
   EstimateBatch,
   EstimateRow,
   EstimateSummary,
+  PreviewResult,
   KtpCard,
   KtpGenerateResponse,
   KtpGroup,
@@ -328,6 +329,60 @@ export const estimates = {
       return data;
     });
   },
+  parserProfiles: (pid: string) =>
+    request<{ profiles: { value: string; label: string }[] }>(
+      `/projects/${pid}/estimates/parser-profiles`
+    ),
+  preview: (
+    pid: string,
+    file: File,
+    startDate: string,
+    workers: number,
+    estimateKind: number,
+    complexMode: boolean,
+    parserProfile: string,
+    buildGantt: boolean,
+    clarificationAnswers?: Record<string, unknown>,
+  ): Promise<PreviewResult> => {
+    const form = new FormData();
+    form.append("file", file);
+    if (clarificationAnswers) {
+      form.append("clarification_answers", JSON.stringify(clarificationAnswers));
+    }
+    const qs =
+      `start_date=${startDate}&workers=${workers}` +
+      `&estimate_kind=${encodeURIComponent(estimateKind)}` +
+      `&complex_mode=${complexMode}` +
+      `&parser_profile=${encodeURIComponent(parserProfile)}` +
+      `&build_gantt=${buildGantt}`;
+    return fetch(`${BASE}/projects/${pid}/estimates/upload/preview?${qs}`, {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    }).then(async (r) => {
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 401) {
+        const ok = await tryRefresh();
+        if (ok) {
+          return estimates.preview(pid, file, startDate, workers, estimateKind, complexMode, parserProfile, buildGantt, clarificationAnswers);
+        }
+      }
+      if (!r.ok) {
+        if (r.status === 422 && data?.detail?.needs_mapping) {
+          throw Object.assign(new Error("Требуется ручное сопоставление колонок"), {
+            mappingPayload: data.detail,
+          });
+        }
+        throw new Error(data?.detail?.detail ?? data?.detail?.error ?? data?.detail ?? `HTTP ${r.status}`);
+      }
+      return data as PreviewResult;
+    });
+  },
+  confirmImport: (pid: string, previewId: string, buildGantt?: boolean) =>
+    request<{ job_id: string }>(`/projects/${pid}/estimates/upload/confirm`, {
+      method: "POST",
+      body: JSON.stringify({ preview_id: previewId, build_gantt: buildGantt ?? null }),
+    }),
 };
 
 export const jobs = {

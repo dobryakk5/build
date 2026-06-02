@@ -20,9 +20,13 @@ from app.services.openrouter_embeddings import create_chat_completion, parse_jso
 
 logger = logging.getLogger(__name__)
 
+from app.core.estimate_types import (
+    ESTIMATE_ITEM_TYPE_WORK,
+    ESTIMATE_ITEM_TYPE_MECHANISM,
+    resolve_item_type,
+)
+
 PROMPT_VERSION = "v1"
-ESTIMATE_ITEM_TYPE_WORK = "work"
-ESTIMATE_ITEM_TYPE_MECHANISM = "mechanism"
 
 
 def _slugify(text: str) -> str:
@@ -48,16 +52,7 @@ def _now() -> datetime:
 
 
 def _estimate_item_type(estimate: Estimate) -> str:
-    item_type = getattr(estimate, "item_type", None)
-    if item_type in {ESTIMATE_ITEM_TYPE_WORK, ESTIMATE_ITEM_TYPE_MECHANISM}:
-        return item_type
-
-    raw_data = getattr(estimate, "raw_data", None)
-    if isinstance(raw_data, dict):
-        item_type = raw_data.get("item_type")
-        if item_type in {ESTIMATE_ITEM_TYPE_WORK, ESTIMATE_ITEM_TYPE_MECHANISM}:
-            return item_type
-    return ESTIMATE_ITEM_TYPE_WORK
+    return resolve_item_type(estimate)
 
 
 async def _assert_batch_belongs_to_project(

@@ -9,7 +9,22 @@ import { fmtMoney } from "@/lib/dateUtils";
 import { CLARIFICATION_BY_KIND } from "@/lib/estimateClarificationQuestions";
 import { useJobPoller } from "@/lib/useJobPoller";
 import { trackActivity } from "@/lib/activity";
-import type { EstimateBatch } from "@/lib/types";
+import type { EstimateBatch, ParserProfile, PreviewResult, EstimateItemType } from "@/lib/types";
+
+const PROFILE_OPTIONS: { value: ParserProfile; label: string }[] = [
+  { value: "auto", label: "Автоопределение" },
+  { value: "pdf_materials_labor", label: "PDF: Материалы / Трудозатраты" },
+  { value: "excel_typed_journal", label: "Excel: колонка «Тип»" },
+  { value: "manual_mapping", label: "Ручное сопоставление колонок" },
+];
+
+const ITEM_TYPE_LABELS: Record<EstimateItemType, string> = {
+  work: "Работы",
+  material: "Материалы",
+  mechanism: "Механизмы",
+  overhead: "Накладные",
+  unknown: "Сомнительные",
+};
 
 const KIND_OPTIONS = [
   { id: 1, title: "Земляные грунтовые работы" },
@@ -84,6 +99,10 @@ export default function UploadPage() {
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string[]>>({});
   const [clarificationsConfirmed, setClarificationsConfirmed] = useState(false);
   const [complexMode, setComplexMode] = useState(false);
+  const [parserProfile, setParserProfile] = useState<ParserProfile>("auto");
+  const [buildGantt, setBuildGantt] = useState(true);
+  const [preview, setPreview] = useState<PreviewResult | null>(null);
+  const [confirming, setConfirming] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
   const [mappingPayload, setMappingPayload] = useState<MappingPayload | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -203,6 +222,7 @@ export default function UploadPage() {
     if (nextFile && (nextFile.name.endsWith(".xlsx") || nextFile.name.endsWith(".xls") || nextFile.name.endsWith(".pdf"))) {
       setFile(nextFile);
       setJobId(null);
+      setPreview(null);
       trackedJobTerminalStatusRef.current = null;
       autoStartedKtpBatchRef.current = null;
       trackActivity("ESTIMATE_FILE_SELECTED", {
@@ -240,13 +260,16 @@ export default function UploadPage() {
       },
     });
     try {
-      const res = await estimates.upload(id, file, startDate, workers, estimateKind, complexMode, buildClarificationPayload());
-      setJobId(res.job_id);
-      trackActivity("ESTIMATE_UPLOAD_JOB_CREATED", {
+      const res = await estimates.preview(
+        id, file, startDate, workers, estimateKind, complexMode,
+        parserProfile, buildGantt, buildClarificationPayload(),
+      );
+      setPreview(res);
+      trackActivity("ESTIMATE_PREVIEW_READY", {
         projectId: id,
-        entityType: "job",
-        entityId: res.job_id,
-        metadata: { job_id: res.job_id },
+        entityType: "project",
+        entityId: id,
+        metadata: { parser_profile: res.parser_profile, preview_id: res.preview_id },
       });
     } catch (e: any) {
       if (e?.mappingPayload) {
@@ -267,6 +290,33 @@ export default function UploadPage() {
       alert(e.message);
     } finally {
       setUploading(false);
+    }
+  }
+
+  async function handleConfirmImport() {
+    if (!preview) return;
+    setConfirming(true);
+    try {
+      const res = await estimates.confirmImport(id, preview.preview_id, buildGantt);
+      setPreview(null);
+      setJobId(res.job_id);
+      trackActivity("ESTIMATE_UPLOAD_JOB_CREATED", {
+        projectId: id,
+        entityType: "job",
+        entityId: res.job_id,
+        metadata: { job_id: res.job_id, parser_profile: parserProfile },
+      });
+    } catch (e: any) {
+      // 410 — сессия истекла, нужно загрузить заново
+      const msg = String(e?.message || "");
+      if (msg.includes("410") || /истекл/i.test(msg)) {
+        setPreview(null);
+        alert("Превью истекло. Загрузите файл заново.");
+      } else {
+        alert(e.message);
+      }
+    } finally {
+      setConfirming(false);
     }
   }
 
@@ -656,7 +706,30 @@ export default function UploadPage() {
         ))}
       </div>
 
-      {!status && clarificationsConfirmed && !mappingPayload && (
+      {!status && clarificationsConfirmed && !mappingPayload && !preview && (
+        <div style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
+          <div>
+            <label style={{ fontSize: 11, color: "var(--muted)", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: ".06em" }}>
+              Тип сметы (профиль импорта)
+            </label>
+            <select
+              value={parserProfile}
+              onChange={(e) => { setParserProfile(e.target.value as ParserProfile); setPreview(null); }}
+              style={{ width: "100%", padding: "8px 12px", border: "1px solid var(--border2)", borderRadius: 5, fontSize: 13, outline: "none", background: "var(--surface)" }}
+            >
+              {PROFILE_OPTIONS.map((p) => (
+                <option key={p.value} value={p.value}>{p.label}</option>
+              ))}
+            </select>
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: "pointer" }}>
+            <input type="checkbox" checked={buildGantt} onChange={(e) => setBuildGantt(e.target.checked)} />
+            Построить Гант после импорта
+          </label>
+        </div>
+      )}
+
+      {!status && clarificationsConfirmed && !mappingPayload && !preview && (
         <div
           onClick={() => {
             if (canUpload) {
@@ -708,7 +781,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {file && !status && canUpload && !mappingPayload && (
+      {file && !status && canUpload && !mappingPayload && !preview && (
         <button
           onClick={handleUpload}
           disabled={uploading || polling}
@@ -726,8 +799,18 @@ export default function UploadPage() {
             opacity: uploading || polling ? 0.7 : 1,
           }}
         >
-          {uploading ? "Отправляем..." : complexMode ? "→ Добавить смету в комплекс" : "→ Загрузить смету"}
+          {uploading ? "Распознаём..." : "→ Показать превью"}
         </button>
+      )}
+
+      {preview && !status && !mappingPayload && (
+        <PreviewPanel
+          preview={preview}
+          confirming={confirming}
+          complexMode={complexMode}
+          onConfirm={handleConfirmImport}
+          onCancel={() => { setPreview(null); }}
+        />
       )}
 
       {mappingPayload && estimateKind && !status && (
@@ -834,6 +917,129 @@ export default function UploadPage() {
             <span style={{ color: "var(--muted)", fontSize: 11 }}>{desc}</span>
           </div>
         ))}
+      </div>
+    </div>
+  );
+}
+
+const ITEM_TYPE_COLORS: Record<EstimateItemType, string> = {
+  work: "#2563eb",
+  material: "#16a34a",
+  mechanism: "#9333ea",
+  overhead: "#d97706",
+  unknown: "#dc2626",
+};
+
+function PreviewPanel({
+  preview,
+  confirming,
+  complexMode,
+  onConfirm,
+  onCancel,
+}: {
+  preview: PreviewResult;
+  confirming: boolean;
+  complexMode: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const order: EstimateItemType[] = ["work", "material", "mechanism", "overhead", "unknown"];
+  const hasDiff = preview.difference != null && Math.abs(preview.difference) > 1;
+
+  return (
+    <div style={{ marginTop: 18, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
+        Проверьте распознавание сметы
+        <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400, marginLeft: 8 }}>
+          профиль: {preview.parser_profile}{preview.strategy ? ` · ${preview.strategy}` : ""}
+        </span>
+      </div>
+
+      {/* Разбивка по типам */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8, marginBottom: 14 }}>
+        {order.map((t) => {
+          const b = preview.type_breakdown?.[t] ?? { count: 0, total: 0 };
+          return (
+            <div key={t} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "8px 10px" }}>
+              <div style={{ fontSize: 11, color: ITEM_TYPE_COLORS[t], fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em" }}>
+                {ITEM_TYPE_LABELS[t]}
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 600, fontFamily: "var(--mono)" }}>{b.count}</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--mono)" }}>{fmtMoney(b.total)} ₽</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Сверка сумм */}
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
+        Сумма строк: <b style={{ color: "var(--text)", fontFamily: "var(--mono)" }}>{fmtMoney(preview.computed_total_all_rows)} ₽</b>
+        {preview.declared_total != null && (
+          <> · Итог в смете: <b style={{ color: "var(--text)", fontFamily: "var(--mono)" }}>{fmtMoney(preview.declared_total)} ₽</b></>
+        )}
+      </div>
+      {hasDiff && preview.difference_reason && (
+        <div style={{ fontSize: 12, background: "rgba(245,158,11,.1)", color: "#92400e", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
+          ⚠ Расхождение {fmtMoney(preview.difference ?? 0)} ₽. {preview.difference_reason}
+        </div>
+      )}
+      {preview.unknown_count > 0 && (
+        <div style={{ fontSize: 12, background: "rgba(220,38,38,.08)", color: "#b91c1c", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
+          Сомнительных строк: {preview.unknown_count}. Они сохранятся в смете, но не попадут в Гант — проверьте их тип после импорта.
+        </div>
+      )}
+
+      <PreviewRowsTable title="Первые строки" rows={preview.sample_rows} />
+      {preview.unknown_rows.length > 0 && <PreviewRowsTable title="Сомнительные" rows={preview.unknown_rows} />}
+      {preview.low_confidence_rows.length > 0 && <PreviewRowsTable title="Низкая уверенность" rows={preview.low_confidence_rows} />}
+
+      <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
+        <button
+          onClick={onConfirm}
+          disabled={confirming}
+          style={{ flex: 1, padding: "11px", background: "var(--blue-dark)", color: "#fff", border: "none", borderRadius: 6, fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: confirming ? 0.7 : 1 }}
+        >
+          {confirming ? "Импортируем..." : complexMode ? "→ Добавить смету в комплекс" : "→ Импортировать смету"}
+        </button>
+        <button
+          onClick={onCancel}
+          disabled={confirming}
+          style={{ padding: "11px 16px", background: "var(--surface)", color: "var(--muted)", border: "1px solid var(--border2)", borderRadius: 6, fontSize: 14, cursor: "pointer" }}
+        >
+          Отмена
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PreviewRowsTable({ title, rows }: { title: string; rows: PreviewResult["sample_rows"] }) {
+  if (!rows.length) return null;
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>{title}</div>
+      <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: "rgba(148,163,184,.08)" }}>
+              {["Тип", "Раздел", "Наименование", "Ед.", "Кол-во", "Сумма"].map((h) => (
+                <th key={h} style={{ textAlign: "left", padding: "6px 8px", fontWeight: 600, color: "var(--muted)" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
+                <td style={{ padding: "6px 8px", color: ITEM_TYPE_COLORS[r.item_type], fontWeight: 600 }}>{ITEM_TYPE_LABELS[r.item_type]}</td>
+                <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.section ?? "—"}</td>
+                <td style={{ padding: "6px 8px" }}>{r.name}</td>
+                <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.unit ?? "—"}</td>
+                <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.quantity ?? "—"}</td>
+                <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.total_price != null ? fmtMoney(r.total_price) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );

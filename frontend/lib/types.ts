@@ -58,6 +58,45 @@ export interface EstimateBatch {
   created_at: string;
 }
 
+export type ParserProfile =
+  | "auto"
+  | "pdf_materials_labor"
+  | "excel_typed_journal"
+  | "manual_mapping";
+
+export type EstimateItemType = "work" | "material" | "mechanism" | "overhead" | "unknown";
+
+export interface PreviewRow {
+  section: string | null;
+  item_type: EstimateItemType;
+  name: string;
+  spec?: string | null;
+  unit?: string | null;
+  quantity?: number | null;
+  total_price?: number | null;
+  confidence?: number | null;
+  reason?: string | null;
+}
+
+export interface PreviewResult {
+  preview_id: string;
+  filename: string;
+  parser_profile: string;
+  detected_format?: string | null;
+  strategy?: string | null;
+  confidence?: number | null;
+  type_breakdown: Record<EstimateItemType, { count: number; total: number }>;
+  computed_total_all_rows: number;
+  declared_total?: number | null;
+  difference?: number | null;
+  difference_reason?: string | null;
+  unknown_count: number;
+  unknown_rows: PreviewRow[];
+  low_confidence_rows: PreviewRow[];
+  sample_rows: PreviewRow[];
+  ignored_subtotal_rows_count: number;
+}
+
 export interface EstimateMaterial {
   name: string;
   unit?: string | null;
