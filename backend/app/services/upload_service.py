@@ -166,9 +166,14 @@ _ITEM_TYPE_ORDER = ("work", "material", "mechanism", "overhead", "unknown")
 _LOW_CONFIDENCE = 0.7
 
 
+MAX_PREVIEW_GROUP_ROWS = 2000
+_NO_SECTION = "Без раздела"
+
+
 def _row_preview_dict(row) -> dict:
     raw = getattr(row, "raw_data", None) or {}
     return {
+        "row_order":   getattr(row, "row_order", 0),
         "section":     row.section,
         "item_type":   resolve_item_type(row),
         "name":        row.work_name,
@@ -178,6 +183,80 @@ def _row_preview_dict(row) -> dict:
         "total_price": float(row.total_price) if row.total_price is not None else None,
         "confidence":  raw.get("classification_confidence"),
         "reason":      raw.get("classification_reason"),
+    }
+
+
+def _material_dict(material: dict) -> dict:
+    """A nested ParsedRow.materials entry (Excel «работа+материалы» formats)."""
+    return {
+        "row_order":   None,
+        "section":     None,
+        "item_type":   "material",
+        "name":        material.get("name") or material.get("work_name") or "",
+        "spec":        material.get("spec"),
+        "unit":        material.get("unit"),
+        "quantity":    material.get("quantity") or material.get("qty"),
+        "total_price": material.get("total_price") or material.get("total"),
+        "confidence":  None,
+        "reason":      "nested_material",
+    }
+
+
+_GROUP_BUCKETS = {
+    "work": "works",
+    "material": "materials",
+    "mechanism": "mechanisms",
+    "overhead": "overhead",
+    "unknown": "unknown",
+}
+
+
+def _build_preview_groups(rows: list) -> dict:
+    """Group rows by section → {works, materials, mechanisms, overhead, unknown}.
+
+    Totals are computed over ALL rows; the row lists are capped at
+    MAX_PREVIEW_GROUP_ROWS (transient payload, never persisted). Materials with no
+    per-work link sit at the group level; works that DO carry ParsedRow.materials
+    expose them nested under the work.
+    """
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    no_section_count = 0
+    rows_emitted = 0
+    truncated = False
+
+    for row in rows:
+        section = row.section or _NO_SECTION
+        if not row.section:
+            no_section_count += 1
+        if section not in groups:
+            groups[section] = {
+                "section": section,
+                "totals": {t: {"count": 0, "total": 0.0} for t in _ITEM_TYPE_ORDER},
+                "works": [], "materials": [], "mechanisms": [], "overhead": [], "unknown": [],
+            }
+            order.append(section)
+
+        g = groups[section]
+        item_type = resolve_item_type(row)
+        bucket_totals = g["totals"].setdefault(item_type, {"count": 0, "total": 0.0})
+        bucket_totals["count"] += 1
+        bucket_totals["total"] = round(bucket_totals["total"] + float(row.total_price or 0), 2)
+
+        if rows_emitted >= MAX_PREVIEW_GROUP_ROWS:
+            truncated = True
+            continue
+
+        entry = _row_preview_dict(row)
+        if item_type == "work":
+            entry["materials"] = [_material_dict(m) for m in (getattr(row, "materials", None) or [])]
+        g[_GROUP_BUCKETS.get(item_type, "unknown")].append(entry)
+        rows_emitted += 1
+
+    return {
+        "groups": [groups[s] for s in order],
+        "truncated": truncated,
+        "no_section_count": no_section_count,
     }
 
 
@@ -294,6 +373,13 @@ async def preview_upload_job(
 
     rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
     preview = _compute_preview(rows, subtotal_rows, meta)
+    grouped = _build_preview_groups(rows)
+
+    warnings: list[str] = []
+    if preview["difference_reason"]:
+        warnings.append(preview["difference_reason"])
+    if grouped["no_section_count"]:
+        warnings.append(f"Есть строки без раздела: {grouped['no_section_count']}.")
 
     preview_id = await save_preview_session({
         "project_id":     str(project_id),
@@ -320,6 +406,10 @@ async def preview_upload_job(
         "detected_format": meta.get("format"),
         "strategy":       meta.get("strategy"),
         "confidence":     meta.get("confidence"),
+        "groups":         grouped["groups"],
+        "truncated":      grouped["truncated"],
+        "no_section_count": grouped["no_section_count"],
+        "warnings":       warnings,
         **preview,
     }
 
@@ -534,12 +624,15 @@ async def _process_upload(job_id: str) -> None:
 
             # ── unknown-строки: импорт не блокируем, в Гант пойдут только work ─
             unknown_count = preview_stats["unknown_count"]
+            no_section_count = sum(1 for r in rows if not r.section)
             warnings: list[str] = []
             if unknown_count:
                 warnings.append(
                     f"Не классифицировано строк: {unknown_count}. "
                     "Они сохранены в смете, но не попадут в Гант — проверьте их тип."
                 )
+            if no_section_count:
+                warnings.append(f"Есть строки без раздела: {no_section_count}.")
             if preview_stats["difference_reason"]:
                 warnings.append(preview_stats["difference_reason"])
 

@@ -21,6 +21,52 @@ def _subsection_label(subsection: dict[str, Any]) -> str:
     return subsection["title"]
 
 
+def _build_fer_search_item(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "table_id": row["table_id"],
+        "table_title": row["table_title"],
+        "row_count": row["row_count"],
+        "table_url": row["table_url"],
+        "common_work_name": row["common_work_name"],
+        "collection": {
+            "id": row["collection_id"],
+            "num": row["collection_num"],
+            "name": row["collection_name"],
+            "ignored": row["collection_ignored"],
+            "effective_ignored": row["collection_ignored"],
+        },
+        "section": (
+            {
+                "id": row["section_id"],
+                "title": row["section_title"],
+                "ignored": row["section_ignored"],
+                "effective_ignored": row["collection_ignored"] or row["section_ignored"],
+            }
+            if row["section_id"] is not None
+            else None
+        ),
+        "subsection": (
+            {
+                "id": row["subsection_id"],
+                "title": row["subsection_title"],
+                "ignored": row["subsection_ignored"],
+                "effective_ignored": (
+                    row["collection_ignored"]
+                    or row["section_ignored"]
+                    or row["subsection_ignored"]
+                ),
+            }
+            if row["subsection_id"] is not None
+            else None
+        ),
+        "ignored": row["ignored"],
+        "effective_ignored": row["effective_ignored"],
+        "match_scope": row["match_scope"],
+        "matched_text": row["matched_text"],
+        "matching_rows_count": row["matching_rows_count"],
+    }
+
+
 async def _fetch_one(db: AsyncSession, sql: str, params: dict[str, Any]) -> dict[str, Any] | None:
     result = await db.execute(text(sql), params)
     row = result.mappings().first()
@@ -473,52 +519,7 @@ async def fer_search(
         },
     )
 
-    return [
-        {
-            "table_id": row["table_id"],
-            "table_title": row["table_title"],
-            "row_count": row["row_count"],
-            "table_url": row["table_url"],
-            "common_work_name": row["common_work_name"],
-            "collection": {
-                "id": row["collection_id"],
-                "num": row["collection_num"],
-                "name": row["collection_name"],
-                "ignored": row["collection_ignored"],
-                "effective_ignored": row["collection_ignored"],
-            },
-            "section": (
-                {
-                    "id": row["section_id"],
-                    "title": row["section_title"],
-                    "ignored": row["section_ignored"],
-                    "effective_ignored": row["collection_ignored"] or row["section_ignored"],
-                }
-                if row["section_id"] is not None
-                else None
-            ),
-            "subsection": (
-                {
-                    "id": row["subsection_id"],
-                    "title": row["subsection_title"],
-                    "ignored": row["subsection_ignored"],
-                    "effective_ignored": (
-                        row["collection_ignored"]
-                        or row["section_ignored"]
-                        or row["subsection_ignored"]
-                    ),
-                }
-                if row["subsection_id"] is not None
-                else None
-            ),
-            "ignored": row["ignored"],
-            "effective_ignored": row["effective_ignored"],
-            "match_scope": row["match_scope"],
-            "matched_text": row["matched_text"],
-            "matching_rows_count": row["matching_rows_count"],
-        }
-        for row in rows
-    ]
+    return [_build_fer_search_item(row) for row in rows]
 
 
 @router.get("/table/{table_id}")

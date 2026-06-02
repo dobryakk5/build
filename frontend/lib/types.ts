@@ -67,6 +67,7 @@ export type ParserProfile =
 export type EstimateItemType = "work" | "material" | "mechanism" | "overhead" | "unknown";
 
 export interface PreviewRow {
+  row_order: number | null;
   section: string | null;
   item_type: EstimateItemType;
   name: string;
@@ -76,6 +77,17 @@ export interface PreviewRow {
   total_price?: number | null;
   confidence?: number | null;
   reason?: string | null;
+  materials?: PreviewRow[];
+}
+
+export interface PreviewGroup {
+  section: string;
+  totals: Record<EstimateItemType, { count: number; total: number }>;
+  works: PreviewRow[];
+  materials: PreviewRow[];
+  mechanisms: PreviewRow[];
+  overhead: PreviewRow[];
+  unknown: PreviewRow[];
 }
 
 export interface PreviewResult {
@@ -95,6 +107,10 @@ export interface PreviewResult {
   low_confidence_rows: PreviewRow[];
   sample_rows: PreviewRow[];
   ignored_subtotal_rows_count: number;
+  groups: PreviewGroup[];
+  truncated: boolean;
+  no_section_count: number;
+  warnings?: string[];
 }
 
 export interface EstimateMaterial {

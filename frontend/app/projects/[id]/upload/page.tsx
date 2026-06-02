@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { estimates, ktpEstimate } from "@/lib/api";
@@ -9,7 +9,7 @@ import { fmtMoney } from "@/lib/dateUtils";
 import { CLARIFICATION_BY_KIND } from "@/lib/estimateClarificationQuestions";
 import { useJobPoller } from "@/lib/useJobPoller";
 import { trackActivity } from "@/lib/activity";
-import type { EstimateBatch, ParserProfile, PreviewResult, EstimateItemType } from "@/lib/types";
+import type { EstimateBatch, ParserProfile, PreviewResult, PreviewGroup, PreviewRow, EstimateItemType } from "@/lib/types";
 
 const PROFILE_OPTIONS: { value: ParserProfile; label: string }[] = [
   { value: "auto", label: "Автоопределение" },
@@ -988,8 +988,23 @@ function PreviewPanel({
           Сомнительных строк: {preview.unknown_count}. Они сохранятся в смете, но не попадут в Гант — проверьте их тип после импорта.
         </div>
       )}
+      {preview.no_section_count > 0 && (
+        <div style={{ fontSize: 12, background: "rgba(245,158,11,.1)", color: "#92400e", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
+          Есть строки без раздела: {preview.no_section_count}. Возможно, часть строк не удалось отнести к разделу.
+        </div>
+      )}
+      {preview.truncated && (
+        <div style={{ fontSize: 12, background: "rgba(148,163,184,.12)", color: "var(--muted)", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
+          Показаны не все строки (смета большая). Суммы и счётчики посчитаны по всей смете.
+        </div>
+      )}
 
-      <PreviewRowsTable title="Первые строки" rows={preview.sample_rows} />
+      {/* Группы (разделы) → работы / материалы / механизмы / накладные */}
+      {preview.groups.map((g, i) => (
+        <PreviewGroupBlock key={i} group={g} defaultOpen={i === 0} />
+      ))}
+
+      {/* Быстрый доступ к проблемным строкам */}
       {preview.unknown_rows.length > 0 && <PreviewRowsTable title="Сомнительные" rows={preview.unknown_rows} />}
       {preview.low_confidence_rows.length > 0 && <PreviewRowsTable title="Низкая уверенность" rows={preview.low_confidence_rows} />}
 
@@ -1013,7 +1028,37 @@ function PreviewPanel({
   );
 }
 
-function PreviewRowsTable({ title, rows }: { title: string; rows: PreviewResult["sample_rows"] }) {
+function PreviewGroupBlock({ group, defaultOpen }: { group: PreviewGroup; defaultOpen?: boolean }) {
+  const subs: { key: EstimateItemType; rows: PreviewRow[] }[] = [
+    { key: "work", rows: group.works },
+    { key: "material", rows: group.materials },
+    { key: "mechanism", rows: group.mechanisms },
+    { key: "overhead", rows: group.overhead },
+    { key: "unknown", rows: group.unknown },
+  ];
+  const chips = subs
+    .filter((s) => (group.totals[s.key]?.count ?? 0) > 0)
+    .map((s) => `${ITEM_TYPE_LABELS[s.key]}: ${group.totals[s.key].count}`)
+    .join(" · ");
+
+  return (
+    <details open={defaultOpen} style={{ marginTop: 10, border: "1px solid var(--border)", borderRadius: 6 }}>
+      <summary style={{ cursor: "pointer", padding: "8px 10px", fontWeight: 600, fontSize: 13, background: "rgba(148,163,184,.06)" }}>
+        {group.section}
+        <span style={{ fontWeight: 400, fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>{chips}</span>
+      </summary>
+      <div style={{ padding: "4px 10px 10px" }}>
+        {subs.map((s) =>
+          s.rows.length ? (
+            <PreviewRowsTable key={s.key} title={ITEM_TYPE_LABELS[s.key]} rows={s.rows} showNested={s.key === "work"} />
+          ) : null
+        )}
+      </div>
+    </details>
+  );
+}
+
+function PreviewRowsTable({ title, rows, showNested }: { title: string; rows: PreviewRow[]; showNested?: boolean }) {
   if (!rows.length) return null;
   return (
     <div style={{ marginTop: 12 }}>
@@ -1029,14 +1074,26 @@ function PreviewRowsTable({ title, rows }: { title: string; rows: PreviewResult[
           </thead>
           <tbody>
             {rows.map((r, i) => (
-              <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
-                <td style={{ padding: "6px 8px", color: ITEM_TYPE_COLORS[r.item_type], fontWeight: 600 }}>{ITEM_TYPE_LABELS[r.item_type]}</td>
-                <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.section ?? "—"}</td>
-                <td style={{ padding: "6px 8px" }}>{r.name}</td>
-                <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.unit ?? "—"}</td>
-                <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.quantity ?? "—"}</td>
-                <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.total_price != null ? fmtMoney(r.total_price) : "—"}</td>
-              </tr>
+              <Fragment key={i}>
+                <tr style={{ borderTop: "1px solid var(--border)" }}>
+                  <td style={{ padding: "6px 8px", color: ITEM_TYPE_COLORS[r.item_type], fontWeight: 600 }}>{ITEM_TYPE_LABELS[r.item_type]}</td>
+                  <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.section ?? "—"}</td>
+                  <td style={{ padding: "6px 8px" }}>{r.name}</td>
+                  <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.unit ?? "—"}</td>
+                  <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.quantity ?? "—"}</td>
+                  <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.total_price != null ? fmtMoney(r.total_price) : "—"}</td>
+                </tr>
+                {showNested && (r.materials ?? []).map((m, j) => (
+                  <tr key={`m${j}`} style={{ borderTop: "1px dashed var(--border)", background: "rgba(22,163,74,.04)" }}>
+                    <td style={{ padding: "4px 8px", color: ITEM_TYPE_COLORS.material, fontSize: 11 }}>└ материал</td>
+                    <td style={{ padding: "4px 8px" }} />
+                    <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.name}</td>
+                    <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.unit ?? "—"}</td>
+                    <td style={{ padding: "4px 8px", fontFamily: "var(--mono)" }}>{m.quantity ?? "—"}</td>
+                    <td style={{ padding: "4px 8px", fontFamily: "var(--mono)" }}>{m.total_price != null ? fmtMoney(m.total_price) : "—"}</td>
+                  </tr>
+                ))}
+              </Fragment>
             ))}
           </tbody>
         </table>
