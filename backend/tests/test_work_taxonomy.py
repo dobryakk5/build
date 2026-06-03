@@ -1,0 +1,104 @@
+import csv
+from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+import sys
+
+import pytest
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+from app.services.work_taxonomy_service import (  # noqa: E402
+    PrecedenceEdge,
+    SubtypeDef,
+    build_precedence_dependencies,
+    classify_subtype,
+)
+
+_DATA = Path(__file__).resolve().parents[1] / "app" / "data" / "work_subtypes.csv"
+
+
+def _load_taxonomy_from_csv() -> list[SubtypeDef]:
+    with open(_DATA, encoding="utf-8") as fh:
+        return [
+            SubtypeDef(
+                macro_id=int(r["macro_id"]),
+                code=r["subtype_code"],
+                name=r["subtype_name"],
+                keywords=tuple(k.strip().lower() for k in r["keywords"].split(";") if k.strip()),
+            )
+            for r in csv.DictReader(fh)
+        ]
+
+
+TAXONOMY = _load_taxonomy_from_csv()
+
+
+@pytest.mark.parametrize(
+    "name,expected_code",
+    [
+        ("Штукатурка стен", "5.1"),
+        ("Трубы отопления, монтаж", "7.2"),
+        ("Засыпка пазух грунтом", "1.3"),
+        ("Устройство кровли из ондулина", "2.5"),
+    ],
+)
+def test_classify_subtype_matches_expected(name, expected_code):
+    match = classify_subtype(name, None, TAXONOMY)
+    assert match is not None
+    assert match.code == expected_code
+
+
+def test_classify_subtype_returns_none_when_no_keyword():
+    assert classify_subtype("Прочие непредвиденные затраты по объекту", None, TAXONOMY) is None
+
+
+def test_classify_subtype_prefers_more_specific_keyword():
+    # "засыпка пазух" + "засыпка грунтом" → два совпадения по 1.3 против одного у соседей
+    match = classify_subtype("Обратная засыпка пазух грунтом", None, TAXONOMY)
+    assert match is not None
+    assert match.code == "1.3"
+
+
+def test_build_precedence_dependencies_basic_with_lag():
+    subtype_to_task_ids = {"2.2": ["A"], "2.3": ["B"]}
+    precedence = [PrecedenceEdge("2.2", "2.3", 3)]
+    edges = build_precedence_dependencies(subtype_to_task_ids, precedence)
+    assert edges == [("B", "A", 3)]  # successor depends_on predecessor, lag=3
+
+
+def test_build_precedence_dependencies_representative_selection():
+    # последняя задача предшественника → первая задача последователя
+    subtype_to_task_ids = {"2.3": ["B1", "B2"], "2.8": ["C1", "C2"]}
+    precedence = [PrecedenceEdge("2.3", "2.8", 0)]
+    edges = build_precedence_dependencies(subtype_to_task_ids, precedence)
+    assert edges == [("C1", "B2", 0)]
+
+
+def test_build_precedence_dependencies_skips_missing_subtypes():
+    subtype_to_task_ids = {"2.2": ["A"]}  # 2.3 отсутствует
+    precedence = [PrecedenceEdge("2.2", "2.3", 3)]
+    assert build_precedence_dependencies(subtype_to_task_ids, precedence) == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_project_dates_applies_lag():
+    from app.services.gantt_service import resolve_project_dates
+
+    pred = SimpleNamespace(id="pred", project_id="p", start_date=date(2026, 6, 1), working_days=2)
+    succ = SimpleNamespace(id="succ", project_id="p", start_date=date(2026, 6, 1), working_days=1)
+    dep = SimpleNamespace(task_id="succ", depends_on="pred", lag_days=3)
+
+    db = MagicMock()
+    db.scalars = AsyncMock(return_value=iter([pred, succ]))
+    exec_result = MagicMock()
+    exec_result.scalars.return_value = [dep]
+    db.execute = AsyncMock(return_value=exec_result)
+    db.add = MagicMock()
+
+    changed = await resolve_project_dates("p", db)
+
+    # pred заканчивается 2026-06-03, +3 дня лага → succ стартует 2026-06-06
+    assert {"id": "succ", "start_date": "2026-06-06"} in changed
+    assert succ.start_date == date(2026, 6, 6)

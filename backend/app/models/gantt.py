@@ -70,3 +70,6 @@ class TaskDependency(Base):
     depends_on: Mapped[str] = mapped_column(
         ForeignKey("gantt_tasks.id", ondelete="CASCADE"), primary_key=True
     )
+    # Технологический лаг в рабочих днях: successor стартует через lag_days после
+    # окончания predecessor (напр. выдержка бетона). 0 = «впритык».
+    lag_days:   Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))

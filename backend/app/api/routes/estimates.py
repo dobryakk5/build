@@ -326,14 +326,36 @@ async def preview_estimate(
             complex_mode     = complex_mode,
             build_gantt      = build_gantt,
             clarification_answers = _parse_clarification_answers(clarification_answers),
+            db               = db,
         )
     except PreviewStorageUnavailable:
         raise HTTPException(503, "Временное хранилище импорта недоступно. Повторите позже.")
 
 
+class PreviewTypeOverride(BaseModel):
+    index:     int
+    row_hash:  str
+    item_type: str
+
+
+class PreviewAddedRow(BaseModel):
+    section:     str | None = None
+    name:        str
+    item_type:   str = "work"
+    unit:        str | None = None
+    quantity:    float | None = None
+    total_price: float | None = None
+
+
+class PreviewEdits(BaseModel):
+    type_overrides: list[PreviewTypeOverride] = Field(default_factory=list)
+    added_rows:     list[PreviewAddedRow] = Field(default_factory=list)
+
+
 class ConfirmImportRequest(BaseModel):
     preview_id:  str
     build_gantt: bool | None = None
+    edits:       PreviewEdits | None = None
 
 
 @router.post("/estimates/upload/confirm", response_model=UploadStartResponse, status_code=202)
@@ -365,7 +387,8 @@ async def confirm_import(
         raise HTTPException(409, "Этот импорт уже подтверждён.")
 
     try:
-        job = await confirm_upload_job(preview, body.build_gantt, db)
+        edits = body.edits.model_dump() if body.edits else None
+        job = await confirm_upload_job(preview, body.build_gantt, db, edits=edits)
     except Exception:
         # Откатываем сессию в ready, чтобы пользователь мог повторить попытку.
         await set_preview_status(body.preview_id, "ready")
@@ -749,6 +772,35 @@ class ActFlagsUpdate(BaseModel):
 
 class FerMultiplierUpdate(BaseModel):
     fer_multiplier: float
+
+
+class LaborHoursUpdate(BaseModel):
+    labor_hours: float | None = None
+
+
+@router.patch("/estimates/{estimate_id}/labor-hours")
+async def update_estimate_labor_hours(
+    project_id: UUID,
+    estimate_id: UUID,
+    body: LaborHoursUpdate,
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+    db: AsyncSession = Depends(get_db),
+):
+    est = await db.get(Estimate, str(estimate_id))
+    if not est or est.project_id != str(project_id) or est.deleted_at:
+        raise HTTPException(404, "Строка сметы не найдена")
+    _ensure_work_estimate(est)
+
+    if body.labor_hours is not None and (body.labor_hours < 0 or body.labor_hours > 1_000_000):
+        raise HTTPException(400, "Трудоёмкость должна быть от 0 до 1 000 000 ч-ч")
+
+    est.labor_hours = round(float(body.labor_hours), 2) if body.labor_hours is not None else None
+
+    await db.commit()
+    return {
+        "id": est.id,
+        "labor_hours": float(est.labor_hours) if est.labor_hours is not None else None,
+    }
 
 
 @router.patch("/estimates/{estimate_id}/acts")

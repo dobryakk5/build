@@ -26,9 +26,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import re
 import tempfile
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
 from fastapi import UploadFile, HTTPException
@@ -36,11 +39,12 @@ from sqlalchemy import bindparam, select, delete, func, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.date_utils             import working_days_between, task_end_date
-from app.core.estimate_types         import resolve_item_type
+from app.core.estimate_types         import resolve_item_type, VALID_ESTIMATE_ITEM_TYPES
 from app.models                      import Job, GanttTask, Estimate, EstimateBatch, TaskDependency
 from app.services.excel_parser       import (
     ExcelEstimateParser,
     NeedsMappingError,
+    ParsedRow,
     describe_subtotal_row,
     is_subtotal_row,
 )
@@ -170,9 +174,42 @@ MAX_PREVIEW_GROUP_ROWS = 2000
 _NO_SECTION = "Без раздела"
 
 
-def _row_preview_dict(row) -> dict:
+class PreviewChangedError(Exception):
+    """Правки оператора не легли на текущий re-parse (строка под index изменилась)."""
+
+
+def _norm_hash_text(value) -> str:
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip())
+
+
+def _norm_hash_num(value) -> str:
+    if value is None:
+        return ""
+    try:
+        return format(Decimal(str(value)).normalize(), "f")
+    except (InvalidOperation, ValueError):
+        return str(value)
+
+
+def _row_hash(section, name, unit, quantity, total_price) -> str:
+    """Стабильный отпечаток строки для сверки preview↔confirm (после нормализации,
+    чтобы 1000 и 1000.0 совпадали)."""
+    parts = [
+        _norm_hash_text(section),
+        _norm_hash_text(name),
+        _norm_hash_text(unit),
+        _norm_hash_num(quantity),
+        _norm_hash_num(total_price),
+    ]
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _row_preview_dict(row, index: int | None = None) -> dict:
     raw = getattr(row, "raw_data", None) or {}
     return {
+        "index":       index,
         "row_order":   getattr(row, "row_order", 0),
         "section":     row.section,
         "item_type":   resolve_item_type(row),
@@ -183,7 +220,75 @@ def _row_preview_dict(row) -> dict:
         "total_price": float(row.total_price) if row.total_price is not None else None,
         "confidence":  raw.get("classification_confidence"),
         "reason":      raw.get("classification_reason"),
+        "macro_id":    raw.get("macro_id"),
+        "subtype_code": raw.get("subtype_code"),
+        "subtype_name": raw.get("subtype_name"),
+        "row_hash":    _row_hash(row.section, row.work_name, row.unit, row.quantity, row.total_price),
     }
+
+
+async def _enrich_work_subtypes(rows: list, db: AsyncSession) -> None:
+    """Финальный проход классификации подтипа (CSV-таксономия). Только для
+    work-строк; у остальных подтип очищается. Запускать ПОСЛЕ правок оператора."""
+    from app.services.work_taxonomy_service import classify_subtype, load_taxonomy
+
+    taxonomy = await load_taxonomy(db)
+    for row in rows:
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        row.raw_data = raw
+        if resolve_item_type(row) == "work":
+            match = classify_subtype(row.work_name or "", row.section, taxonomy)
+            if match:
+                raw["macro_id"] = match.macro_id
+                raw["subtype_code"] = match.code
+                raw["subtype_name"] = match.name
+                continue
+        for key in ("macro_id", "subtype_code", "subtype_name"):
+            raw.pop(key, None)
+
+
+def _apply_operator_edits(rows: list, edits: dict | None) -> list:
+    """Применить правки шага 2: смена item_type по (index, row_hash) и добавленные
+    строки. Возвращает итоговый список строк (с добавленными в конце)."""
+    if not edits:
+        return rows
+
+    for override in edits.get("type_overrides") or []:
+        index = override.get("index")
+        if not isinstance(index, int) or index < 0 or index >= len(rows):
+            raise PreviewChangedError("PREVIEW_EXPIRED_OR_CHANGED: строка вне диапазона")
+        row = rows[index]
+        expected = override.get("row_hash")
+        actual = _row_hash(row.section, row.work_name, row.unit, row.quantity, row.total_price)
+        if expected and expected != actual:
+            raise PreviewChangedError("PREVIEW_EXPIRED_OR_CHANGED: строка изменилась")
+        item_type = override.get("item_type")
+        if item_type not in VALID_ESTIMATE_ITEM_TYPES:
+            raise PreviewChangedError(f"PREVIEW_EXPIRED_OR_CHANGED: недопустимый тип «{item_type}»")
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        raw["item_type"] = item_type
+        raw["classification_reason"] = "operator_override"
+        row.raw_data = raw
+
+    for added in edits.get("added_rows") or []:
+        item_type = added.get("item_type")
+        if item_type not in VALID_ESTIMATE_ITEM_TYPES:
+            item_type = "work"
+        rows.append(ParsedRow(
+            section=added.get("section") or None,
+            work_name=(added.get("name") or "").strip(),
+            unit=added.get("unit") or None,
+            quantity=added.get("quantity"),
+            total_price=added.get("total_price"),
+            raw_data={
+                "item_type": item_type,
+                "classification_reason": "operator_added",
+                "classification_confidence": 1.0,
+                "manual_added": True,
+            },
+        ))
+
+    return rows
 
 
 def _material_dict(material: dict) -> dict:
@@ -329,6 +434,7 @@ async def preview_upload_job(
     complex_mode:     bool,
     build_gantt:      bool,
     clarification_answers: dict | None,
+    db:               AsyncSession,
 ) -> dict:
     """Parse the upload to a tmp file and return a typed breakdown WITHOUT any DB
     writes. Stores a Redis preview session and returns its preview_id."""
@@ -372,8 +478,10 @@ async def preview_upload_job(
         raise HTTPException(422, "Не удалось распознать строки сметы в выбранном формате.")
 
     rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
+    await _enrich_work_subtypes(rows, db)
     preview = _compute_preview(rows, subtotal_rows, meta)
     grouped = _build_preview_groups(rows)
+    flat_rows = [_row_preview_dict(r, index=i) for i, r in enumerate(rows[:MAX_PREVIEW_GROUP_ROWS])]
 
     warnings: list[str] = []
     if preview["difference_reason"]:
@@ -407,6 +515,7 @@ async def preview_upload_job(
         "strategy":       meta.get("strategy"),
         "confidence":     meta.get("confidence"),
         "groups":         grouped["groups"],
+        "rows":           flat_rows,
         "truncated":      grouped["truncated"],
         "no_section_count": grouped["no_section_count"],
         "warnings":       warnings,
@@ -414,7 +523,12 @@ async def preview_upload_job(
     }
 
 
-async def confirm_upload_job(preview: dict, build_gantt: bool | None, db: AsyncSession) -> Job:
+async def confirm_upload_job(
+    preview: dict,
+    build_gantt: bool | None,
+    db: AsyncSession,
+    edits: dict | None = None,
+) -> Job:
     """Start the real import job from a (already consumed) preview session."""
     tmp_path = preview.get("tmp_path")
     if not tmp_path or not os.path.exists(tmp_path):
@@ -435,6 +549,7 @@ async def confirm_upload_job(preview: dict, build_gantt: bool | None, db: AsyncS
         db          = db,
         parser_profile = preview.get("parser_profile", "auto"),
         build_gantt = effective_gantt,
+        edits       = edits,
     )
 
 
@@ -465,6 +580,7 @@ async def _create_and_run_job(
     sheet:       str | None = None,
     parser_profile: str = "auto",
     build_gantt: bool = True,
+    edits:       dict | None = None,
 ) -> Job:
     job = Job(
         id         = str(uuid4()),
@@ -484,6 +600,7 @@ async def _create_and_run_job(
             "sheet":       sheet,
             "parser_profile": parser_profile,
             "build_gantt": build_gantt,
+            "edits":       edits,
         },
     )
     db.add(job)
@@ -552,6 +669,11 @@ async def _process_upload(job_id: str) -> None:
                     "Строки с «Итого» и «Всего» используются для сверки, "
                     "но не считаются работами."
                 )
+
+            # ── 1b. Правки оператора (шаг 2): смена типа + добавленные строки ──
+            #        порядок: split → overrides/added → enrich подтипом.
+            rows = _apply_operator_edits(rows, job.input.get("edits"))
+            await _enrich_work_subtypes(rows, db)
 
             # ── 2. Парсинг успешен — теперь безопасно заменить старую смету ───
             #     (перенос soft-replace ПОСЛЕ парсинга: ошибка парсера больше не
@@ -775,13 +897,55 @@ async def build_gantt_for_estimate_batch(
             )
         )
 
+    # ── Зависимости по графу предшествования (subtype_code) ───────────────────
+    deps_count = await _build_precedence_dependencies(task_dtos, estimates, db)
+
     batch.start_date = effective_start_date
     await db.flush()
     return {
         "id": batch.id,
         "start_date": str(effective_start_date),
         "gantt_tasks_count": len(task_dtos),
+        "dependencies_count": deps_count,
     }
+
+
+async def _build_precedence_dependencies(task_dtos, estimates, db: AsyncSession) -> int:
+    """Соединить задачи Ганта по графу предшествования: подтип-предшественник →
+    подтип-последователь. Возвращает число созданных связей."""
+    from app.services.work_taxonomy_service import (
+        build_precedence_dependencies,
+        load_precedence,
+    )
+
+    subtype_by_estimate_id: dict[str, str] = {}
+    for est in estimates:
+        raw = est.raw_data if isinstance(est.raw_data, dict) else {}
+        code = raw.get("subtype_code")
+        if code:
+            subtype_by_estimate_id[est.id] = code
+
+    if not subtype_by_estimate_id:
+        return 0
+
+    # subtype_code → [leaf task_id] в порядке row_order
+    leaf_dtos = sorted(
+        (d for d in task_dtos if d.estimate_id and d.estimate_id in subtype_by_estimate_id),
+        key=lambda d: float(d.row_order),
+    )
+    subtype_to_task_ids: dict[str, list[str]] = {}
+    for dto in leaf_dtos:
+        subtype_to_task_ids.setdefault(subtype_by_estimate_id[dto.estimate_id], []).append(dto.id)
+
+    precedence = await load_precedence(db)
+    edges = build_precedence_dependencies(subtype_to_task_ids, precedence)
+    for successor_task_id, predecessor_task_id, lag_days in edges:
+        db.add(TaskDependency(
+            task_id=successor_task_id,
+            depends_on=predecessor_task_id,
+            lag_days=lag_days,
+        ))
+    return len(edges)
 
 
 async def _load_fer_human_hours_by_table_ids(

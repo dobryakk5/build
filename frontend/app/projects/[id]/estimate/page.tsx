@@ -96,6 +96,7 @@ const WORK_TABLE_HEADERS = [
   "Цена за ед., ₽",
   "Сумма, ₽",
   "Акты",
+  "Трудоём., чел-ч/ед",
   "Тип работ ФЕР",
   "Номер ФЕР",
   "Нормочасы ФЕР",
@@ -187,7 +188,14 @@ function extractFerCompositeNumber(tableUrl?: string | null, tableId?: number | 
 }
 
 function calcNormHours(row: EstimateRow, ferHours?: FerHoursInfo) {
-  if (row.quantity == null || ferHours?.humanHours == null) {
+  if (row.quantity == null) {
+    return null;
+  }
+  // Ручная норма трудоёмкости (чел-ч/ед.) приоритетнее ФЕР; множитель к ней не применяется.
+  if (row.labor_hours != null) {
+    return row.quantity * row.labor_hours;
+  }
+  if (ferHours?.humanHours == null) {
     return null;
   }
   return row.quantity * ferHours.humanHours * (row.fer_multiplier ?? 1);
@@ -798,7 +806,7 @@ function CalculatedNormHoursCell({
 }) {
   return (
     <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600 }}>
-      {hours?.loading ? <span style={{ color: "var(--muted)" }}>...</span> : fmtFerHours(calcNormHours(row, hours))}
+      {row.labor_hours == null && hours?.loading ? <span style={{ color: "var(--muted)" }}>...</span> : fmtFerHours(calcNormHours(row, hours))}
     </td>
   );
 }
@@ -816,7 +824,7 @@ function PersonDaysCell({
 }) {
   return (
     <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", fontWeight: 600 }}>
-      {hours?.loading ? <span style={{ color: "var(--muted)" }}>...</span> : fmtFerHours(calcPersonDays(row, hours, hoursPerDay, workersCount))}
+      {row.labor_hours == null && hours?.loading ? <span style={{ color: "var(--muted)" }}>...</span> : fmtFerHours(calcPersonDays(row, hours, hoursPerDay, workersCount))}
     </td>
   );
 }
@@ -920,6 +928,99 @@ function AIVectorCell({
       >
         {running ? "ИИ..." : "ИИ"}
       </button>
+    </td>
+  );
+}
+
+function LaborHoursCell({
+  row,
+  onChange,
+}: {
+  row: EstimateRow;
+  onChange: (row: EstimateRow, nextValue: number | null) => Promise<void>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const startEdit = () => {
+    setDraft(row.labor_hours != null ? String(row.labor_hours) : "");
+    setEditing(true);
+    setTimeout(() => inputRef.current?.select(), 0);
+  };
+
+  const commit = async () => {
+    const normalized = draft.trim().replace(",", ".");
+    const parsed = normalized === "" ? null : Number(normalized);
+    if (normalized !== "" && (!Number.isFinite(parsed) || parsed! < 0)) {
+      inputRef.current?.focus();
+      return;
+    }
+    setSaving(true);
+    setEditing(false);
+    try {
+      await onChange(row, parsed);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const cancel = () => setEditing(false);
+
+  if (editing) {
+    return (
+      <td style={{ padding: "4px 8px", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
+        <input
+          ref={inputRef}
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") { e.preventDefault(); commit(); }
+            if (e.key === "Escape") cancel();
+          }}
+          onBlur={commit}
+          style={{
+            width: 80,
+            padding: "3px 6px",
+            borderRadius: 5,
+            border: "1px solid var(--blue)",
+            background: "var(--surface)",
+            fontSize: 12,
+            fontFamily: "var(--mono)",
+            textAlign: "right",
+            outline: "none",
+          }}
+        />
+      </td>
+    );
+  }
+
+  const hasValue = row.labor_hours != null;
+
+  return (
+    <td
+      onClick={startEdit}
+      title="Нажмите, чтобы изменить трудоёмкость"
+      style={{
+        padding: "8px 12px",
+        borderBottom: "1px solid var(--border)",
+        textAlign: "right",
+        fontFamily: "var(--mono)",
+        cursor: saving ? "default" : "pointer",
+        color: saving ? "var(--muted)" : hasValue ? "var(--text)" : "var(--muted)",
+        background: hasValue ? "rgba(34,197,94,.04)" : "transparent",
+      }}
+    >
+      {saving ? "..." : hasValue ? (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+          {row.labor_hours!.toLocaleString("ru-RU", { maximumFractionDigits: 2 })}
+          <span style={{ fontSize: 9, color: "var(--muted)", lineHeight: 1 }}>✎</span>
+        </span>
+      ) : (
+        <span style={{ fontSize: 10, color: "var(--muted)", fontStyle: "italic" }}>—</span>
+      )}
     </td>
   );
 }
@@ -1770,6 +1871,30 @@ export default function EstimatePage() {
     }
   };
 
+  const handleLaborHoursChange = async (selectedRow: EstimateRow, nextValue: number | null) => {
+    const previousValue = selectedRow.labor_hours ?? null;
+    setRows((current) =>
+      current.map((row) =>
+        row.id === selectedRow.id ? { ...row, labor_hours: nextValue } : row,
+      ),
+    );
+    try {
+      const result = await estimates.updateLaborHours(id, selectedRow.id, nextValue);
+      setRows((current) =>
+        current.map((row) =>
+          row.id === selectedRow.id ? { ...row, labor_hours: result.labor_hours } : row,
+        ),
+      );
+    } catch (error: any) {
+      setRows((current) =>
+        current.map((row) =>
+          row.id === selectedRow.id ? { ...row, labor_hours: previousValue } : row,
+        ),
+      );
+      alert(error.message);
+    }
+  };
+
   const handleFerMultiplierChange = async (selectedRow: EstimateRow, nextMultiplier: number) => {
     const previousMultiplier = selectedRow.fer_multiplier ?? 1;
     const requestSeq = (multiplierRequestSeq.current[selectedRow.id] ?? 0) + 1;
@@ -2420,6 +2545,7 @@ export default function EstimatePage() {
                       {fmtMoney(sectionRows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))}
                     </td>
                     <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)" }}>—</td>
+                    <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>—</td>
                     <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", background: "rgba(59,130,246,.06)", verticalAlign: "top" }}>
                       <GroupFerCell row={sectionRows[0]} onOpenManual={openManualGroupModal} />
                     </td>
@@ -2451,6 +2577,7 @@ export default function EstimatePage() {
                       <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right" }}>
                         <ActsCell row={row} onOpen={handleOpenActs} />
                       </td>
+                      <LaborHoursCell row={row} onChange={handleLaborHoursChange} />
                       <FerCell row={row} onOpenModal={setFerModalRow} />
                       <FerNumberCell tableId={row.fer_table_id} tableNumber={row.fer_table_id ? ferNumberByTableId[row.fer_table_id] : null} onOpen={openFerReference} />
                       <FerHoursCell tableId={row.fer_table_id} hours={row.fer_table_id ? ferHoursByTableId[row.fer_table_id] : undefined} />
@@ -2473,7 +2600,7 @@ export default function EstimatePage() {
                   <td style={{ padding: "10px 12px", textAlign: "right", fontFamily: "var(--mono)", fontSize: 15, color: "var(--blue-dark)" }}>
                     {fmtMoney(summary?.total ?? workRows.reduce((sum, row) => sum + (row.total_price ?? 0), 0))} ₽
                   </td>
-                  <td colSpan={8} style={{ padding: "10px 12px" }} />
+                  <td colSpan={9} style={{ padding: "10px 12px" }} />
                 </tr>
               </tbody>
             </table>

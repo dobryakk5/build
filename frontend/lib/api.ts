@@ -19,6 +19,7 @@ import type {
   EstimateRow,
   EstimateSummary,
   PreviewResult,
+  PreviewEdits,
   KtpCard,
   KtpGenerateResponse,
   KtpGroup,
@@ -252,6 +253,11 @@ export const estimates = {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
+  updateLaborHours: (pid: string, eid: string, laborHours: number | null) =>
+    request<{ id: string; labor_hours: number | null }>(`/projects/${pid}/estimates/${eid}/labor-hours`, {
+      method: "PATCH",
+      body: JSON.stringify({ labor_hours: laborHours }),
+    }),
   updateFerMultiplier: (pid: string, eid: string, ferMultiplier: number) =>
     request<{ id: string; fer_multiplier: number }>(`/projects/${pid}/estimates/${eid}/fer-multiplier`, {
       method: "PATCH",
@@ -378,10 +384,10 @@ export const estimates = {
       return data as PreviewResult;
     });
   },
-  confirmImport: (pid: string, previewId: string, buildGantt?: boolean) =>
+  confirmImport: (pid: string, previewId: string, buildGantt?: boolean, edits?: PreviewEdits) =>
     request<{ job_id: string }>(`/projects/${pid}/estimates/upload/confirm`, {
       method: "POST",
-      body: JSON.stringify({ preview_id: previewId, build_gantt: buildGantt ?? null }),
+      body: JSON.stringify({ preview_id: previewId, build_gantt: buildGantt ?? null, edits: edits ?? null }),
     }),
 };
 

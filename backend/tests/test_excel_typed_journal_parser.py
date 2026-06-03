@@ -41,6 +41,13 @@ def test_typed_journal_trusts_type_column(tmp_path):
     assert "ИТОГО" not in by_type
 
 
+def test_auto_detects_typed_journal(tmp_path):
+    # No explicit profile — auto must detect the «Тип» column and use the typed parser.
+    rows, meta = parse_estimate(_journal(tmp_path))
+    assert meta["strategy"] == "excel_typed_journal"
+    assert meta["parser_profile"] == "excel_typed_journal"
+
+
 def test_typed_journal_tags_labor_subtype_and_profile(tmp_path):
     rows, _ = parse_estimate(_journal(tmp_path), parser_profile=PROFILE_EXCEL_TYPED_JOURNAL)
     people = next(r for r in rows if r.work_name == "Бригада монтажников")

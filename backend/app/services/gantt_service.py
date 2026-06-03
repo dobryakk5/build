@@ -15,7 +15,7 @@ from uuid import uuid4
 from sqlalchemy import or_, select, text, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.date_utils import next_task_start_date, task_end_date, working_days_between
+from app.core.date_utils import add_working_days, next_task_start_date, task_end_date, working_days_between
 from app.models import GanttTask, ScheduleBaseline, ScheduleBaselineTask, TaskDependency, TaskHistory
 from app.services.gantt_calculations import calculate_labor_hours
 
@@ -109,11 +109,14 @@ async def resolve_project_dates(
     # Граф: predecessors → successors
     successors:  dict[str, list[str]] = defaultdict(list)
     in_degree:   dict[str, int]       = defaultdict(int)
+    # Лаг по ребру (predecessor=depends_on, successor=task_id) в рабочих днях.
+    lag_by_edge: dict[tuple[str, str], int] = {}
 
     for dep in deps:
         if dep.task_id in by_id and dep.depends_on in by_id:
             successors[dep.depends_on].append(dep.task_id)
             in_degree[dep.task_id] += 1
+            lag_by_edge[(dep.depends_on, dep.task_id)] = int(getattr(dep, "lag_days", 0) or 0)
 
     # Топологическая сортировка (алгоритм Кана)
     queue = deque(t.id for t in tasks if in_degree[t.id] == 0)
@@ -126,13 +129,14 @@ async def resolve_project_dates(
             if in_degree[succ] == 0:
                 queue.append(succ)
 
-    # predecessor_ends[task_id] = [конец каждого предшественника]
+    # predecessor_ends[task_id] = [конец каждого предшественника + лаг ребра]
     predecessor_ends: dict[str, list[date]] = defaultdict(list)
     for dep in deps:
         if dep.task_id in by_id and dep.depends_on in by_id:
             pred     = by_id[dep.depends_on]
+            lag      = lag_by_edge.get((dep.depends_on, dep.task_id), 0)
             pred_next_start = next_task_start_date(pred.start_date, pred.working_days, holidays)
-            predecessor_ends[dep.task_id].append(pred_next_start)
+            predecessor_ends[dep.task_id].append(add_working_days(pred_next_start, lag, holidays))
 
     changed: list[dict] = []
 
@@ -147,10 +151,11 @@ async def resolve_project_dates(
             changed.append({"id": tid, "start_date": str(earliest)})
             db.add(task)
 
-        # Передаём старт следующей зависимой задачи дальше по цепочке
+        # Передаём старт следующей зависимой задачи дальше по цепочке (+ лаг ребра)
         my_end = next_task_start_date(task.start_date, task.working_days, holidays)
         for succ_id in successors[tid]:
-            predecessor_ends[succ_id].append(my_end)
+            lag = lag_by_edge.get((tid, succ_id), 0)
+            predecessor_ends[succ_id].append(add_working_days(my_end, lag, holidays))
 
     return changed
 

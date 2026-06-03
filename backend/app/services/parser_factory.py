@@ -167,6 +167,25 @@ def _tag_profile(rows: list[ParsedRow], parser_profile: str) -> None:
             row.raw_data = {"parser_profile": parser_profile}
 
 
+def _excel_is_typed_journal(file_path: str | Path) -> bool:
+    """True if the workbook has an explicit «Тип» column (type1 header) — then
+    auto routes to ExcelTypedJournalParser instead of the legacy fold."""
+    import openpyxl
+    from .excel_parser import StructuredSmetaParser
+
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception:
+        return False
+    try:
+        smeta = StructuredSmetaParser()
+        return any(smeta._find_type1_header(wb[name]) for name in wb.sheetnames)
+    except Exception:
+        return False
+    finally:
+        wb.close()
+
+
 def parse_estimate(
     file_path: str | Path,
     parser_profile: str = PROFILE_AUTO,
@@ -217,6 +236,15 @@ def parse_estimate(
 
     # ── auto / manual_mapping → legacy detection ───────────────────────────────
     if is_excel:
+        # Auto-detect the "Тип" column journal and parse it with full typing
+        # (separate material/mechanism/overhead rows). Operators don't pick a
+        # profile — the file type is detected here.
+        if _excel_is_typed_journal(path):
+            rows, meta = ExcelTypedJournalParser().parse(path)
+            meta["format"] = FORMAT_EXCEL
+            meta["parser_profile"] = PROFILE_EXCEL_TYPED_JOURNAL
+            _tag_profile(rows, PROFILE_EXCEL_TYPED_JOURNAL)
+            return rows, meta
         rows, meta = ExcelEstimateParser().parse(path)
         meta["format"] = FORMAT_EXCEL
     else:

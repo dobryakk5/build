@@ -211,17 +211,19 @@ class GanttBuilder:
         fer_hours_by_table_id: dict[int, float],
     ) -> float:
         """Рассчитывает плановую трудоёмкость задачи в человеко-часах."""
-        fer_table_id = getattr(estimate, "fer_table_id", None)
         quantity = getattr(estimate, "quantity", None)
+
+        # Ручная норма трудоёмкости (чел-ч/ед.) приоритетнее ФЕР, если задана.
+        if estimate.labor_hours and estimate.quantity:
+            return round(float(estimate.labor_hours) * float(estimate.quantity), 2)
+
+        # Норма из сопоставленной таблицы ФЕР × множитель.
+        fer_table_id = getattr(estimate, "fer_table_id", None)
         if fer_table_id is not None and quantity is not None:
             fer_hours = fer_hours_by_table_id.get(int(fer_table_id))
             if fer_hours is not None:
                 multiplier = float(getattr(estimate, "fer_multiplier", 1) or 1)
                 return round(float(quantity) * fer_hours * multiplier, 2)
-
-        # Из трудоёмкости ЕНиР если есть
-        if estimate.labor_hours and estimate.quantity:
-            return round(float(estimate.labor_hours) * float(estimate.quantity), 2)
 
         # По ключевым словам
         name_lower = estimate.work_name.lower()

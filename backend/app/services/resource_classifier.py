@@ -49,7 +49,7 @@ _OVERHEAD_RE = re.compile(
 # Техника / механизмы — a mechanism even when listed inside a "Материалы" block.
 _MECHANISM_RE = re.compile(
     r"бетононасос|погрузчик|спецтехник|\bтрал\b|самосвал|экскаватор|"
-    r"автокран|\bкран\b|каток|виброплит|бульдозер|манипулятор|"
+    r"автокран|\bкран\b|каток|виброплит|бульдозер|манипулятор|ямобур|"
     r"аренда\s+техник|машино-?смен",
     re.IGNORECASE,
 )
@@ -115,9 +115,15 @@ def classify_estimate_row(
     if _LABOR_UNIT_RE.search(unit_norm):
         return ClassificationResult(ESTIMATE_ITEM_TYPE_WORK, 0.9, "unit_labor", normalized)
 
-    # 3. Mechanism keywords (regardless of mode — a loader inside a materials
-    #    block is still a mechanism, not a material).
-    if _MECHANISM_RE.search(full):
+    # 3. Mechanism vs. work when both are mentioned.
+    #    "Бурение скважин ямобуром" → work (verb leads) + a mechanism is extracted
+    #    separately (see extract_mechanism_token). "Спецтехника для планировки" →
+    #    mechanism (the machine leads). The earlier-occurring keyword wins.
+    mech_m = _MECHANISM_RE.search(full)
+    work_m = _WORK_RE.search(full)
+    if mech_m and work_m and work_m.start() <= mech_m.start():
+        return ClassificationResult(ESTIMATE_ITEM_TYPE_WORK, 0.85, "work_with_mechanism", normalized)
+    if mech_m:
         return ClassificationResult(ESTIMATE_ITEM_TYPE_MECHANISM, 0.85, "mechanism_keyword", normalized)
 
     # 4. Structural mode is the strongest remaining signal.
@@ -134,6 +140,24 @@ def classify_estimate_row(
 
     # 6. Nothing matched — leave it for manual review.
     return ClassificationResult(ESTIMATE_ITEM_TYPE_UNKNOWN, 0.3, "no_signal", normalized)
+
+
+def extract_mechanism_token(text: str | None) -> str | None:
+    """Return the machine word mentioned inside a work row (for resource
+    extraction), e.g. «Бурение скважин ямобуром» → "Ямобуром". Returns None if
+    no mechanism keyword is present."""
+    if not text:
+        return None
+    m = _MECHANISM_RE.search(text)
+    if not m:
+        return None
+    s, e = m.start(), m.end()
+    while s > 0 and text[s - 1].isalnum():
+        s -= 1
+    while e < len(text) and text[e].isalnum():
+        e += 1
+    word = text[s:e].strip()
+    return (word[:1].upper() + word[1:]) if word else None
 
 
 def normalize_explicit_type(value: str | None) -> tuple[str, str | None]:

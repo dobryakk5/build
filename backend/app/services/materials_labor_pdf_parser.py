@@ -24,6 +24,7 @@ from .resource_classifier import (
     MODE_LABOR,
     MODE_MATERIALS,
     classify_estimate_row,
+    extract_mechanism_token,
 )
 
 SOURCE_STRATEGY = "pdf_materials_labor"
@@ -212,6 +213,32 @@ class MaterialsLaborPdfParser:
                             source_strategy = SOURCE_STRATEGY,
                         ))
                         order += 1
+
+                        # Composite work ("Бурение скважин ямобуром") → also emit
+                        # the mentioned mechanism as a separate, zero-cost resource
+                        # row (cost stays on the work, no double counting).
+                        if result.item_type == "work":
+                            mech_name = extract_mechanism_token(full_name)
+                            if mech_name:
+                                rows.append(ParsedRow(
+                                    section         = current_section,
+                                    work_name       = mech_name,
+                                    unit            = None,
+                                    quantity        = None,
+                                    unit_price      = None,
+                                    total_price     = None,
+                                    row_order       = order,
+                                    raw_data        = {
+                                        "item_type": "mechanism",
+                                        "source": "derived_from_work",
+                                        "linked_work": name,
+                                        "full_name": full_name,
+                                        "source_mode": current_mode,
+                                        "source_strategy": SOURCE_STRATEGY,
+                                    },
+                                    source_strategy = SOURCE_STRATEGY,
+                                ))
+                                order += 1
 
         meta = {
             "strategy": SOURCE_STRATEGY,

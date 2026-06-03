@@ -67,6 +67,7 @@ export type ParserProfile =
 export type EstimateItemType = "work" | "material" | "mechanism" | "overhead" | "unknown";
 
 export interface PreviewRow {
+  index?: number | null;
   row_order: number | null;
   section: string | null;
   item_type: EstimateItemType;
@@ -77,7 +78,31 @@ export interface PreviewRow {
   total_price?: number | null;
   confidence?: number | null;
   reason?: string | null;
+  macro_id?: number | null;
+  subtype_code?: string | null;
+  subtype_name?: string | null;
+  row_hash?: string | null;
   materials?: PreviewRow[];
+}
+
+export interface PreviewTypeOverride {
+  index: number;
+  row_hash: string;
+  item_type: EstimateItemType;
+}
+
+export interface PreviewAddedRow {
+  section?: string | null;
+  name: string;
+  item_type: EstimateItemType;
+  unit?: string | null;
+  quantity?: number | null;
+  total_price?: number | null;
+}
+
+export interface PreviewEdits {
+  type_overrides: PreviewTypeOverride[];
+  added_rows: PreviewAddedRow[];
 }
 
 export interface PreviewGroup {
@@ -106,6 +131,7 @@ export interface PreviewResult {
   unknown_rows: PreviewRow[];
   low_confidence_rows: PreviewRow[];
   sample_rows: PreviewRow[];
+  rows: PreviewRow[];
   ignored_subtotal_rows_count: number;
   groups: PreviewGroup[];
   truncated: boolean;
@@ -152,6 +178,7 @@ export interface EstimateRow {
   fer_words_machine_hours?: number | null;
   fer_words_match_score?: number | null;
   fer_words_match_count?: number | null;
+  labor_hours?: number | null;
   fer_multiplier?: number | null;
   req_hidden_work_act?: boolean;
   req_intermediate_act?: boolean;

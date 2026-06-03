@@ -5,6 +5,7 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.resource_classifier import (
     classify_estimate_row,
+    extract_mechanism_token,
     normalize_explicit_type,
     MODE_LABOR,
     MODE_MATERIALS,
@@ -57,6 +58,26 @@ def test_bare_shift_is_not_auto_mechanism():
     # "смена" alone must not force mechanism — decided by text instead.
     assert _type("Укладка плитки", unit="смена") == "work"
     assert _type("Бетононасос", unit="смена") == "mechanism"
+
+
+# ── Composite work + mechanism (resource extraction) ──────────────────────────
+
+def test_verb_leads_is_work_machine_trails():
+    r = classify_estimate_row(name="Бурение скважин ямобуром", current_mode=MODE_LABOR)
+    assert r.item_type == "work" and r.reason == "work_with_mechanism"
+
+
+def test_machine_leads_stays_mechanism():
+    # The machine is the subject → mechanism, NOT a work to split.
+    assert classify_estimate_row(name="Спецтехника для планировки",
+                                 current_mode=MODE_MATERIALS).item_type == "mechanism"
+    assert classify_estimate_row(name="Мини погрузчик с оператором").item_type == "mechanism"
+
+
+def test_extract_mechanism_token():
+    assert extract_mechanism_token("Бурение скважин ямобуром") == "Ямобуром"
+    assert extract_mechanism_token("Устройство ленточного фундамента экскаватором") == "Экскаватором"
+    assert extract_mechanism_token("Формирование корыта") is None
 
 
 # ── normalize_explicit_type (excel_typed_journal "Тип" column) ─────────────────

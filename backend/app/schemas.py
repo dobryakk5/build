@@ -190,6 +190,7 @@ class EstimateRow(BaseModel):
     fer_words_machine_hours: float | None = None
     fer_words_match_score: float | None = None
     fer_words_match_count: int | None = None
+    labor_hours: float | None = None
     fer_multiplier: float = 1.0
     req_hidden_work_act: bool = False
     req_intermediate_act: bool = False

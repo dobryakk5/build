@@ -10,6 +10,7 @@ from .fer_words    import FerWordsEntry
 from .material_delay import MaterialDelayEvent
 from .schedule_baseline import ScheduleBaseline, ScheduleBaselineTask
 from .gantt        import GanttTask, TaskDependency
+from .work_taxonomy import WorkSubtype, WorkPrecedence
 from .ktp          import KtpGroup, KtpCard
 from .ktp_estimate import (
     KtpEstimateSession,
@@ -77,6 +78,7 @@ __all__ = [
     "MaterialDelayEvent",
     "ScheduleBaseline", "ScheduleBaselineTask",
     "GanttTask", "TaskDependency",
+    "WorkSubtype", "WorkPrecedence",
     "KtpGroup", "KtpCard",
     "KtpEstimateSession", "KtpWbsGroup", "KtpWbsItem", "KtpWbsGroupDependency",
     "ForemanTaskReport",

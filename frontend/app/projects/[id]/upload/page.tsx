@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { estimates, ktpEstimate } from "@/lib/api";
@@ -9,14 +9,7 @@ import { fmtMoney } from "@/lib/dateUtils";
 import { CLARIFICATION_BY_KIND } from "@/lib/estimateClarificationQuestions";
 import { useJobPoller } from "@/lib/useJobPoller";
 import { trackActivity } from "@/lib/activity";
-import type { EstimateBatch, ParserProfile, PreviewResult, PreviewGroup, PreviewRow, EstimateItemType } from "@/lib/types";
-
-const PROFILE_OPTIONS: { value: ParserProfile; label: string }[] = [
-  { value: "auto", label: "Автоопределение" },
-  { value: "pdf_materials_labor", label: "PDF: Материалы / Трудозатраты" },
-  { value: "excel_typed_journal", label: "Excel: колонка «Тип»" },
-  { value: "manual_mapping", label: "Ручное сопоставление колонок" },
-];
+import type { EstimateBatch, PreviewResult, PreviewRow, PreviewEdits, PreviewAddedRow, EstimateItemType } from "@/lib/types";
 
 const ITEM_TYPE_LABELS: Record<EstimateItemType, string> = {
   work: "Работы",
@@ -99,7 +92,6 @@ export default function UploadPage() {
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string[]>>({});
   const [clarificationsConfirmed, setClarificationsConfirmed] = useState(false);
   const [complexMode, setComplexMode] = useState(false);
-  const [parserProfile, setParserProfile] = useState<ParserProfile>("auto");
   const [buildGantt, setBuildGantt] = useState(true);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -262,7 +254,7 @@ export default function UploadPage() {
     try {
       const res = await estimates.preview(
         id, file, startDate, workers, estimateKind, complexMode,
-        parserProfile, buildGantt, buildClarificationPayload(),
+        "auto", buildGantt, buildClarificationPayload(),
       );
       setPreview(res);
       trackActivity("ESTIMATE_PREVIEW_READY", {
@@ -293,18 +285,18 @@ export default function UploadPage() {
     }
   }
 
-  async function handleConfirmImport() {
+  async function handleConfirmImport(edits?: PreviewEdits) {
     if (!preview) return;
     setConfirming(true);
     try {
-      const res = await estimates.confirmImport(id, preview.preview_id, buildGantt);
+      const res = await estimates.confirmImport(id, preview.preview_id, buildGantt, edits);
       setPreview(null);
       setJobId(res.job_id);
       trackActivity("ESTIMATE_UPLOAD_JOB_CREATED", {
         projectId: id,
         entityType: "job",
         entityId: res.job_id,
-        metadata: { job_id: res.job_id, parser_profile: parserProfile },
+        metadata: { job_id: res.job_id, parser_profile: preview?.parser_profile },
       });
     } catch (e: any) {
       // 410 — сессия истекла, нужно загрузить заново
@@ -707,21 +699,7 @@ export default function UploadPage() {
       </div>
 
       {!status && clarificationsConfirmed && !mappingPayload && !preview && (
-        <div style={{ marginBottom: 16, display: "grid", gridTemplateColumns: "1fr", gap: 12 }}>
-          <div>
-            <label style={{ fontSize: 11, color: "var(--muted)", display: "block", marginBottom: 4, textTransform: "uppercase", letterSpacing: ".06em" }}>
-              Тип сметы (профиль импорта)
-            </label>
-            <select
-              value={parserProfile}
-              onChange={(e) => { setParserProfile(e.target.value as ParserProfile); setPreview(null); }}
-              style={{ width: "100%", padding: "8px 12px", border: "1px solid var(--border2)", borderRadius: 5, fontSize: 13, outline: "none", background: "var(--surface)" }}
-            >
-              {PROFILE_OPTIONS.map((p) => (
-                <option key={p.value} value={p.value}>{p.label}</option>
-              ))}
-            </select>
-          </div>
+        <div style={{ marginBottom: 16 }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: "pointer" }}>
             <input type="checkbox" checked={buildGantt} onChange={(e) => setBuildGantt(e.target.checked)} />
             Построить Гант после импорта
@@ -804,7 +782,7 @@ export default function UploadPage() {
       )}
 
       {preview && !status && !mappingPayload && (
-        <PreviewPanel
+        <EditablePreviewPanel
           preview={preview}
           confirming={confirming}
           complexMode={complexMode}
@@ -930,7 +908,13 @@ const ITEM_TYPE_COLORS: Record<EstimateItemType, string> = {
   unknown: "#dc2626",
 };
 
-function PreviewPanel({
+const EDITABLE_TYPES: EstimateItemType[] = ["work", "material", "mechanism", "overhead", "unknown"];
+
+function emptyAddedRow(): PreviewAddedRow {
+  return { section: "", name: "", item_type: "work", unit: "", quantity: null, total_price: null };
+}
+
+function EditablePreviewPanel({
   preview,
   confirming,
   complexMode,
@@ -940,25 +924,85 @@ function PreviewPanel({
   preview: PreviewResult;
   confirming: boolean;
   complexMode: boolean;
-  onConfirm: () => void;
+  onConfirm: (edits: PreviewEdits) => void;
   onCancel: () => void;
 }) {
-  const order: EstimateItemType[] = ["work", "material", "mechanism", "overhead", "unknown"];
-  const hasDiff = preview.difference != null && Math.abs(preview.difference) > 1;
+  const baseRows = preview.rows ?? [];
+  // index → новый тип (только если отличается от исходного)
+  const [overrides, setOverrides] = useState<Record<number, EstimateItemType>>({});
+  const [addedRows, setAddedRows] = useState<PreviewAddedRow[]>([]);
+
+  const effType = useCallback(
+    (r: PreviewRow): EstimateItemType =>
+      r.index != null && overrides[r.index] ? overrides[r.index] : r.item_type,
+    [overrides],
+  );
+
+  const breakdown = useMemo(() => {
+    const acc: Record<EstimateItemType, { count: number; total: number }> = {
+      work: { count: 0, total: 0 }, material: { count: 0, total: 0 }, mechanism: { count: 0, total: 0 },
+      overhead: { count: 0, total: 0 }, unknown: { count: 0, total: 0 },
+    };
+    for (const r of baseRows) { const t = effType(r); acc[t].count += 1; acc[t].total += r.total_price ?? 0; }
+    for (const a of addedRows) { if (!a.name.trim()) continue; acc[a.item_type].count += 1; acc[a.item_type].total += a.total_price ?? 0; }
+    return acc;
+  }, [baseRows, addedRows, effType]);
+
+  function setType(r: PreviewRow, t: EstimateItemType) {
+    if (r.index == null) return;
+    setOverrides((prev) => {
+      const next = { ...prev };
+      if (t === r.item_type) delete next[r.index!];
+      else next[r.index!] = t;
+      return next;
+    });
+  }
+
+  function updateAdded(i: number, patch: Partial<PreviewAddedRow>) {
+    setAddedRows((prev) => prev.map((row, j) => (j === i ? { ...row, ...patch } : row)));
+  }
+
+  function buildEdits(): PreviewEdits {
+    const type_overrides = Object.entries(overrides)
+      .map(([idx, item_type]) => {
+        const row = baseRows.find((r) => r.index === Number(idx));
+        return { index: Number(idx), row_hash: row?.row_hash ?? "", item_type };
+      })
+      .filter((o) => o.row_hash);
+    const added_rows = addedRows
+      .filter((a) => a.name.trim())
+      .map((a) => ({
+        section: a.section?.trim() || null,
+        name: a.name.trim(),
+        item_type: a.item_type,
+        unit: a.unit?.trim() || null,
+        quantity: a.quantity,
+        total_price: a.total_price,
+      }));
+    return { type_overrides, added_rows };
+  }
+
+  const changedCount = Object.keys(overrides).length + addedRows.filter((a) => a.name.trim()).length;
+  const numFromInput = (v: string): number | null => {
+    const s = v.trim().replace(",", ".");
+    if (s === "") return null;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  };
 
   return (
     <div style={{ marginTop: 18, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 16 }}>
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
-        Проверьте распознавание сметы
+        Проверьте и при необходимости поправьте типы строк
         <span style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400, marginLeft: 8 }}>
           профиль: {preview.parser_profile}{preview.strategy ? ` · ${preview.strategy}` : ""}
         </span>
       </div>
 
-      {/* Разбивка по типам */}
+      {/* Разбивка по типам (пересчитывается с учётом правок) */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8, marginBottom: 14 }}>
-        {order.map((t) => {
-          const b = preview.type_breakdown?.[t] ?? { count: 0, total: 0 };
+        {EDITABLE_TYPES.map((t) => {
+          const b = breakdown[t];
           return (
             <div key={t} style={{ border: "1px solid var(--border)", borderRadius: 6, padding: "8px 10px" }}>
               <div style={{ fontSize: 11, color: ITEM_TYPE_COLORS[t], fontWeight: 600, textTransform: "uppercase", letterSpacing: ".04em" }}>
@@ -978,39 +1022,124 @@ function PreviewPanel({
           <> · Итог в смете: <b style={{ color: "var(--text)", fontFamily: "var(--mono)" }}>{fmtMoney(preview.declared_total)} ₽</b></>
         )}
       </div>
-      {hasDiff && preview.difference_reason && (
-        <div style={{ fontSize: 12, background: "rgba(245,158,11,.1)", color: "#92400e", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
-          ⚠ Расхождение {fmtMoney(preview.difference ?? 0)} ₽. {preview.difference_reason}
-        </div>
-      )}
-      {preview.unknown_count > 0 && (
-        <div style={{ fontSize: 12, background: "rgba(220,38,38,.08)", color: "#b91c1c", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
-          Сомнительных строк: {preview.unknown_count}. Они сохранятся в смете, но не попадут в Гант — проверьте их тип после импорта.
-        </div>
-      )}
       {preview.no_section_count > 0 && (
         <div style={{ fontSize: 12, background: "rgba(245,158,11,.1)", color: "#92400e", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
-          Есть строки без раздела: {preview.no_section_count}. Возможно, часть строк не удалось отнести к разделу.
+          Есть строки без раздела: {preview.no_section_count}.
         </div>
       )}
       {preview.truncated && (
         <div style={{ fontSize: 12, background: "rgba(148,163,184,.12)", color: "var(--muted)", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
-          Показаны не все строки (смета большая). Суммы и счётчики посчитаны по всей смете.
+          Показаны не все строки (смета большая) — редактирование доступно для первых {baseRows.length}. Суммы посчитаны по всей смете.
         </div>
       )}
 
-      {/* Группы (разделы) → работы / материалы / механизмы / накладные */}
-      {preview.groups.map((g, i) => (
-        <PreviewGroupBlock key={i} group={g} defaultOpen={i === 0} />
-      ))}
+      {/* Полная редактируемая таблица */}
+      <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6, marginTop: 8 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: "rgba(148,163,184,.08)" }}>
+              {["Тип", "Подтип", "Раздел", "Наименование", "Ед.", "Кол-во", "Сумма"].map((h) => (
+                <th key={h} style={{ textAlign: "left", padding: "6px 8px", fontWeight: 600, color: "var(--muted)" }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {baseRows.map((r) => {
+              const t = effType(r);
+              const changed = r.index != null && overrides[r.index] != null;
+              return (
+                <Fragment key={r.index ?? r.name}>
+                  <tr style={{ borderTop: "1px solid var(--border)", background: changed ? "rgba(59,130,246,.06)" : undefined }}>
+                    <td style={{ padding: "4px 8px" }}>
+                      <select
+                        value={t}
+                        onChange={(e) => setType(r, e.target.value as EstimateItemType)}
+                        style={{ fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4, background: "var(--surface)", color: ITEM_TYPE_COLORS[t], fontWeight: 600 }}
+                      >
+                        {EDITABLE_TYPES.map((opt) => (
+                          <option key={opt} value={opt} style={{ color: "var(--text)" }}>{ITEM_TYPE_LABELS[opt]}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td style={{ padding: "6px 8px", color: "var(--muted)" }}>
+                      {t === "work" && r.subtype_code ? `${r.subtype_code} · ${r.subtype_name ?? ""}` : "—"}
+                    </td>
+                    <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.section ?? "—"}</td>
+                    <td style={{ padding: "6px 8px" }}>{r.name}</td>
+                    <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.unit ?? "—"}</td>
+                    <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.quantity ?? "—"}</td>
+                    <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.total_price != null ? fmtMoney(r.total_price) : "—"}</td>
+                  </tr>
+                  {(r.materials ?? []).map((m, j) => (
+                    <tr key={`m${r.index}-${j}`} style={{ borderTop: "1px dashed var(--border)", background: "rgba(22,163,74,.04)" }}>
+                      <td style={{ padding: "4px 8px", color: ITEM_TYPE_COLORS.material, fontSize: 11 }}>└ материал</td>
+                      <td style={{ padding: "4px 8px" }} />
+                      <td style={{ padding: "4px 8px" }} />
+                      <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.name}</td>
+                      <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.unit ?? "—"}</td>
+                      <td style={{ padding: "4px 8px", fontFamily: "var(--mono)" }}>{m.quantity ?? "—"}</td>
+                      <td style={{ padding: "4px 8px", fontFamily: "var(--mono)" }}>{m.total_price != null ? fmtMoney(m.total_price) : "—"}</td>
+                    </tr>
+                  ))}
+                </Fragment>
+              );
+            })}
 
-      {/* Быстрый доступ к проблемным строкам */}
-      {preview.unknown_rows.length > 0 && <PreviewRowsTable title="Сомнительные" rows={preview.unknown_rows} />}
-      {preview.low_confidence_rows.length > 0 && <PreviewRowsTable title="Низкая уверенность" rows={preview.low_confidence_rows} />}
+            {/* Добавленные оператором строки */}
+            {addedRows.map((a, i) => (
+              <tr key={`added-${i}`} style={{ borderTop: "1px solid var(--border)", background: "rgba(34,197,94,.06)" }}>
+                <td style={{ padding: "4px 8px" }}>
+                  <select
+                    value={a.item_type}
+                    onChange={(e) => updateAdded(i, { item_type: e.target.value as EstimateItemType })}
+                    style={{ fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4, background: "var(--surface)", color: ITEM_TYPE_COLORS[a.item_type], fontWeight: 600 }}
+                  >
+                    {EDITABLE_TYPES.map((opt) => (
+                      <option key={opt} value={opt} style={{ color: "var(--text)" }}>{ITEM_TYPE_LABELS[opt]}</option>
+                    ))}
+                  </select>
+                </td>
+                <td style={{ padding: "6px 8px", color: "var(--muted)" }}>авто</td>
+                <td style={{ padding: "4px 8px" }}>
+                  <input value={a.section ?? ""} onChange={(e) => updateAdded(i, { section: e.target.value })} placeholder="раздел"
+                    style={{ width: 90, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4 }} />
+                </td>
+                <td style={{ padding: "4px 8px" }}>
+                  <input value={a.name} onChange={(e) => updateAdded(i, { name: e.target.value })} placeholder="наименование"
+                    style={{ width: "100%", minWidth: 160, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4 }} />
+                </td>
+                <td style={{ padding: "4px 8px" }}>
+                  <input value={a.unit ?? ""} onChange={(e) => updateAdded(i, { unit: e.target.value })} placeholder="ед."
+                    style={{ width: 50, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4 }} />
+                </td>
+                <td style={{ padding: "4px 8px" }}>
+                  <input value={a.quantity ?? ""} onChange={(e) => updateAdded(i, { quantity: numFromInput(e.target.value) })} placeholder="0"
+                    style={{ width: 60, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4, fontFamily: "var(--mono)" }} />
+                </td>
+                <td style={{ padding: "4px 8px", display: "flex", gap: 6, alignItems: "center" }}>
+                  <input value={a.total_price ?? ""} onChange={(e) => updateAdded(i, { total_price: numFromInput(e.target.value) })} placeholder="0"
+                    style={{ width: 80, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4, fontFamily: "var(--mono)" }} />
+                  <button type="button" onClick={() => setAddedRows((prev) => prev.filter((_, j) => j !== i))}
+                    title="Удалить строку"
+                    style={{ border: "none", background: "transparent", color: "var(--red)", cursor: "pointer", fontSize: 14 }}>✕</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
-      <div style={{ marginTop: 14, display: "flex", gap: 10 }}>
+      <button
+        type="button"
+        onClick={() => setAddedRows((prev) => [...prev, emptyAddedRow()])}
+        style={{ marginTop: 10, padding: "7px 12px", background: "var(--surface)", border: "1px dashed var(--border2)", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" }}
+      >
+        ➕ Добавить строку
+      </button>
+
+      <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
         <button
-          onClick={onConfirm}
+          onClick={() => onConfirm(buildEdits())}
           disabled={confirming}
           style={{ flex: 1, padding: "11px", background: "var(--blue-dark)", color: "#fff", border: "none", borderRadius: 6, fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: confirming ? 0.7 : 1 }}
         >
@@ -1024,80 +1153,9 @@ function PreviewPanel({
           Отмена
         </button>
       </div>
-    </div>
-  );
-}
-
-function PreviewGroupBlock({ group, defaultOpen }: { group: PreviewGroup; defaultOpen?: boolean }) {
-  const subs: { key: EstimateItemType; rows: PreviewRow[] }[] = [
-    { key: "work", rows: group.works },
-    { key: "material", rows: group.materials },
-    { key: "mechanism", rows: group.mechanisms },
-    { key: "overhead", rows: group.overhead },
-    { key: "unknown", rows: group.unknown },
-  ];
-  const chips = subs
-    .filter((s) => (group.totals[s.key]?.count ?? 0) > 0)
-    .map((s) => `${ITEM_TYPE_LABELS[s.key]}: ${group.totals[s.key].count}`)
-    .join(" · ");
-
-  return (
-    <details open={defaultOpen} style={{ marginTop: 10, border: "1px solid var(--border)", borderRadius: 6 }}>
-      <summary style={{ cursor: "pointer", padding: "8px 10px", fontWeight: 600, fontSize: 13, background: "rgba(148,163,184,.06)" }}>
-        {group.section}
-        <span style={{ fontWeight: 400, fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>{chips}</span>
-      </summary>
-      <div style={{ padding: "4px 10px 10px" }}>
-        {subs.map((s) =>
-          s.rows.length ? (
-            <PreviewRowsTable key={s.key} title={ITEM_TYPE_LABELS[s.key]} rows={s.rows} showNested={s.key === "work"} />
-          ) : null
-        )}
-      </div>
-    </details>
-  );
-}
-
-function PreviewRowsTable({ title, rows, showNested }: { title: string; rows: PreviewRow[]; showNested?: boolean }) {
-  if (!rows.length) return null;
-  return (
-    <div style={{ marginTop: 12 }}>
-      <div style={{ fontSize: 11, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 }}>{title}</div>
-      <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-          <thead>
-            <tr style={{ background: "rgba(148,163,184,.08)" }}>
-              {["Тип", "Раздел", "Наименование", "Ед.", "Кол-во", "Сумма"].map((h) => (
-                <th key={h} style={{ textAlign: "left", padding: "6px 8px", fontWeight: 600, color: "var(--muted)" }}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((r, i) => (
-              <Fragment key={i}>
-                <tr style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: "6px 8px", color: ITEM_TYPE_COLORS[r.item_type], fontWeight: 600 }}>{ITEM_TYPE_LABELS[r.item_type]}</td>
-                  <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.section ?? "—"}</td>
-                  <td style={{ padding: "6px 8px" }}>{r.name}</td>
-                  <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.unit ?? "—"}</td>
-                  <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.quantity ?? "—"}</td>
-                  <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.total_price != null ? fmtMoney(r.total_price) : "—"}</td>
-                </tr>
-                {showNested && (r.materials ?? []).map((m, j) => (
-                  <tr key={`m${j}`} style={{ borderTop: "1px dashed var(--border)", background: "rgba(22,163,74,.04)" }}>
-                    <td style={{ padding: "4px 8px", color: ITEM_TYPE_COLORS.material, fontSize: 11 }}>└ материал</td>
-                    <td style={{ padding: "4px 8px" }} />
-                    <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.name}</td>
-                    <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.unit ?? "—"}</td>
-                    <td style={{ padding: "4px 8px", fontFamily: "var(--mono)" }}>{m.quantity ?? "—"}</td>
-                    <td style={{ padding: "4px 8px", fontFamily: "var(--mono)" }}>{m.total_price != null ? fmtMoney(m.total_price) : "—"}</td>
-                  </tr>
-                ))}
-              </Fragment>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {changedCount > 0 && (
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--muted)" }}>Правок к применению: {changedCount}</div>
+      )}
     </div>
   );
 }
