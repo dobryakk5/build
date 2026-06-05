@@ -93,6 +93,24 @@ def _make_section_key(index: int, normalized_title: str) -> str:
     return f"sec_{index:04d}_{short_hash}"
 
 
+_WORK_NAME_PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+
+
+def _normalize_work_name(raw: Any) -> str:
+    """Каноничный ключ имени работы для дедупликации ai_added против сметы.
+
+    Схлопывает регистр, пунктуацию и кратные пробелы. Ловит только точные/почти
+    точные повторы («Гидроизоляция фундамента» ×2, дубль в двух группах). Синонимы
+    («Разметка участка» vs «Услуги геодезиста») этим не отсекаются — для них в
+    промпт передаётся список уже существующих работ.
+    """
+    text = str(raw or "").strip().casefold()
+    if not text:
+        return ""
+    text = _WORK_NAME_PUNCT_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -668,6 +686,7 @@ async def _process_stage1(job_id: str) -> None:
                 "gap_fill_trimmed": diagnostics.get("gap_fill_trimmed") or [],
                 "repeated_sections": diagnostics.get("repeated_sections") or [],
                 "unassigned_ai_items": diagnostics.get("unassigned_ai_items") or [],
+                "gap_fill_duplicates": diagnostics.get("gap_fill_duplicates") or [],
             }
             session.llm_model = settings.KTP_GENERATION_MODEL
             session.prompt_version = PROMPT_VERSION
@@ -718,6 +737,7 @@ async def _run_stage1_ai(
     diagnostics.setdefault("gap_fill_trimmed", [])
     diagnostics.setdefault("repeated_sections", [])
     diagnostics.setdefault("unassigned_ai_items", [])
+    diagnostics.setdefault("gap_fill_duplicates", [])
 
     estimate_to_row_key = {est.id: row_key for row_key, est in row_keys.items()}
 
@@ -1215,25 +1235,36 @@ def _build_per_group_gap_fill_prompt(
     kind_label: str,
     display_title: str,
     items: list[dict[str, Any]],
+    project_works: list[str],
     clarification_answers: dict | None,
 ) -> str:
     items_block = "\n".join(f"- {it['name']}" for it in items) or "(пусто)"
+    project_block = "\n".join(f"- {w}" for w in project_works) or "(нет)"
     clarification_block = _format_clarification_answers_for_prompt(clarification_answers)
     clarification_section = f"\n\n{clarification_block}" if clarification_block else ""
 
     return f"""Тип объекта: {kind_label}
 Группа работ: «{display_title}»
 
-РАБОТЫ В ГРУППЕ:
+РАБОТЫ В ЭТОЙ ГРУППЕ:
 {items_block}
+
+УЖЕ ЕСТЬ В ПРОЕКТЕ (во всех группах — НЕ предлагай повторно):
+{project_block}
 {clarification_section}
 
 ЗАДАЧА:
 1. Определи, каких работ ВНУТРИ ИМЕННО ЭТОЙ ГРУППЫ технологически не хватает,
    чтобы её можно было выполнить.
-2. Верни не более {PER_GROUP_GAP_FILL_MAX_ITEMS} пунктов. Пустой список — норма.
-3. Каждая запись обязательно содержит "ai_reason" с короткой причиной.
-4. Не добавляй работы из других групп.
+2. НЕ предлагай работу, которая уже есть в проекте (список выше) — включая её
+   синонимы, переформулировки и под-операции. Если сомневаешься — не добавляй.
+3. Добавляй ТОЛЬКО физические строительно-монтажные работы (устройство, монтаж,
+   демонтаж, укладка, кладка). НЕ добавляй проверки, измерения, изыскания,
+   контроль качества, обследования, разметку, согласования — это не отдельные
+   работы ГПР.
+4. Верни не более {PER_GROUP_GAP_FILL_MAX_ITEMS} пунктов. Пустой список — норма.
+5. Каждая запись обязательно содержит "ai_reason" с короткой причиной.
+6. Не добавляй работы из других групп.
 
 Верни строго JSON без markdown:
 {{"added_items": [
@@ -1253,7 +1284,7 @@ def _build_project_gap_fill_prompt(
 
     return f"""Тип объекта: {kind_label}
 
-ДОСТУПНЫЕ ГРУППЫ (по group_key):
+ГРУППЫ И ИХ РАБОТЫ (group_key, название, уже включённые работы):
 {groups_block}
 {clarification_section}
 
@@ -1261,11 +1292,18 @@ def _build_project_gap_fill_prompt(
 1. Опираясь на состав проекта и ответы пользователя, предложи технологически
    обязательные работы, которых в проекте НЕТ вообще (демонтаж, пусконаладка,
    вывоз мусора, благоустройство и т.п.).
-2. Постарайся распределить такие работы в ИМЕЮЩИЕСЯ группы по group_key.
-3. Если работа не подходит ни к одной группе — помести её в "unassigned".
-4. Не более {PROJECT_GAP_FILL_MAX_DISTRIBUTED} записей в distributed
+2. НЕ предлагай работу, которая уже есть в любой группе (сверяйся со списком
+   works у каждой группы) — включая её синонимы, переформулировки и под-операции.
+   Если сомневаешься — не добавляй.
+3. Добавляй ТОЛЬКО физические строительно-монтажные работы (устройство, монтаж,
+   демонтаж, укладка, кладка). НЕ добавляй проверки, измерения, изыскания,
+   контроль качества, обследования, разметку, согласования — это не отдельные
+   работы ГПР.
+4. Постарайся распределить такие работы в ИМЕЮЩИЕСЯ группы по group_key.
+5. Если работа не подходит ни к одной группе — помести её в "unassigned".
+6. Не более {PROJECT_GAP_FILL_MAX_DISTRIBUTED} записей в distributed
    и не более {PROJECT_GAP_FILL_MAX_UNASSIGNED} в unassigned.
-5. У каждой записи обязательно "ai_reason".
+7. У каждой записи обязательно "ai_reason".
 
 Верни строго JSON без markdown:
 {{
@@ -1295,7 +1333,10 @@ def _build_stage1_prompt(
     gap_instruction = (
         "7. Добавь технологически необходимые работы, которые ОТСУТСТВУЮТ в "
         "смете, но обязательны для этого типа объекта (подготовительные, "
-        "демонтаж, пусконаладка, вывоз мусора, благоустройство). Помечай их "
+        "демонтаж, пусконаладка, вывоз мусора, благоустройство). НЕ дублируй "
+        "работы, уже присутствующие в списке (в т.ч. синонимы и под-операции), "
+        "и добавляй ТОЛЬКО физические строительно-монтажные работы — без "
+        "проверок, измерений, изысканий, контроля и разметки. Помечай их "
         '"origin": "ai_added" и заполняй "ai_reason".'
         if gap_fill
         else "7. НЕ добавляй работы, которых нет в списке позиций — только "
@@ -1530,6 +1571,14 @@ async def _run_per_group_gap_fill(
     diagnostics: dict[str, Any],
 ) -> None:
     """E.1: внутри каждой группы добавляем недостающие работы (max 3)."""
+    # Плоский список всех работ проекта — чтобы ИИ не предлагал то, что уже есть
+    # в других группах (кросс-групповые дубли вида «Армирование фундамента»).
+    project_works = [
+        it["name"]
+        for grp in python_groups.values()
+        for it in (grp.get("cleaned_items") or [])
+        if it.get("name")
+    ]
     for grp in python_groups.values():
         items = grp.get("cleaned_items") or []
         if not items:
@@ -1538,6 +1587,7 @@ async def _run_per_group_gap_fill(
             kind_label=kind_label,
             display_title=grp.get("cleaned_title") or grp["display_title"],
             items=items,
+            project_works=project_works,
             clarification_answers=clarification_answers,
         )
         label = f"per_group_gap_fill/{grp['section_key']}"
@@ -1583,7 +1633,15 @@ async def _run_project_gap_fill(
 ) -> None:
     """E.2: project-wide gap-fill. Распределённое — в группы; нераспределённое — в unassigned_ai_items."""
     available = [
-        {"group_key": grp["section_key"], "title": grp.get("cleaned_title") or grp["display_title"]}
+        {
+            "group_key": grp["section_key"],
+            "title": grp.get("cleaned_title") or grp["display_title"],
+            "works": [
+                it["name"]
+                for it in (grp.get("cleaned_items") or []) + (grp.get("gap_items") or [])
+                if it.get("name")
+            ],
+        }
         for grp in python_groups.values()
         if grp["section_key"] != FALLBACK_SECTION_KEY
     ]
@@ -1662,6 +1720,22 @@ def _assemble_canonical_groups(
     result: list[dict[str, Any]] = []
     seen_row_keys: set[str] = set()
 
+    # Дедуп ai_added gap-items: против имён работ из сметы/структуры и между
+    # собой. Снимает повторы вида «Армирование фундамента» в двух группах и
+    # «Гидроизоляция фундамента», уже присутствующую в смете.
+    existing_names: set[str] = set()
+    for est in row_keys.values():
+        norm = _normalize_work_name(est.work_name)
+        if norm:
+            existing_names.add(norm)
+    for grp in python_groups.values():
+        for it in grp.get("cleaned_items") or []:
+            norm = _normalize_work_name(it.get("name"))
+            if norm:
+                existing_names.add(norm)
+    seen_gap_names: set[str] = set()
+    dropped_dups = diagnostics.setdefault("gap_fill_duplicates", [])
+
     for grp in sorted(python_groups.values(), key=lambda g: g["sort_order"]):
         items: list[dict[str, Any]] = []
         for it in grp.get("cleaned_items") or []:
@@ -1671,7 +1745,25 @@ def _assemble_canonical_groups(
                     continue
                 seen_row_keys.add(row_key)
             items.append(it)
-        items.extend(grp.get("gap_items") or [])
+        for it in grp.get("gap_items") or []:
+            norm = _normalize_work_name(it.get("name"))
+            if not norm:
+                continue
+            if norm in existing_names or norm in seen_gap_names:
+                dropped_dups.append(
+                    {
+                        "name": it.get("name"),
+                        "section_key": grp["section_key"],
+                        "reason": (
+                            "exists_in_estimate"
+                            if norm in existing_names
+                            else "duplicate_gap"
+                        ),
+                    }
+                )
+                continue
+            seen_gap_names.add(norm)
+            items.append(it)
         result.append(
             {
                 "title": grp.get("cleaned_title") or grp["display_title"] or FALLBACK_DISPLAY_TITLE,
@@ -2074,6 +2166,7 @@ def _build_stage2_prompt(
     estimates: list[Estimate],
     clarification_answers: dict | None,
     answers: dict[str, str],
+    extra_directive: str = "",
 ) -> str:
     lines = [f"  • {it.name}" for it in items] or ["  (нет работ)"]
     works_block = "\n".join(lines)
@@ -2093,6 +2186,7 @@ def _build_stage2_prompt(
         answers_block = "\n\nНОВЫЕ ОТВЕТЫ ПОЛЬЗОВАТЕЛЯ ПО ЭТОЙ ГРУППЕ:\n" + "\n".join(
             f"  {k}: {v}" for k, v in answers.items()
         )
+    directive_block = f"\n\n{extra_directive.strip()}" if extra_directive.strip() else ""
     return f"""Ты эксперт-технолог в строительстве. На основе группы работ создай
 КТП (Карту Технологического Процесса).
 
@@ -2102,7 +2196,7 @@ def _build_stage2_prompt(
 {works_block}
 {estimate_rows_section}
 {clarification_section}
-{answers_block}
+{answers_block}{directive_block}
 
 ИНСТРУКЦИЯ:
 1. Если данных достаточно для качественного КТП, сразу создай КТП.
@@ -2110,13 +2204,17 @@ def _build_stage2_prompt(
    - данные, уже уточненные пользователем;
    - исходные строки сметы и материалы по работам этой группы.
    Если ответ уже следует из этих данных, используй его и НЕ задавай вопрос.
-3. Если после проверки всё равно не хватает ключевых технических данных, верни только уточняющие вопросы.
-4. Ответ верни только валидным JSON без markdown.
+3. НЕ задавай вопросы про марку/класс/тип бетона, а также про марки и
+   характеристики материалов — они не влияют на состав и технологическую
+   последовательность работ КТП. При необходимости прими типовое решение сам.
+4. Если после проверки всё равно не хватает ключевых ТЕХНОЛОГИЧЕСКИХ данных
+   (влияющих на состав или порядок работ), верни только уточняющие вопросы.
+5. Ответ верни только валидным JSON без markdown.
 
 Если данных не хватает:
 {{"sufficient": false, "questions": [
-  {{"key": "concrete_grade", "label": "Какой класс бетона предусмотрен?",
-   "type": "text", "hint": "Например: B25, B30"}}
+  {{"key": "<код_вопроса>", "label": "<краткий вопрос по технологии работ>",
+   "type": "text", "hint": "<пример ответа>"}}
 ]}}
 
 Если данных достаточно:
@@ -2137,6 +2235,82 @@ async def _call_stage2(prompt: str) -> dict[str, Any]:
         response_format={"type": "json_object"},
     )
     return parse_json_object(raw)
+
+
+# Вопросы про марку/класс/тип бетона относятся к материалам, а не к технологии,
+# и на состав работ КТП не влияют — такие окна пользователю не показываем.
+_IGNORED_QUESTION_RE = re.compile(
+    r"(марк\w*|класс\w*|тип\w*)\s+бетон|бетон\w*\s+(марк|класс)|concrete[_\s-]?grade",
+    re.IGNORECASE,
+)
+
+IGNORED_QUESTION_DIRECTIVE = (
+    "ВАЖНО: не задавай вопрос про марку/класс/тип бетона — прими типовое "
+    "решение и сразу составь КТП (sufficient: true)."
+)
+
+
+def _is_ignored_question(q: Any) -> bool:
+    if not isinstance(q, dict):
+        return False
+    key = str(q.get("key") or "")
+    if "concrete_grade" in key.lower():
+        return True
+    blob = f"{key} {q.get('label') or ''} {q.get('hint') or ''}"
+    return bool(_IGNORED_QUESTION_RE.search(blob))
+
+
+def _filter_card_questions(questions: list[Any]) -> list[Any]:
+    """Отсеивает несущественные для КТП уточнения (марка/класс бетона)."""
+    return [q for q in questions if not _is_ignored_question(q)]
+
+
+async def _persist_generated_card(
+    db: AsyncSession, group: KtpWbsGroup, ktp: Any
+) -> dict[str, Any]:
+    if not isinstance(ktp, dict):
+        group.status = "card_failed"
+        group.card_error_message = "LLM не вернул объект ktp"
+        await db.commit()
+        raise ValueError("LLM не вернул объект ktp")
+    group.card_title = ktp.get("title") or group.title
+    group.card_goal = ktp.get("goal") or ""
+    group.card_steps_json = ktp.get("steps", [])
+    group.card_recommendations_json = ktp.get("recommendations", [])
+    group.card_questions_json = None
+    group.status = "card_generated"
+    group.card_error_message = None
+    await db.commit()
+    await db.refresh(group)
+    return {"sufficient": True, "group_id": group.id, "card": _card_payload(group)}
+
+
+async def _generate_card_ignoring_questions(
+    db: AsyncSession,
+    group: KtpWbsGroup,
+    items: list[KtpWbsItem],
+    estimates: list[Estimate],
+    clarification_answers: dict | None,
+    answers: dict[str, str] | None,
+) -> dict[str, Any] | None:
+    """Все вопросы оказались несущественными — генерируем КТП с типовым решением
+    вместо показа пустого окна вопросов. None — если LLM всё равно не дал карту."""
+    prompt = _build_stage2_prompt(
+        group,
+        items,
+        estimates,
+        clarification_answers,
+        answers or {},
+        extra_directive=IGNORED_QUESTION_DIRECTIVE,
+    )
+    try:
+        parsed = await _call_stage2(prompt)
+    except Exception:  # noqa: BLE001
+        logger.exception("Stage2 forced card (ignored questions) failed for group %s", group.id)
+        return None
+    if not bool(parsed.get("sufficient", True)):
+        return None
+    return await _persist_generated_card(db, group, parsed.get("ktp", {}))
 
 
 async def _resolve_questions_from_known_context(
@@ -2275,6 +2449,16 @@ async def generate_card_for_wbs_group(
             await db.commit()
             raise ValueError("LLM вернул questions не списком")
 
+        questions = _filter_card_questions(questions)
+        if not questions:
+            # LLM спросил только про несущественное (марка бетона) — генерируем
+            # карточку с типовым решением, не показывая пустое окно вопросов.
+            forced = await _generate_card_ignoring_questions(
+                db, group, items, estimates, clarification_answers, answers
+            )
+            if forced is not None:
+                return forced
+
         group.card_questions_json = questions
         resolved_answers = await _resolve_questions_from_known_context(
             group=group,
@@ -2332,12 +2516,21 @@ async def generate_card_for_wbs_group(
                 retry_questions = parsed.get("questions", [])
                 if isinstance(retry_questions, list):
                     resolved_keys = set(resolved_answers)
-                    questions = [
-                        q
-                        for q in retry_questions
-                        if not isinstance(q, dict)
-                        or str(q.get("key") or "") not in resolved_keys
-                    ]
+                    questions = _filter_card_questions(
+                        [
+                            q
+                            for q in retry_questions
+                            if not isinstance(q, dict)
+                            or str(q.get("key") or "") not in resolved_keys
+                        ]
+                    )
+
+        if not questions:
+            forced = await _generate_card_ignoring_questions(
+                db, group, items, estimates, clarification_answers, answers
+            )
+            if forced is not None:
+                return forced
 
         group.card_questions_json = questions
         group.card_steps_json = None

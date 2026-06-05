@@ -481,6 +481,99 @@ def test_assemble_canonical_includes_ai_added_with_required_fields():
     assert ai_added[0]["review_status"] == "pending"
 
 
+def test_assemble_canonical_dedups_ai_added_against_estimate_and_across_groups():
+    """ai_added, совпадающий с работой сметы или повторяющийся в другой группе,
+    отбрасывается (баги: «Гидроизоляция фундамента» ×2, «Армирование» в двух
+    группах, «Вывоз мусора» уже в смете)."""
+    from app.services.ktp_estimate_service import _assemble_canonical_groups
+
+    e_hydro = make_est("e1", "Гидроизоляция фундамента", row_order=1)
+    e_other = make_est("e2", "Кладка цоколя", row_order=2)
+    row_keys = {"R1": e_hydro, "R2": e_other}
+    python_groups = {
+        "sec_0001_a": {
+            "section_key": "sec_0001_a",
+            "display_title": "Фундамент",
+            "cleaned_title": "Фундамент",
+            "rows": [("R1", e_hydro)],
+            "sort_order": 0,
+            "wt_code": None,
+            "cleaned_items": [
+                {"name": "Гидроизоляция фундамента", "origin": "from_estimate", "row_key": "R1"}
+            ],
+            "gap_items": [
+                # уже есть в смете → drop
+                {"name": "Гидроизоляция фундамента.", "origin": "ai_added",
+                 "row_key": None, "review_status": "pending", "ai_reason": "x"},
+                # новая, корректная → keep
+                {"name": "Армирование фундамента", "origin": "ai_added",
+                 "row_key": None, "review_status": "pending", "ai_reason": "x"},
+            ],
+        },
+        "sec_0002_b": {
+            "section_key": "sec_0002_b",
+            "display_title": "Цоколь",
+            "cleaned_title": "Цоколь",
+            "rows": [("R2", e_other)],
+            "sort_order": 1,
+            "wt_code": None,
+            "cleaned_items": [
+                {"name": "Кладка цоколя", "origin": "from_estimate", "row_key": "R2"}
+            ],
+            "gap_items": [
+                # дубль ai_added из первой группы → drop
+                {"name": "Армирование фундамента", "origin": "ai_added",
+                 "row_key": None, "review_status": "pending", "ai_reason": "x"},
+            ],
+        },
+    }
+    diag = _make_diag()
+    out = _assemble_canonical_groups(python_groups, row_keys, diag)
+    ai_names = [
+        it["name"]
+        for g in out
+        for it in g["items"]
+        if it["origin"] == "ai_added"
+    ]
+    assert ai_names == ["Армирование фундамента"]
+    dups = diag["gap_fill_duplicates"]
+    reasons = {d["reason"] for d in dups}
+    assert reasons == {"exists_in_estimate", "duplicate_gap"}
+
+
+def test_filter_card_questions_drops_concrete_grade():
+    from app.services.ktp_estimate_service import _filter_card_questions
+
+    questions = [
+        {"key": "concrete_grade", "label": "Какой класс бетона предусмотрен?"},
+        {"key": "q1", "label": "Марка бетона фундамента?"},
+        {"key": "q2", "label": "Тип бетона для стяжки"},
+        {"key": "access", "label": "Есть ли подъезд для техники?"},
+        {"key": "depth", "label": "Глубина заложения фундамента?"},
+    ]
+    out = _filter_card_questions(questions)
+    assert [q["key"] for q in out] == ["access", "depth"]
+
+
+def test_filter_card_questions_keeps_unrelated_material_questions():
+    from app.services.ktp_estimate_service import _filter_card_questions
+
+    # «бетон» не упомянут — вопрос остаётся
+    questions = [{"key": "brick", "label": "Какая марка кирпича?"}]
+    assert _filter_card_questions(questions) == questions
+
+
+def test_build_stage2_prompt_omits_concrete_example_and_forbids_it():
+    from app.services.ktp_estimate_service import _build_stage2_prompt
+
+    group = MagicMock()
+    group.id = "g1"
+    group.title = "Фундамент"
+    prompt = _build_stage2_prompt(group, [], [], None, {})
+    assert "concrete_grade" not in prompt
+    assert "марку/класс" in prompt
+
+
 def test_materialize_wbs_handles_ai_added_with_null_row_key():
     from app.services.ktp_estimate_service import _materialize_wbs
 
