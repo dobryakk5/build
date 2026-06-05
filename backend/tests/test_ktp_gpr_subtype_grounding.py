@@ -115,7 +115,8 @@ async def test_compute_durations_bypasses_ai_for_subtype_items():
     ungrounded = make_item("u1", quantity=100.0, unit="шт")
     g = make_group("grp", items=[grounded, ungrounded])
 
-    specs = {("2.1", "м3"): make_spec(code="2.1", unit="м3", output_per_day=25.0, crew_size=2, lag_after_days=3)}
+    # spec ключуется per-item кодом (session_subtype_code): "2.1" + item.id "g1"
+    specs = {("2.1::g1", "м3"): make_spec(code="2.1", unit="м3", output_per_day=25.0, crew_size=2, lag_after_days=3)}
 
     def resolve(it, est, taxonomy, by_code):
         return ("2.1", "Кладка", None, "м3") if it.id == "g1" else ("3.5", "Прочее", None, "шт")

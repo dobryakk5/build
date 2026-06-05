@@ -158,7 +158,8 @@ class SessionSubtypeOut(BaseModel):
     def of(cls, s) -> "SessionSubtypeOut":
         return cls(
             id=s.id,
-            subtype_code=s.subtype_code,
+            # на фронт отдаём чистый код подтипа (без per-item суффикса)
+            subtype_code=svc.base_subtype_code(s.subtype_code),
             subtype_name=s.subtype_name,
             macro_name=s.macro_name,
             unit=s.unit,

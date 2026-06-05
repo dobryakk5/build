@@ -2642,6 +2642,26 @@ UNKNOWN_SUBTYPE_NAME = "Без определённого подтипа"
 _DEFAULT_VOLUME = 100.0
 
 
+SESSION_SUBTYPE_ITEM_SEP = "::"
+
+
+def session_subtype_code(item: KtpWbsItem, code: str) -> str:
+    """Код строки производительности: каждая работа — отдельная строка «как есть».
+
+    Раньше работы схлопывались по (код подтипа, ед.изм.), из-за чего разные работы
+    одного грубого подтипа (напр. вся кладка → «Стены несущие») сливались, а их
+    имена терялись. Теперь ключ уникален по ``item.id``; чистый код подтипа
+    сохраняется префиксом (``base_subtype_code``) для дефолтов и отображения.
+    Должно совпадать в ``build_session_subtypes`` и в подборе норм ГПР.
+    """
+    return f"{code}{SESSION_SUBTYPE_ITEM_SEP}{item.id}"
+
+
+def base_subtype_code(stored_code: str) -> str:
+    """Чистый код подтипа из хранимого per-item кода (для справочника/отображения)."""
+    return stored_code.split(SESSION_SUBTYPE_ITEM_SEP, 1)[0]
+
+
 def _resolve_item_subtype(
     item: KtpWbsItem,
     estimate: Estimate | None,
@@ -2693,11 +2713,13 @@ async def _load_session_subtypes(
 async def build_session_subtypes(
     db: AsyncSession, session: KtpEstimateSession
 ) -> list[KtpSessionSubtype]:
-    """Построить/обновить таблицу подтипов сессии из принятых работ КТП.
+    """Построить/обновить таблицу производительности сессии из принятых работ КТП.
 
-    Группировка по паре (subtype_code, unit). ``volume`` всегда пересчитывается из
-    сметы; ``subtype_name/macro_name`` обновляются из справочника; правки оператора
-    (``*_source='manual'``) не перезатираются. Строки, исчезнувшие из сметы, удаляются.
+    Одна строка = одна работа (``item``) «как есть» — ничего не схлопываем, чтобы
+    разные работы одного грубого подтипа не сливались и не терялись. Подтип из
+    справочника даёт дефолты (производительность/бригада/пауза) и контекст
+    (код, macro). ``volume`` берётся из объёма работы; правки оператора
+    (``*_source='manual'``) не перезатираются. Исчезнувшие работы удаляются.
     """
     from app.services.work_taxonomy_service import load_taxonomy
 
@@ -2730,62 +2752,76 @@ async def build_session_subtypes(
         s.code: s for s in await db.scalars(select(WorkSubtype))
     }
 
-    # Агрегируем по (code, unit).
-    agg: dict[tuple[str, str | None], dict[str, Any]] = {}
-    for it in items:
-        est = estimates.get(it.estimate_id) if it.estimate_id else None
-        code, name, macro_name, unit = _resolve_item_subtype(
-            it, est, taxonomy, subtypes_by_code
-        )
-        key = (code, unit)
-        bucket = agg.setdefault(
-            key,
-            {"name": name, "macro_name": macro_name, "volume": 0.0},
-        )
-        if it.quantity is not None:
-            bucket["volume"] += float(it.quantity)
+    # Размер бригады задаётся при загрузке сметы (EstimateBatch.workers_count) —
+    # берём его как дефолт вместо справочника.
+    batch = await db.get(EstimateBatch, session.estimate_batch_id)
+    batch_crew = (
+        int(batch.workers_count)
+        if batch and batch.workers_count
+        else None
+    )
 
     existing = {
         (s.subtype_code, s.unit): s
         for s in await _load_session_subtypes(db, session.id)
     }
 
+    # Бригада: приоритет — значение из загрузки сметы; иначе справочник.
+    def _crew_default(ref: WorkSubtype | None) -> tuple[int | None, str]:
+        if batch_crew is not None:
+            return batch_crew, "estimate"
+        return (ref.crew_size if ref else None), "default"
+
+    # Одна строка = одна работа. Ключ уникален по item.id (закодирован в
+    # subtype_code), поэтому разные работы не сливаются.
     kept_keys: set[tuple[str, str | None]] = set()
-    for (code, unit), data in agg.items():
-        kept_keys.add((code, unit))
-        ref = subtypes_by_code.get(code)
-        volume = data["volume"] if data["volume"] > 0 else _DEFAULT_VOLUME
-        row = existing.get((code, unit))
+    for it in items:
+        est = estimates.get(it.estimate_id) if it.estimate_id else None
+        base_code, sub_name, macro_name, unit = _resolve_item_subtype(
+            it, est, taxonomy, subtypes_by_code
+        )
+        ref = subtypes_by_code.get(base_code)  # None для работ без подтипа
+        stored_code = session_subtype_code(it, base_code)
+        display_name = (it.name or "").strip() or sub_name or base_code
+        volume = (
+            float(it.quantity)
+            if it.quantity is not None and float(it.quantity) > 0
+            else _DEFAULT_VOLUME
+        )
+        crew_value, crew_src = _crew_default(ref)
+        key = (stored_code, unit)
+        kept_keys.add(key)
+        row = existing.get(key)
         if row is None:
             row = KtpSessionSubtype(
                 id=_uuid(),
                 session_id=session.id,
-                subtype_code=code,
-                subtype_name=data["name"] or code,
-                macro_name=data["macro_name"],
+                subtype_code=stored_code,
+                subtype_name=display_name,
+                macro_name=macro_name,
                 unit=unit,
                 volume=volume,
                 output_per_day=ref.output_per_day if ref else None,
-                crew_size=ref.crew_size if ref else None,
+                crew_size=crew_value,
                 lag_after_days=int(ref.lag_after_days) if ref else 0,
                 output_source="default",
-                crew_source="default",
+                crew_source=crew_src,
                 lag_source="default",
             )
             db.add(row)
         else:
-            # имена и объём — всегда из актуальных данных
-            row.subtype_name = data["name"] or row.subtype_name
-            row.macro_name = data["macro_name"]
+            # имя/подтип/объём — всегда из актуальных данных работы
+            row.subtype_name = display_name
+            row.macro_name = macro_name
             row.volume = volume
-            # дефолтные поля — обновляем из справочника, ручные не трогаем
-            if ref is not None:
-                if row.output_source == "default":
-                    row.output_per_day = ref.output_per_day
-                if row.crew_source == "default":
-                    row.crew_size = ref.crew_size
-                if row.lag_source == "default":
-                    row.lag_after_days = int(ref.lag_after_days)
+            # дефолтные поля обновляем из источника, ручные правки не трогаем
+            if row.output_source == "default" and ref is not None:
+                row.output_per_day = ref.output_per_day
+            if row.crew_source != "manual":
+                row.crew_size = crew_value
+                row.crew_source = crew_src
+            if row.lag_source == "default" and ref is not None:
+                row.lag_after_days = int(ref.lag_after_days)
 
     # Удаляем строки, которых больше нет в смете.
     for key, row in existing.items():

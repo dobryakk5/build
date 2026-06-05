@@ -1466,7 +1466,7 @@ function StageProductivity({
             <div>Пауза, дн.</div>
           </div>
           {subtypes.map((s) => {
-            const unknown = s.subtype_code === "__unknown__";
+            const unknown = s.subtype_code.startsWith("__unknown__");
             return (
               <div
                 key={s.id}
@@ -1514,7 +1514,9 @@ function StageProductivity({
                   suffix="дн"
                   disabled={busy}
                   allowZero
-                  source={s.lag_source}
+                  // Пауза по умолчанию 0 и необязательна — не помечаем как ≈,
+                  // показываем зелёным только если оператор сам её задал.
+                  source={s.lag_source === "manual" ? "manual" : undefined}
                   onSave={(v) => void saveField(s.id, { lag_after_days: v ?? 0 })}
                 />
               </div>
@@ -1537,8 +1539,9 @@ function NumCell({
   value: number | null | undefined;
   suffix?: string;
   disabled?: boolean;
-  // 'manual' — задано оператором (зелёное); 'default' с значением — примерное из справочника (≈)
-  source?: "default" | "manual";
+  // 'manual' — задано оператором (зелёное); 'default' с значением — примерное из
+  // справочника (≈); 'estimate' — взято из загрузки сметы (нейтральное)
+  source?: "default" | "manual" | "estimate";
   allowZero?: boolean;
   onSave: (v: number | null) => void;
 }) {
@@ -1571,6 +1574,7 @@ function NumCell({
 
   const isManual = source === "manual";
   const isApprox = source === "default" && value != null;
+  const isFromEstimate = source === "estimate";
   const border = isManual ? "#16a34a55" : isApprox ? "#f59e0b66" : "var(--border2)";
   const bg = isManual ? "#22c55e0d" : isApprox ? "#f59e0b0f" : "var(--bg)";
 
@@ -1592,7 +1596,15 @@ function NumCell({
         }}
         inputMode="decimal"
         placeholder="—"
-        title={isApprox ? "Примерное значение — измените, чтобы зафиксировать своё" : isManual ? "Задано оператором" : undefined}
+        title={
+          isApprox
+            ? "Примерное значение — измените, чтобы зафиксировать своё"
+            : isManual
+            ? "Задано оператором"
+            : isFromEstimate
+            ? "Размер бригады из загрузки сметы — можно изменить"
+            : undefined
+        }
         style={{
           width: 60,
           padding: "5px 7px",

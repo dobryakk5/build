@@ -771,7 +771,8 @@ export interface KtpSessionSubtype {
   crew_size?: number | null;
   lag_after_days: number;
   output_source: "default" | "manual";
-  crew_source: "default" | "manual";
+  // "estimate" — размер бригады взят из загрузки сметы (workers_count)
+  crew_source: "default" | "manual" | "estimate";
   lag_source: "default" | "manual";
 }
 

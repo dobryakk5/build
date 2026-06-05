@@ -142,6 +142,38 @@ def classify_estimate_row(
     return ClassificationResult(ESTIMATE_ITEM_TYPE_UNKNOWN, 0.3, "no_signal", normalized)
 
 
+def classify_sectioned_row(
+    name: str,
+    spec: str | None,
+    unit: str | None,
+    block_default: str,
+) -> str:
+    """Classify a row in a block-structured estimate (РАБОТЫ / МАТЕРИАЛЫ /
+    НАКЛАДНЫЕ). The block sets the default type; obvious keywords override it
+    (a crane in the overhead block is still a mechanism, "Расходные материалы"
+    is a material). Work-block rows stay work — their machines are extracted
+    separately via ``extract_mechanism_token``."""
+    full = " ".join(p for p in (name or "", spec or "") if p)
+    unit_norm = (unit or "").strip().lower()
+
+    if unit_norm in _PERCENT_UNITS or _OVERHEAD_RE.search(full) and block_default != ESTIMATE_ITEM_TYPE_WORK:
+        return ESTIMATE_ITEM_TYPE_OVERHEAD
+
+    mech = _MECHANISM_RE.search(full)
+    work = _WORK_RE.search(full)
+    machine_leads = bool(mech) and not (work and work.start() <= mech.start())
+
+    if block_default == ESTIMATE_ITEM_TYPE_WORK:
+        return ESTIMATE_ITEM_TYPE_WORK
+    if machine_leads:
+        return ESTIMATE_ITEM_TYPE_MECHANISM
+    if block_default == ESTIMATE_ITEM_TYPE_OVERHEAD:
+        if _MATERIAL_RE.search(full) or "материал" in full.lower():
+            return ESTIMATE_ITEM_TYPE_MATERIAL
+        return ESTIMATE_ITEM_TYPE_OVERHEAD
+    return ESTIMATE_ITEM_TYPE_MATERIAL
+
+
 def extract_mechanism_token(text: str | None) -> str | None:
     """Return the machine word mentioned inside a work row (for resource
     extraction), e.g. «Бурение скважин ямобуром» → "Ямобуром". Returns None if

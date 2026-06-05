@@ -233,7 +233,9 @@ def _apply_subtype_norm(
     it.norm_kind = "vyrabotka"
     it.norm_value = round(output_per_day, 4)
     it.norm_unit = (it.unit or spec.unit or "")[:32] or None
-    it.norm_ref = f"подтип {spec.subtype_code}"[:64]
+    from app.services.ktp_estimate_service import base_subtype_code
+
+    it.norm_ref = f"подтип {base_subtype_code(spec.subtype_code)}"[:64]
     it.duration_days = max(1, min(MAX_DURATION_DAYS, int(duration)))
     it.labor_hours = float(calculate_labor_hours(it.duration_days, brigade, hours_per_day))
     return True
@@ -256,7 +258,10 @@ async def _compute_durations(
     on_progress: Callable[[str], Awaitable[None]] | None = None,
     default_brigade: int = DEFAULT_BRIGADE_SIZE,
 ) -> None:
-    from app.services.ktp_estimate_service import _resolve_item_subtype
+    from app.services.ktp_estimate_service import (
+        _resolve_item_subtype,
+        session_subtype_code,
+    )
     from app.services.work_taxonomy_service import load_taxonomy
 
     items = [it for g in groups for it in g.accepted_items]
@@ -287,7 +292,7 @@ async def _compute_durations(
             code, _name, _macro, unit = _resolve_item_subtype(
                 it, est, taxonomy, subtypes_by_code
             )
-            spec = specs.get((code, unit))
+            spec = specs.get((session_subtype_code(it, code), unit))
             if spec is not None:
                 g.prod_lag_after = max(g.prod_lag_after, int(spec.lag_after_days or 0))
             if _apply_subtype_norm(it, spec, hours_per_day, default_brigade):

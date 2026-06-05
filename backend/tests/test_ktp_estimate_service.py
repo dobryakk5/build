@@ -574,6 +574,27 @@ def test_build_stage2_prompt_omits_concrete_example_and_forbids_it():
     assert "марку/класс" in prompt
 
 
+def test_session_subtype_code_is_per_item_and_recoverable():
+    from app.services.ktp_estimate_service import (
+        UNKNOWN_SUBTYPE_CODE,
+        base_subtype_code,
+        session_subtype_code,
+    )
+
+    it = MagicMock()
+    it.id = "item-42"
+    # каждая работа — отдельная строка (уникальный код по item.id)
+    known = session_subtype_code(it, "2.1")
+    unknown = session_subtype_code(it, UNKNOWN_SUBTYPE_CODE)
+    assert known == "2.1::item-42"
+    assert unknown == f"{UNKNOWN_SUBTYPE_CODE}::item-42"
+    # чистый код подтипа восстанавливается для справочника/отображения
+    assert base_subtype_code(known) == "2.1"
+    assert base_subtype_code(unknown) == UNKNOWN_SUBTYPE_CODE
+    # обычный код без суффикса остаётся как есть
+    assert base_subtype_code("2.1") == "2.1"
+
+
 def test_materialize_wbs_handles_ai_added_with_null_row_key():
     from app.services.ktp_estimate_service import _materialize_wbs
 

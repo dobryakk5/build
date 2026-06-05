@@ -10,6 +10,7 @@ from .nocode_text_parser import NoCodeTextParser
 from .foundation_parser import FoundationTableParser
 from .materials_labor_pdf_parser import MaterialsLaborPdfParser
 from .excel_typed_journal_parser import ExcelTypedJournalParser
+from .excel_sectioned_parser import ExcelSectionedCostSplitParser, detect as _detect_sectioned
 from .excel_parser import ExcelEstimateParser
 
 # Supported format identifiers — PDF
@@ -47,7 +48,7 @@ VALID_PARSER_PROFILES = {
 # Profiles with a real implementation right now.
 IMPLEMENTED_PROFILES = {
     PROFILE_AUTO, PROFILE_PDF_MATERIALS_LABOR, PROFILE_EXCEL_TYPED_JOURNAL,
-    PROFILE_MANUAL_MAPPING,
+    PROFILE_EXCEL_SECTIONED_COST_SPLIT, PROFILE_MANUAL_MAPPING,
 }
 # Profiles to show in the UI dropdown (only the ready ones), with labels.
 UI_PROFILES = [
@@ -234,11 +235,26 @@ def parse_estimate(
         _tag_profile(rows, profile)
         return rows, meta
 
+    if profile == PROFILE_EXCEL_SECTIONED_COST_SPLIT:
+        if not is_excel:
+            raise ValueError("Профиль «Excel: блоки РАБОТЫ/МАТЕРИАЛЫ/НАКЛАДНЫЕ» применим только к Excel")
+        rows, meta = ExcelSectionedCostSplitParser().parse(path)
+        meta["format"] = FORMAT_EXCEL
+        meta["parser_profile"] = profile
+        _tag_profile(rows, profile)
+        return rows, meta
+
     # ── auto / manual_mapping → legacy detection ───────────────────────────────
     if is_excel:
-        # Auto-detect the "Тип" column journal and parse it with full typing
-        # (separate material/mechanism/overhead rows). Operators don't pick a
-        # profile — the file type is detected here.
+        # Operators don't pick a profile — detect the Excel layout here.
+        # 1) blocks РАБОТЫ/МАТЕРИАЛЫ/НАКЛАДНЫЕ + cost-split header.
+        if _detect_sectioned(path):
+            rows, meta = ExcelSectionedCostSplitParser().parse(path)
+            meta["format"] = FORMAT_EXCEL
+            meta["parser_profile"] = PROFILE_EXCEL_SECTIONED_COST_SPLIT
+            _tag_profile(rows, PROFILE_EXCEL_SECTIONED_COST_SPLIT)
+            return rows, meta
+        # 2) explicit «Тип» column journal.
         if _excel_is_typed_journal(path):
             rows, meta = ExcelTypedJournalParser().parse(path)
             meta["format"] = FORMAT_EXCEL
