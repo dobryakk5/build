@@ -17,6 +17,7 @@ from .ktp_estimate import (
     KtpWbsGroup,
     KtpWbsItem,
     KtpWbsGroupDependency,
+    KtpSessionSubtype,
 )
 from .foreman_task_report import ForemanTaskReport
 from .other        import (
@@ -81,6 +82,7 @@ __all__ = [
     "WorkSubtype", "WorkPrecedence",
     "KtpGroup", "KtpCard",
     "KtpEstimateSession", "KtpWbsGroup", "KtpWbsItem", "KtpWbsGroupDependency",
+    "KtpSessionSubtype",
     "ForemanTaskReport",
     "Comment", "TaskHistory", "Job",
     "DailyReport", "DailyReportItem",

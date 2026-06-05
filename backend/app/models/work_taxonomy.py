@@ -5,7 +5,7 @@
 присваивается work-строкам сметы по keywords (см. work_taxonomy_service), а
 граф предшествования соединяет задачи Ганта по subtype_code.
 """
-from sqlalchemy import Integer, Text, UniqueConstraint
+from sqlalchemy import Integer, Numeric, SmallInteger, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -21,6 +21,12 @@ class WorkSubtype(Base):
     code:       Mapped[str]       = mapped_column(Text, nullable=False, unique=True)  # напр. "2.3"
     name:       Mapped[str]       = mapped_column(Text, nullable=False)
     keywords:   Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False, default=list)
+
+    # Дефолты производительности (заполняются экспертом в справочнике; могут быть NULL).
+    output_per_day: Mapped[float | None] = mapped_column(Numeric(12, 3))   # ед/смену
+    crew_size:      Mapped[int | None]   = mapped_column(SmallInteger)     # типовая бригада
+    lag_after_days: Mapped[int]          = mapped_column(Integer, nullable=False, server_default=text("0"))
+    default_unit:   Mapped[str | None]   = mapped_column(Text)
 
 
 class WorkPrecedence(Base):

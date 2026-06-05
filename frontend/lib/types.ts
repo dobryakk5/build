@@ -691,6 +691,8 @@ export type KtpEstimateStatus =
   | "stage1_review"
   | "stage1_failed"
   | "stage2_review"
+  | "prod_pending"
+  | "prod_review"
   | "fer_pending"
   | "fer_processing"
   | "fer_review"
@@ -758,10 +760,26 @@ export interface KtpWbsGroupDependency {
   depends_on_group_id: string;
 }
 
+export interface KtpSessionSubtype {
+  id: string;
+  subtype_code: string;
+  subtype_name: string;
+  macro_name?: string | null;
+  unit?: string | null;
+  volume?: number | null;
+  output_per_day?: number | null;
+  crew_size?: number | null;
+  lag_after_days: number;
+  output_source: "default" | "manual";
+  crew_source: "default" | "manual";
+  lag_source: "default" | "manual";
+}
+
 export interface KtpWbs {
   session: KtpEstimateSession;
   groups: KtpWbsGroup[];
   group_dependencies: KtpWbsGroupDependency[];
+  session_subtypes: KtpSessionSubtype[];
 }
 
 export interface KtpEstimateCard {

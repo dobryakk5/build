@@ -12,7 +12,7 @@ import asyncio
 import logging
 import math
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Awaitable, Callable
 
 from sqlalchemy import delete, or_, select
@@ -28,10 +28,12 @@ from app.models import (
     GanttTask,
     Job,
     KtpEstimateSession,
+    KtpSessionSubtype,
     KtpWbsGroup,
     KtpWbsGroupDependency,
     KtpWbsItem,
     TaskDependency,
+    WorkSubtype,
 )
 from app.models.estimate import Estimate
 from app.services.gantt_calculations import (
@@ -205,37 +207,45 @@ async def _process_gpr(job_id: str) -> None:
 # ШАГ 3 — ДЛИТЕЛЬНОСТИ
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _apply_fer_norm(
-    it: KtpWbsItem, hours_per_day: float, default_brigade: int
+def _apply_subtype_norm(
+    it: KtpWbsItem,
+    spec: KtpSessionSubtype | None,
+    hours_per_day: float,
+    default_brigade: int,
 ) -> bool:
-    """Ground duration directly from a matched ФЕР row (bypasses the LLM picker).
+    """Ground duration from the operator-set per-subtype productivity.
 
-    Groundable only when the item was auto/manually matched to a ФЕР row, the
-    row carries h_hour, the unit reconciled (→ multiplier known) and we have a
-    quantity. Otherwise returns False and the item falls through to _ai_pick_norms.
+    Groundable when the item's subtype carries ``output_per_day > 0`` and we have a
+    quantity. ``duration = ceil(quantity / output_per_day)``; brigade from the
+    subtype's crew_size. Otherwise returns False → item falls through to _ai_pick_norms.
     """
-    if it.fer_match_source not in ("auto", "manual"):
+    if spec is None or spec.output_per_day is None or float(spec.output_per_day) <= 0:
         return False
-    if it.fer_h_hour is None or it.fer_unit_multiplier is None or it.quantity is None:
+    if it.quantity is None:
         return False
-    multiplier = float(it.fer_unit_multiplier) or 1.0
-    if multiplier <= 0:
-        multiplier = 1.0
+    output_per_day = float(spec.output_per_day)
     quantity = float(it.quantity)
-    norm_value = float(it.fer_h_hour) / multiplier  # чел-ч на единицу сметы
-    labor = quantity * norm_value
-    brigade = max(1, int(it.brigade_size or default_brigade or DEFAULT_BRIGADE_SIZE))
-    duration = calculate_working_days(labor, brigade, hours_per_day) or 1
+    brigade = max(1, int(spec.crew_size or it.brigade_size or default_brigade or DEFAULT_BRIGADE_SIZE))
+    duration = max(1, math.ceil(quantity / output_per_day))
 
     it.brigade_size = brigade
-    it.norm_source = "fer"
-    it.norm_kind = "norm_time"
-    it.norm_value = round(norm_value, 4)
-    it.norm_unit = (it.unit or it.fer_unit or "")[:32] or None
-    it.norm_ref = f"ФЕР таб.{it.fer_table_id}/стр.{it.fer_row_id}"[:64]
-    it.labor_hours = float(labor)
+    it.norm_source = "manual"
+    it.norm_kind = "vyrabotka"
+    it.norm_value = round(output_per_day, 4)
+    it.norm_unit = (it.unit or spec.unit or "")[:32] or None
+    it.norm_ref = f"подтип {spec.subtype_code}"[:64]
     it.duration_days = max(1, min(MAX_DURATION_DAYS, int(duration)))
+    it.labor_hours = float(calculate_labor_hours(it.duration_days, brigade, hours_per_day))
     return True
+
+
+async def _load_subtype_specs(
+    db: AsyncSession, session_id: str
+) -> dict[tuple[str, str | None], KtpSessionSubtype]:
+    rows = await db.scalars(
+        select(KtpSessionSubtype).where(KtpSessionSubtype.session_id == session_id)
+    )
+    return {(r.subtype_code, r.unit): r for r in rows}
 
 
 async def _compute_durations(
@@ -246,16 +256,45 @@ async def _compute_durations(
     on_progress: Callable[[str], Awaitable[None]] | None = None,
     default_brigade: int = DEFAULT_BRIGADE_SIZE,
 ) -> None:
-    items = [it for g in groups for it in g.accepted_items]
+    from app.services.ktp_estimate_service import _resolve_item_subtype
+    from app.services.work_taxonomy_service import load_taxonomy
 
-    # Шаг 3a — длительности из подобранных строк ФЕР (без ИИ).
+    items = [it for g in groups for it in g.accepted_items]
+    if not items:
+        return
+    session_id = items[0].session_id
+
+    # Спецификации подтипов (производительность/бригада/лаг), заданные оператором.
+    specs = await _load_subtype_specs(db, session_id)
+    taxonomy = await load_taxonomy(db)
+    subtypes_by_code = {s.code: s for s in await db.scalars(select(WorkSubtype))}
+    estimate_ids = [it.estimate_id for it in items if it.estimate_id]
+    estimates: dict[str, Estimate] = {}
+    if estimate_ids:
+        estimates = {
+            e.id: e
+            for e in await db.scalars(select(Estimate).where(Estimate.id.in_(estimate_ids)))
+        }
+
+    # Шаг 3a — длительности из производительности подтипа (без ИИ); попутно
+    # запоминаем лаг подтипа на каждой группе для расстановки зависимостей.
+    for g in groups:
+        g.prod_lag_after = 0
     grounded: set[str] = set()
-    for it in items:
-        if _apply_fer_norm(it, hours_per_day, default_brigade):
-            grounded.add(it.id)
+    for g in groups:
+        for it in g.accepted_items:
+            est = estimates.get(it.estimate_id) if it.estimate_id else None
+            code, _name, _macro, unit = _resolve_item_subtype(
+                it, est, taxonomy, subtypes_by_code
+            )
+            spec = specs.get((code, unit))
+            if spec is not None:
+                g.prod_lag_after = max(g.prod_lag_after, int(spec.lag_after_days or 0))
+            if _apply_subtype_norm(it, spec, hours_per_day, default_brigade):
+                grounded.add(it.id)
     if grounded and on_progress:
         await on_progress(
-            f"Длительность по ФЕР для {len(grounded)} из {len(items)} работ…"
+            f"Длительность по производительности для {len(grounded)} из {len(items)} работ…"
         )
 
     # Шаг 3b — остальное оцениваем ИИ (как раньше).
@@ -671,10 +710,12 @@ def _schedule_groups(
         if not deps[gid]:
             start = start_default
         else:
+            # старт = max по предшественникам (конец+1 + техпауза подтипа)
             start = max(
                 next_task_start_date(
                     resolve(dep_gid, stack), by_id[dep_gid].duration_days or 1
                 )
+                + timedelta(days=int(getattr(by_id[dep_gid], "prod_lag_after", 0) or 0))
                 for dep_gid in deps[gid]
             )
         stack.discard(gid)
@@ -802,13 +843,15 @@ async def _write_gantt(
 
     await db.flush()
 
-    # зависимости между ГРУППОВЫМИ задачами
+    # зависимости между ГРУППОВЫМИ задачами (с техпаузой подтипа-предшественника)
+    group_by_id = {g.id: g for g in groups}
     deps = 0
     for gid, dep_gid in dep_edges:
         t1 = group_task_id.get(gid)
         t2 = group_task_id.get(dep_gid)
         if t1 and t2:
-            db.add(TaskDependency(task_id=t1, depends_on=t2))
+            lag = int(getattr(group_by_id.get(dep_gid), "prod_lag_after", 0) or 0)
+            db.add(TaskDependency(task_id=t1, depends_on=t2, lag_days=lag))
             deps += 1
 
     batch.start_date = start_default

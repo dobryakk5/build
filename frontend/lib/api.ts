@@ -707,6 +707,31 @@ export const ktpEstimate = {
       `/projects/${projectId}/ktp-estimate/items/${itemId}/match-fer`,
       { method: "POST" },
     ),
+  // Этап 4 — производительность по подтипам работ.
+  buildSubtypes: (projectId: string, sessionId: string) =>
+    request<KtpWbs>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/build-subtypes`,
+      { method: "POST" },
+    ),
+  updateSessionSubtype: (
+    projectId: string,
+    subtypeId: string,
+    patch: Partial<{
+      volume: number | null;
+      output_per_day: number | null;
+      crew_size: number | null;
+      lag_after_days: number;
+    }>,
+  ) =>
+    request<KtpWbs>(
+      `/projects/${projectId}/ktp-estimate/session-subtypes/${subtypeId}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+    ),
+  approveProd: (projectId: string, sessionId: string) =>
+    request<KtpEstimateSession>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-prod`,
+      { method: "POST" },
+    ),
   // Подшаг ГПР: ИИ строит линейную последовательность групп (2-й уровень).
   // Возвращает WBS с группами в предложенном порядке (статус → gpr_sequence_review).
   proposeSequence: (projectId: string, sessionId: string) =>

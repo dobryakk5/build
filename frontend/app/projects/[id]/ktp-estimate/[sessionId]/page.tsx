@@ -3,12 +3,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
-import { fer as ferApi, ktpEstimate } from "@/lib/api";
+import { ktpEstimate } from "@/lib/api";
 import { trackActivity } from "@/lib/activity";
 import { useJobPoller } from "@/lib/useJobPoller";
 import type {
   KtpEstimateCard,
-  FerSearchResult,
   KtpQuestion,
   KtpWbs,
   KtpWbsGroup,
@@ -143,7 +142,7 @@ export default function KtpEstimateWizardPage() {
     const recoverJob =
       s.status === "stage1_processing" || s.status === "stage1_pending"
         ? s.stage1_job_id
-        : s.status === "fer_processing" || s.status === "gpr_processing"
+        : s.status === "gpr_processing"
         ? s.gpr_job_id
         : null;
     if (recoverJob) setActiveJobId(recoverJob);
@@ -156,7 +155,7 @@ export default function KtpEstimateWizardPage() {
     const expectedJob =
       session.status === "stage1_processing" || session.status === "stage1_pending"
         ? session.stage1_job_id
-        : session.status === "fer_processing" || session.status === "gpr_processing"
+        : session.status === "gpr_processing"
         ? session.gpr_job_id
         : null;
 
@@ -206,7 +205,6 @@ export default function KtpEstimateWizardPage() {
   );
 
   const stage1Processing = status === "stage1_processing" || status === "stage1_pending";
-  const ferProcessing = status === "fer_processing";
   const gprProcessing = status === "gpr_processing";
 
   const restartStage1 = useCallback(async () => {
@@ -265,15 +263,6 @@ export default function KtpEstimateWizardPage() {
       />
     );
   }
-  if (ferProcessing) {
-    return (
-      <ProcessingScreen
-        title="ИИ назначает ФЕР"
-        subtitle="Сопоставляем работы КТП с нормативами ФЕР по группам"
-        progress={job?.result?._progress ?? null}
-      />
-    );
-  }
   if (error) {
     return (
       <Centered>
@@ -315,7 +304,7 @@ export default function KtpEstimateWizardPage() {
       ? 2
       : status === "stage2_review"
       ? 3
-      : status === "fer_pending" || status === "fer_review" || status === "fer_failed"
+      : status === "prod_pending" || status === "prod_review"
       ? 4
       : 5;
 
@@ -369,8 +358,8 @@ export default function KtpEstimateWizardPage() {
         />
       )}
 
-      {(status === "fer_pending" || status === "fer_review" || status === "fer_failed") && (
-        <StageFer
+      {(status === "prod_pending" || status === "prod_review") && (
+        <StageProductivity
           wbs={wbs}
           projectId={projectId}
           sessionId={sessionId}
@@ -378,21 +367,10 @@ export default function KtpEstimateWizardPage() {
           setBusy={setBusy}
           setError={setError}
           reload={loadWbs}
-          onStartFer={async () => {
+          onApprove={async () => {
             setBusy(true);
             try {
-              const { job_id } = await ktpEstimate.matchFer(projectId, sessionId);
-              setActiveJobId(job_id);
-              await loadWbs();
-            } catch (e: any) {
-              setError(e.message);
-              setBusy(false);
-            }
-          }}
-          onApproveFer={async () => {
-            setBusy(true);
-            try {
-              await ktpEstimate.approveFer(projectId, sessionId);
+              await ktpEstimate.approveProd(projectId, sessionId);
               await loadWbs();
             } catch (e: any) {
               setError(e.message);
@@ -573,7 +551,7 @@ function Spinner() {
 }
 
 function Steps({ current, onNewEstimate }: { current: number; onNewEstimate: () => void }) {
-  const labels = ["Новая смета", "Структура работ", "КТП", "Назначение ФЕР", "ГПР"];
+  const labels = ["Новая смета", "Структура работ", "КТП", "Производительность", "ГПР"];
   return (
     <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
       {labels.map((label, i) => {
@@ -1377,7 +1355,7 @@ function CardView({
 
 // ── ЭТАП 2.5 ───────────────────────────────────────────────────────────────
 
-function StageFer({
+function StageProductivity({
   wbs,
   projectId,
   sessionId,
@@ -1385,8 +1363,7 @@ function StageFer({
   setBusy,
   setError,
   reload,
-  onStartFer,
-  onApproveFer,
+  onApprove,
 }: {
   wbs: KtpWbs;
   projectId: string;
@@ -1395,39 +1372,21 @@ function StageFer({
   setBusy: (v: boolean) => void;
   setError: (v: string | null) => void;
   reload: () => Promise<void>;
-  onStartFer: () => Promise<void>;
-  onApproveFer: () => Promise<void>;
+  onApprove: () => Promise<void>;
 }) {
-  const [modalItem, setModalItem] = useState<KtpWbsItem | null>(null);
-  const [matchingItemId, setMatchingItemId] = useState<string | null>(null);
-  const items = wbs.groups.flatMap((group) =>
-    group.items
-      .filter((item) => item.review_status !== "rejected" && item.origin === "from_estimate")
-      .map((item) => ({ item, group })),
-  );
-  const matched = items.filter(({ item }) => item.fer_table_id != null).length;
-  const needsReview = items.filter(({ item }) => item.fer_match_source !== "auto").length;
-  const canContinue = wbs.session.status === "fer_review";
+  const subtypes = wbs.session_subtypes ?? [];
+  const filled = subtypes.filter(
+    (s) => s.output_per_day != null && s.output_per_day > 0 && s.volume != null && s.volume > 0,
+  ).length;
+  const canContinue = subtypes.length > 0 && filled === subtypes.length;
 
-  async function matchOne(item: KtpWbsItem) {
-    setMatchingItemId(item.id);
+  async function saveField(
+    subtypeId: string,
+    patch: Partial<{ volume: number | null; output_per_day: number | null; crew_size: number | null; lag_after_days: number }>,
+  ) {
     setBusy(true);
     try {
-      await ktpEstimate.matchItemFer(projectId, item.id);
-      await reload();
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setMatchingItemId(null);
-      setBusy(false);
-    }
-  }
-
-  async function updateFer(item: KtpWbsItem, result: FerSearchResult | null) {
-    setBusy(true);
-    try {
-      await ktpEstimate.updateItemFer(projectId, item.id, result?.table_id ?? null);
-      setModalItem(null);
+      await ktpEstimate.updateSessionSubtype(projectId, subtypeId, patch);
       await reload();
     } catch (e: any) {
       setError(e.message);
@@ -1435,210 +1394,219 @@ function StageFer({
       setBusy(false);
     }
   }
+
+  async function rebuild() {
+    setBusy(true);
+    try {
+      await ktpEstimate.buildSubtypes(projectId, sessionId);
+      await reload();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const cols = "minmax(220px, 1fr) 150px 150px 110px 130px";
 
   return (
     <div>
       <Header
-        title="Назначение ФЕР"
-        hint="Проверьте, что каждой работе назначен подходящий норматив ФЕР. Можно переназначить ИИ или выбрать вручную."
+        title="Производительность работ"
+        hint="Для каждого вида работ задайте объём, производительность бригады за смену, размер бригады и технологическую паузу после. Длительность считается как объём ÷ производительность."
         right={
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <button type="button" style={buttonStyle("ghost", busy)} disabled={busy} onClick={() => void onStartFer()}>
-              <ButtonContent loading={busy && !matchingItemId}>
-                {wbs.session.status === "fer_review" ? "Переназначить все с ИИ" : "Назначить ФЕР с ИИ"}
-              </ButtonContent>
+            <button type="button" style={buttonStyle("ghost", busy)} disabled={busy} onClick={() => void rebuild()}>
+              <ButtonContent loading={busy}>Перестроить из сметы</ButtonContent>
             </button>
-            <button type="button" style={buttonStyle("primary", busy || !canContinue)} disabled={busy || !canContinue} onClick={() => void onApproveFer()}>
+            <button type="button" style={buttonStyle("primary", busy || !canContinue)} disabled={busy || !canContinue} onClick={() => void onApprove()}>
               Перейти к ГПР
             </button>
           </div>
         }
       />
 
-      <div style={{ ...card, padding: 14, marginBottom: 14, display: "flex", gap: 18, flexWrap: "wrap", fontSize: 12 }}>
-        <span>Работ: <b>{items.length}</b></span>
-        <span>ФЕР назначено: <b>{matched}</b></span>
-        <span>На проверку: <b>{needsReview}</b></span>
-        {wbs.session.status === "fer_failed" && (
-          <span style={{ color: "var(--red)" }}>Последнее назначение завершилось с ошибкой</span>
+      <div style={{ ...card, padding: 14, marginBottom: 14, display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center", fontSize: 12 }}>
+        <span>Видов работ: <b>{subtypes.length}</b></span>
+        <span>Заполнено: <b>{filled}</b></span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--muted)" }}>
+          <span style={{ color: "#b45309", fontWeight: 700 }}>≈</span> примерное (из справочника)
+        </span>
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--muted)" }}>
+          <span style={{ width: 11, height: 11, borderRadius: 3, background: "#22c55e22", border: "1px solid #16a34a55", display: "inline-block" }} /> задано оператором
+        </span>
+        {!canContinue && subtypes.length > 0 && (
+          <span style={{ color: "var(--muted)" }}>Заполните объём и производительность у всех строк, чтобы продолжить</span>
         )}
       </div>
 
-      {wbs.groups.map((group) => {
-        const groupItems = group.items.filter((item) => item.review_status !== "rejected" && item.origin === "from_estimate");
-        if (!groupItems.length) return null;
-        return (
-          <div key={group.id} style={{ ...card, marginBottom: 10, overflow: "hidden" }}>
-            <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", fontSize: 13, fontWeight: 700 }}>
-              {group.title}
-            </div>
-            {groupItems.map((item) => (
+      {subtypes.length === 0 ? (
+        <div style={{ ...card, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+          Таблица подтипов пуста. Нажмите «Перестроить из сметы».
+        </div>
+      ) : (
+        <div style={{ ...card, overflow: "hidden" }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: cols,
+              gap: 10,
+              alignItems: "center",
+              padding: "10px 14px",
+              borderBottom: "1px solid var(--border)",
+              fontSize: 11,
+              fontWeight: 700,
+              color: "var(--muted)",
+            }}
+          >
+            <div>Вид работ</div>
+            <div>Объём{`, `}ед.</div>
+            <div>Произв./смену</div>
+            <div>Бригада</div>
+            <div>Пауза, дн.</div>
+          </div>
+          {subtypes.map((s) => {
+            const unknown = s.subtype_code === "__unknown__";
+            return (
               <div
-                key={item.id}
+                key={s.id}
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "minmax(220px, 1fr) minmax(180px, 260px) 190px",
+                  gridTemplateColumns: cols,
                   gap: 10,
                   alignItems: "center",
                   padding: "10px 14px",
                   borderBottom: "1px solid var(--border)",
                   fontSize: 12,
+                  background: unknown ? "#fef9f9" : undefined,
                 }}
               >
                 <div>
-                  <div style={{ fontWeight: 600, color: "var(--text)" }}>{item.name}</div>
+                  <div style={{ fontWeight: 600, color: unknown ? "var(--red)" : "var(--text)" }}>
+                    {s.subtype_name}
+                  </div>
                   <div style={{ marginTop: 3, color: "var(--muted)", fontFamily: "var(--mono)", fontSize: 11 }}>
-                    {fmtQty(item) || "без объёма"}
+                    {unknown ? "нужно задать вручную" : `${s.subtype_code}${s.macro_name ? ` · ${s.macro_name}` : ""}`}
                   </div>
                 </div>
-                <div>
-                  {item.fer_table_id ? (
-                    <>
-                      <div style={{ color: "var(--text)", lineHeight: 1.35 }}>
-                        {item.fer_match_label || `ФЕР #${item.fer_table_id}`}
-                      </div>
-                      <div style={{ marginTop: 3, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: "var(--mono)" }}>
-                          #{item.fer_table_id}
-                          {item.fer_match_score != null ? ` · score ${item.fer_match_score.toFixed(2)}` : ""}
-                        </span>
-                        {item.fer_match_source === "manual" && (
-                          <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "#22c55e18", color: "#16a34a", border: "1px solid #22c55e30", fontWeight: 700 }}>
-                            РУЧНОЙ
-                          </span>
-                        )}
-                        {item.fer_match_source === "review" && (
-                          <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: "#f59e0b18", color: "#b45309", border: "1px solid #f59e0b30", fontWeight: 700 }}>
-                            ПРОВЕРИТЬ
-                          </span>
-                        )}
-                      </div>
-                    </>
-                  ) : (
-                    <span style={{ color: "var(--red)", fontStyle: "italic" }}>ФЕР не назначен</span>
-                  )}
-                </div>
-                <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
-                  <button type="button" style={buttonStyle("ghost", busy)} disabled={busy} onClick={() => void matchOne(item)}>
-                    <ButtonContent loading={matchingItemId === item.id}>ИИ</ButtonContent>
-                  </button>
-                  <button type="button" style={btn()} onClick={() => setModalItem(item)}>
-                    + Назначить ФЕР
-                  </button>
-                </div>
+                <NumCell
+                  value={s.volume}
+                  suffix={s.unit || ""}
+                  disabled={busy}
+                  onSave={(v) => void saveField(s.id, { volume: v })}
+                />
+                <NumCell
+                  value={s.output_per_day}
+                  suffix={s.unit ? `${s.unit}/см` : "/см"}
+                  disabled={busy}
+                  source={s.output_source}
+                  onSave={(v) => void saveField(s.id, { output_per_day: v })}
+                />
+                <NumCell
+                  value={s.crew_size}
+                  suffix="чел"
+                  disabled={busy}
+                  source={s.crew_source}
+                  onSave={(v) => void saveField(s.id, { crew_size: v })}
+                />
+                <NumCell
+                  value={s.lag_after_days}
+                  suffix="дн"
+                  disabled={busy}
+                  allowZero
+                  source={s.lag_source}
+                  onSave={(v) => void saveField(s.id, { lag_after_days: v ?? 0 })}
+                />
               </div>
-            ))}
-          </div>
-        );
-      })}
-
-      {modalItem && (
-        <KtpFerSearchModal
-          item={modalItem}
-          onClose={() => setModalItem(null)}
-          onSelect={(result) => updateFer(modalItem, result)}
-        />
+            );
+          })}
+        </div>
       )}
     </div>
   );
 }
 
-function KtpFerSearchModal({
-  item,
-  onClose,
-  onSelect,
+function NumCell({
+  value,
+  suffix,
+  disabled,
+  source,
+  allowZero,
+  onSave,
 }: {
-  item: KtpWbsItem;
-  onClose: () => void;
-  onSelect: (result: FerSearchResult | null) => Promise<void>;
+  value: number | null | undefined;
+  suffix?: string;
+  disabled?: boolean;
+  // 'manual' — задано оператором (зелёное); 'default' с значением — примерное из справочника (≈)
+  source?: "default" | "manual";
+  allowZero?: boolean;
+  onSave: (v: number | null) => void;
 }) {
-  const [q, setQ] = useState(item.name);
-  const [results, setResults] = useState<FerSearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initial = value != null ? String(value) : "";
+  const [text, setText] = useState(initial);
+  const lastSaved = useRef(initial);
 
   useEffect(() => {
-    if (q.trim().length < 2) {
-      setResults([]);
+    const next = value != null ? String(value) : "";
+    setText(next);
+    lastSaved.current = next;
+  }, [value]);
+
+  function commit() {
+    if (text === lastSaved.current) return;
+    const trimmed = text.trim();
+    if (trimmed === "") {
+      lastSaved.current = "";
+      onSave(null);
       return;
     }
-    if (debounce.current) clearTimeout(debounce.current);
-    debounce.current = setTimeout(async () => {
-      setSearching(true);
-      try {
-        setResults(await ferApi.search(q.trim(), 40));
-      } catch {
-        setResults([]);
-      } finally {
-        setSearching(false);
-      }
-    }, 320);
-    return () => {
-      if (debounce.current) clearTimeout(debounce.current);
-    };
-  }, [q]);
-
-  async function pick(result: FerSearchResult | null) {
-    if (result?.effective_ignored) return;
-    setSaving(true);
-    try {
-      await onSelect(result);
-    } finally {
-      setSaving(false);
+    const parsed = Number(trimmed.replace(",", "."));
+    if (!Number.isFinite(parsed) || (parsed <= 0 && !allowZero) || parsed < 0) {
+      setText(lastSaved.current); // откат при невалидном вводе
+      return;
     }
+    lastSaved.current = String(parsed);
+    onSave(parsed);
   }
 
-  const breadcrumb = (result: FerSearchResult) =>
-    [`Сб. ${result.collection.num}`, result.section?.title, result.subsection?.title].filter(Boolean).join(" › ");
+  const isManual = source === "manual";
+  const isApprox = source === "default" && value != null;
+  const border = isManual ? "#16a34a55" : isApprox ? "#f59e0b66" : "var(--border2)";
+  const bg = isManual ? "#22c55e0d" : isApprox ? "#f59e0b0f" : "var(--bg)";
 
   return (
-    <div
-      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,.55)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center" }}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-    >
-      <div style={{ width: 720, maxHeight: "82vh", background: "var(--surface)", borderRadius: 10, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--border)", display: "flex", gap: 12 }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 14, fontWeight: 700 }}>Маппинг ФЕР</div>
-            <div style={{ marginTop: 4, fontSize: 12, color: "var(--muted)" }}>{item.name}</div>
-          </div>
-          <button type="button" onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 18 }}>x</button>
-        </div>
-        <div style={{ padding: "12px 20px", borderBottom: "1px solid var(--border)" }}>
-          <input
-            autoFocus
-            value={q}
-            onChange={(event) => setQ(event.target.value)}
-            placeholder="Поиск по названию работы, разделу, сборнику ФЕР..."
-            style={{ width: "100%", padding: "9px 14px", boxSizing: "border-box", border: "1px solid var(--border2)", borderRadius: 7, fontSize: 13, outline: "none", background: "var(--bg)" }}
-          />
-        </div>
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          {searching && <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Поиск...</div>}
-          {!searching && q.length >= 2 && results.length === 0 && <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Ничего не найдено</div>}
-          {results.map((result) => (
-            <div
-              key={result.table_id}
-              onClick={() => !saving && !result.effective_ignored && void pick(result)}
-              style={{ padding: "12px 20px", borderBottom: "1px solid var(--border)", cursor: saving || result.effective_ignored ? "default" : "pointer", opacity: result.effective_ignored ? 0.5 : 1 }}
-            >
-              <div style={{ fontSize: 10, color: "var(--muted)", marginBottom: 4, fontFamily: "var(--mono)" }}>{breadcrumb(result)}</div>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{result.table_title}</div>
-              {result.common_work_name && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{result.common_work_name}</div>}
-            </div>
-          ))}
-        </div>
-        {item.fer_table_id && (
-          <div style={{ padding: "10px 20px", borderTop: "1px solid var(--border)", background: "#fef9f9" }}>
-            <button type="button" onClick={() => !saving && void pick(null)} disabled={saving} style={{ ...btn("danger"), background: "transparent" }}>
-              Сбросить маппинг ФЕР
-            </button>
-          </div>
-        )}
-      </div>
+    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+      <span
+        title={isApprox ? "Примерное значение из справочника" : undefined}
+        style={{ width: 9, fontSize: 12, fontWeight: 700, color: "#b45309", textAlign: "center" }}
+      >
+        {isApprox ? "≈" : ""}
+      </span>
+      <input
+        value={text}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        inputMode="decimal"
+        placeholder="—"
+        title={isApprox ? "Примерное значение — измените, чтобы зафиксировать своё" : isManual ? "Задано оператором" : undefined}
+        style={{
+          width: 60,
+          padding: "5px 7px",
+          boxSizing: "border-box",
+          border: `1px solid ${border}`,
+          background: bg,
+          color: isApprox ? "var(--muted)" : "var(--text)",
+          fontStyle: isApprox ? "italic" : "normal",
+          borderRadius: 6,
+          fontSize: 12,
+          outline: "none",
+        }}
+      />
+      {suffix && <span style={{ fontSize: 10, color: "var(--muted)" }}>{suffix}</span>}
     </div>
   );
 }

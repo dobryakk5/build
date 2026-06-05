@@ -33,9 +33,11 @@ from app.models import (
     EstimateBatch,
     Job,
     KtpEstimateSession,
+    KtpSessionSubtype,
     KtpWbsGroup,
     KtpWbsGroupDependency,
     KtpWbsItem,
+    WorkSubtype,
 )
 from app.services.ktp_service import (
     _assert_batch_belongs_to_project,
@@ -421,7 +423,25 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
         if group_ids
         else []
     )
-    return {"session": session, "groups": groups, "group_dependencies": deps}
+
+    # Этап производительности: подтипы сессии. Для мигрированных fer_* / новых
+    # prod_* сессий строим таблицу лениво при первом открытии.
+    subtypes: list[KtpSessionSubtype] = []
+    if session.status in {"prod_pending", "prod_review"}:
+        subtypes = await _load_session_subtypes(db, session_id)
+        if not subtypes:
+            # Ленивое построение для мигрированных fer_* сессий — фиксируем,
+            # чтобы отданные фронту id существовали при последующем PATCH.
+            await build_session_subtypes(db, session)
+            await db.commit()
+            subtypes = await _load_session_subtypes(db, session_id)
+
+    return {
+        "session": session,
+        "groups": groups,
+        "group_dependencies": deps,
+        "session_subtypes": subtypes,
+    }
 
 
 def _job_reference_time(job: Job) -> datetime | None:
@@ -2411,7 +2431,9 @@ async def approve_stage2(
             raise ValueError(
                 "Не для всех групп с принятыми работами сгенерированы карточки КТП"
             )
-    session.status = "fer_pending"
+    # Сразу строим таблицу производительности по подтипам и переходим на этап 4.
+    await build_session_subtypes(db, session)
+    session.status = "prod_review"
     session.updated_at = _now()
     await db.commit()
     await db.refresh(session)
@@ -2419,7 +2441,257 @@ async def approve_stage2(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ЭТАП 2.5 — НАЗНАЧЕНИЕ ФЕР ПОЗИЦИЯМ КТП
+# ЭТАП 4 — ПРОИЗВОДИТЕЛЬНОСТЬ ПО ПОДТИПАМ РАБОТ
+# ─────────────────────────────────────────────────────────────────────────────
+
+UNKNOWN_SUBTYPE_CODE = "__unknown__"
+UNKNOWN_SUBTYPE_NAME = "Без определённого подтипа"
+_DEFAULT_VOLUME = 100.0
+
+
+def _resolve_item_subtype(
+    item: KtpWbsItem,
+    estimate: Estimate | None,
+    taxonomy: list,
+    subtypes_by_code: dict[str, WorkSubtype],
+) -> tuple[str, str, str | None, str | None]:
+    """Определить (subtype_code, subtype_name, macro_name, unit) для работы КТП.
+
+    Порядок: raw_data сметы → классификация по имени → ``__unknown__``.
+    """
+    from app.services.work_taxonomy_service import classify_subtype
+
+    code: str | None = None
+    name: str | None = None
+    unit = item.unit or (estimate.unit if estimate else None)
+
+    raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
+    if raw.get("subtype_code"):
+        code = str(raw["subtype_code"])
+        name = raw.get("subtype_name") or None
+
+    if not code:
+        match = classify_subtype(item.name or "", None, taxonomy)
+        if match:
+            code = match.code
+            name = match.name
+
+    if not code:
+        return UNKNOWN_SUBTYPE_CODE, UNKNOWN_SUBTYPE_NAME, None, unit
+
+    ref = subtypes_by_code.get(code)
+    name = (ref.name if ref else None) or name or code
+    macro_name = ref.macro_name if ref else None
+    return code, name, macro_name, unit
+
+
+async def _load_session_subtypes(
+    db: AsyncSession, session_id: str
+) -> list[KtpSessionSubtype]:
+    return list(
+        await db.scalars(
+            select(KtpSessionSubtype)
+            .where(KtpSessionSubtype.session_id == session_id)
+            .order_by(KtpSessionSubtype.subtype_code, KtpSessionSubtype.unit)
+        )
+    )
+
+
+async def build_session_subtypes(
+    db: AsyncSession, session: KtpEstimateSession
+) -> list[KtpSessionSubtype]:
+    """Построить/обновить таблицу подтипов сессии из принятых работ КТП.
+
+    Группировка по паре (subtype_code, unit). ``volume`` всегда пересчитывается из
+    сметы; ``subtype_name/macro_name`` обновляются из справочника; правки оператора
+    (``*_source='manual'``) не перезатираются. Строки, исчезнувшие из сметы, удаляются.
+    """
+    from app.services.work_taxonomy_service import load_taxonomy
+
+    groups = list(
+        await db.scalars(
+            select(KtpWbsGroup)
+            .where(KtpWbsGroup.session_id == session.id)
+            .options(selectinload(KtpWbsGroup.items))
+        )
+    )
+    items = [
+        it
+        for g in groups
+        for it in g.items
+        if it.review_status != "rejected"
+    ]
+
+    estimate_ids = [it.estimate_id for it in items if it.estimate_id]
+    estimates: dict[str, Estimate] = {}
+    if estimate_ids:
+        estimates = {
+            e.id: e
+            for e in await db.scalars(
+                select(Estimate).where(Estimate.id.in_(estimate_ids))
+            )
+        }
+
+    taxonomy = await load_taxonomy(db)
+    subtypes_by_code = {
+        s.code: s for s in await db.scalars(select(WorkSubtype))
+    }
+
+    # Агрегируем по (code, unit).
+    agg: dict[tuple[str, str | None], dict[str, Any]] = {}
+    for it in items:
+        est = estimates.get(it.estimate_id) if it.estimate_id else None
+        code, name, macro_name, unit = _resolve_item_subtype(
+            it, est, taxonomy, subtypes_by_code
+        )
+        key = (code, unit)
+        bucket = agg.setdefault(
+            key,
+            {"name": name, "macro_name": macro_name, "volume": 0.0},
+        )
+        if it.quantity is not None:
+            bucket["volume"] += float(it.quantity)
+
+    existing = {
+        (s.subtype_code, s.unit): s
+        for s in await _load_session_subtypes(db, session.id)
+    }
+
+    kept_keys: set[tuple[str, str | None]] = set()
+    for (code, unit), data in agg.items():
+        kept_keys.add((code, unit))
+        ref = subtypes_by_code.get(code)
+        volume = data["volume"] if data["volume"] > 0 else _DEFAULT_VOLUME
+        row = existing.get((code, unit))
+        if row is None:
+            row = KtpSessionSubtype(
+                id=_uuid(),
+                session_id=session.id,
+                subtype_code=code,
+                subtype_name=data["name"] or code,
+                macro_name=data["macro_name"],
+                unit=unit,
+                volume=volume,
+                output_per_day=ref.output_per_day if ref else None,
+                crew_size=ref.crew_size if ref else None,
+                lag_after_days=int(ref.lag_after_days) if ref else 0,
+                output_source="default",
+                crew_source="default",
+                lag_source="default",
+            )
+            db.add(row)
+        else:
+            # имена и объём — всегда из актуальных данных
+            row.subtype_name = data["name"] or row.subtype_name
+            row.macro_name = data["macro_name"]
+            row.volume = volume
+            # дефолтные поля — обновляем из справочника, ручные не трогаем
+            if ref is not None:
+                if row.output_source == "default":
+                    row.output_per_day = ref.output_per_day
+                if row.crew_source == "default":
+                    row.crew_size = ref.crew_size
+                if row.lag_source == "default":
+                    row.lag_after_days = int(ref.lag_after_days)
+
+    # Удаляем строки, которых больше нет в смете.
+    for key, row in existing.items():
+        if key not in kept_keys:
+            await db.delete(row)
+
+    await db.flush()
+    return await _load_session_subtypes(db, session.id)
+
+
+async def rebuild_session_subtypes(
+    db: AsyncSession, project_id: str, session_id: str
+) -> dict[str, Any]:
+    session = await get_session_by_id(db, project_id, session_id)
+    if session.status not in {"prod_pending", "prod_review"}:
+        raise ValueError("Перестроить подтипы можно только на этапе производительности")
+    await build_session_subtypes(db, session)
+    await db.commit()
+    return await get_wbs(db, project_id, session_id)
+
+
+async def update_session_subtype(
+    db: AsyncSession,
+    project_id: str,
+    subtype_id: str,
+    patch: dict[str, Any],
+) -> dict[str, Any]:
+    row = await db.scalar(
+        select(KtpSessionSubtype)
+        .join(KtpEstimateSession, KtpEstimateSession.id == KtpSessionSubtype.session_id)
+        .where(KtpSessionSubtype.id == subtype_id)
+        .where(KtpEstimateSession.project_id == project_id)
+    )
+    if not row:
+        raise ValueError("Подтип работ не найден")
+
+    if "volume" in patch:
+        v = patch["volume"]
+        if v is not None and float(v) <= 0:
+            raise ValueError("Объём должен быть больше нуля")
+        row.volume = float(v) if v is not None else None
+    if "output_per_day" in patch:
+        v = patch["output_per_day"]
+        if v is not None and float(v) <= 0:
+            raise ValueError("Производительность должна быть больше нуля")
+        row.output_per_day = float(v) if v is not None else None
+        row.output_source = "manual"
+    if "crew_size" in patch:
+        v = patch["crew_size"]
+        if v is not None and int(v) <= 0:
+            raise ValueError("Размер бригады должен быть больше нуля")
+        row.crew_size = int(v) if v is not None else None
+        row.crew_source = "manual"
+    if "lag_after_days" in patch:
+        v = patch["lag_after_days"]
+        if v is None or int(v) < 0:
+            raise ValueError("Лаг не может быть отрицательным")
+        row.lag_after_days = int(v)
+        row.lag_source = "manual"
+
+    row.updated_at = _now()
+    await db.commit()
+    return await get_wbs(db, project_id, row.session_id)
+
+
+async def approve_prod(
+    db: AsyncSession,
+    project_id: str,
+    session_id: str,
+) -> KtpEstimateSession:
+    session = await get_session_by_id(db, project_id, session_id)
+    if session.status not in {"prod_pending", "prod_review"}:
+        raise ValueError("К ГПР можно перейти после этапа производительности")
+
+    rows = await _load_session_subtypes(db, session_id)
+    if not rows:
+        raise ValueError("Таблица подтипов пуста — перестройте её из сметы")
+    missing = [
+        r.subtype_name
+        for r in rows
+        if r.output_per_day is None or float(r.output_per_day) <= 0
+        or r.volume is None or float(r.volume) <= 0
+    ]
+    if missing:
+        preview = ", ".join(missing[:5])
+        raise ValueError(
+            f"Не у всех подтипов задана производительность и объём: {preview}"
+        )
+
+    session.status = "gpr_pending"
+    session.error_message = None
+    session.updated_at = _now()
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ЭТАП 2.5 — НАЗНАЧЕНИЕ ФЕР ПОЗИЦИЯМ КТП (legacy, выведено из потока)
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def start_fer_match_job(

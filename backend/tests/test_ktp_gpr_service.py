@@ -8,7 +8,7 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 
-def make_group(gid: str, duration_days: int = 1, items=None, title: str = "", wt_code=None):
+def make_group(gid: str, duration_days: int = 1, items=None, title: str = "", wt_code=None, prod_lag_after: int = 0):
     g = MagicMock()
     g.id = gid
     g.duration_days = duration_days
@@ -17,6 +17,7 @@ def make_group(gid: str, duration_days: int = 1, items=None, title: str = "", wt
     g.accepted_items = items or []
     g.title = title or gid
     g.wt_code = wt_code
+    g.prod_lag_after = prod_lag_after
     return g
 
 

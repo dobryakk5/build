@@ -140,10 +140,43 @@ class GroupDependencyOut(BaseModel):
     depends_on_group_id: str
 
 
+class SessionSubtypeOut(BaseModel):
+    id: str
+    subtype_code: str
+    subtype_name: str
+    macro_name: str | None = None
+    unit: str | None = None
+    volume: float | None = None
+    output_per_day: float | None = None
+    crew_size: int | None = None
+    lag_after_days: int = 0
+    output_source: str = "default"
+    crew_source: str = "default"
+    lag_source: str = "default"
+
+    @classmethod
+    def of(cls, s) -> "SessionSubtypeOut":
+        return cls(
+            id=s.id,
+            subtype_code=s.subtype_code,
+            subtype_name=s.subtype_name,
+            macro_name=s.macro_name,
+            unit=s.unit,
+            volume=float(s.volume) if s.volume is not None else None,
+            output_per_day=float(s.output_per_day) if s.output_per_day is not None else None,
+            crew_size=s.crew_size,
+            lag_after_days=int(s.lag_after_days or 0),
+            output_source=s.output_source,
+            crew_source=s.crew_source,
+            lag_source=s.lag_source,
+        )
+
+
 class WbsOut(BaseModel):
     session: SessionOut
     groups: list[GroupOut]
     group_dependencies: list[GroupDependencyOut]
+    session_subtypes: list[SessionSubtypeOut] = Field(default_factory=list)
 
     @classmethod
     def of(cls, payload: dict) -> "WbsOut":
@@ -155,6 +188,9 @@ class WbsOut(BaseModel):
                     group_id=d.group_id, depends_on_group_id=d.depends_on_group_id
                 )
                 for d in payload["group_dependencies"]
+            ],
+            session_subtypes=[
+                SessionSubtypeOut.of(s) for s in payload.get("session_subtypes", [])
             ],
         )
 
@@ -233,6 +269,13 @@ class FerJobResponse(BaseModel):
 
 class ItemFerPatch(BaseModel):
     fer_table_id: int | None = None
+
+
+class SessionSubtypePatch(BaseModel):
+    volume: float | None = None
+    output_per_day: float | None = None
+    crew_size: int | None = None
+    lag_after_days: int | None = None
 
 
 def _value_error(exc: ValueError) -> HTTPException:
@@ -501,7 +544,58 @@ async def approve_stage2(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ЭТАП 2.5 — НАЗНАЧЕНИЕ ФЕР
+# ЭТАП 4 — ПРОИЗВОДИТЕЛЬНОСТЬ ПО ПОДТИПАМ РАБОТ
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/sessions/{session_id}/build-subtypes", response_model=WbsOut)
+async def build_subtypes(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        payload = await svc.rebuild_session_subtypes(
+            db, str(project_id), str(session_id)
+        )
+    except ValueError as exc:
+        raise _value_error(exc)
+    return WbsOut.of(payload)
+
+
+@router.patch("/session-subtypes/{subtype_id}", response_model=WbsOut)
+async def patch_session_subtype(
+    project_id: UUID,
+    subtype_id: UUID,
+    body: SessionSubtypePatch,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        payload = await svc.update_session_subtype(
+            db, str(project_id), str(subtype_id), body.model_dump(exclude_unset=True)
+        )
+    except ValueError as exc:
+        raise _value_error(exc)
+    return WbsOut.of(payload)
+
+
+@router.post("/sessions/{session_id}/approve-prod", response_model=SessionOut)
+async def approve_prod(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        session = await svc.approve_prod(db, str(project_id), str(session_id))
+    except ValueError as exc:
+        raise _value_error(exc)
+    return SessionOut.of(session)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ЭТАП 2.5 — НАЗНАЧЕНИЕ ФЕР (legacy, выведено из потока)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @router.post("/sessions/{session_id}/match-fer", response_model=FerJobResponse)

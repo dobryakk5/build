@@ -210,3 +210,48 @@ class KtpWbsGroupDependency(Base):
     depends_on_group_id: Mapped[str] = mapped_column(
         ForeignKey("ktp_wbs_groups.id", ondelete="CASCADE"), primary_key=True
     )
+
+
+class KtpSessionSubtype(Base, TimestampMixin):
+    """Производительность по подтипу работ в рамках сеанса (этап 4).
+
+    Одна строка = (подтип работ, единица измерения) использованный в смете. Оператор
+    задаёт производительность бригады за смену, размер бригады и техпаузу после.
+    Дефолты подтягиваются из справочника ``work_subtypes`` и помечаются ``*_source``;
+    ручные правки (``manual``) не перезатираются при перестроении из сметы.
+    """
+
+    __tablename__ = "ktp_session_subtypes"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "subtype_code", "unit",
+            name="uq_ktp_session_subtypes_session_code_unit",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        PGUUID(as_uuid=False), primary_key=True, default=_uuid
+    )
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ktp_estimate_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    subtype_code: Mapped[str] = mapped_column(Text, nullable=False)
+    subtype_name: Mapped[str] = mapped_column(Text, nullable=False)
+    macro_name: Mapped[str | None] = mapped_column(Text)
+    unit: Mapped[str | None] = mapped_column(String(50))
+    volume: Mapped[float | None] = mapped_column(Numeric(12, 3))
+    output_per_day: Mapped[float | None] = mapped_column(Numeric(12, 3))
+    crew_size: Mapped[int | None] = mapped_column(SmallInteger)
+    lag_after_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    # default | manual — пометки источника, чтобы rebuild не перезатирал ручные правки
+    output_source: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default="default"
+    )
+    crew_source: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default="default"
+    )
+    lag_source: Mapped[str] = mapped_column(
+        String(8), nullable=False, server_default="default"
+    )
