@@ -808,6 +808,7 @@ export interface KtpSessionSubtype {
   subtype_name: string;
   work_subtype_code?: string | null;
   work_subtype_name?: string | null;
+  taxonomy_code?: string | null;
   item_id?: string | null;
   session_subtype_key?: string | null;
   macro_name?: string | null;
@@ -848,6 +849,7 @@ export type KtpEstimateCardResponse =
 export interface WorkTaxonomyExample {
   work_subtype_code: string;
   work_subtype_name: string;
+  taxonomy_code?: string | null;
   display_code?: string | null;
 }
 
@@ -857,9 +859,28 @@ export interface WorkTaxonomyTermSummary {
   action_object_pairs: number;
 }
 
+export interface WorkTaxonomyTermsJson {
+  section?: {
+    strong_terms?: string[];
+    weak_terms?: string[];
+    action_terms?: string[];
+    object_terms?: string[];
+    material_terms?: string[];
+    document_terms?: string[];
+    unit_hints?: string[];
+    negative_terms?: string[];
+  };
+  subtype?: {
+    strong_terms?: string[];
+    weak_terms?: string[];
+    action_object_pairs?: string[][];
+  };
+}
+
 export interface WorkTaxonomySection {
   section_code: string;
   section_name: string;
+  taxonomy_code?: string | null;
   scope?: string | null;
   subtypes_count: number;
   examples: WorkTaxonomyExample[];
@@ -871,9 +892,11 @@ export interface WorkTaxonomySubtype {
   work_subtype_name: string;
   section_code: string;
   section_name: string;
+  taxonomy_code?: string | null;
   display_code?: string | null;
   legacy_csv_codes: string[];
   term_summary: WorkTaxonomyTermSummary;
+  terms_json?: WorkTaxonomyTermsJson | null;
   dictionary_version?: string | null;
 }
 

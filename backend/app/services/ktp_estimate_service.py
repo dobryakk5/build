@@ -3136,7 +3136,7 @@ async def build_session_subtypes(
         )
         ref = subtypes_by_code.get(base_code)  # None для работ без подтипа
         stored_code = session_subtype_code(it, base_code)
-        display_name = (it.name or "").strip() or sub_name or base_code
+        display_name = sub_name or (it.name or "").strip() or base_code
         volume = (
             float(it.quantity)
             if it.quantity is not None and float(it.quantity) > 0

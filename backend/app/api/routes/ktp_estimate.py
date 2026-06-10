@@ -11,6 +11,7 @@ from app.core.permissions import Action
 from app.models import KtpEstimateSession, KtpWbsGroup, KtpWbsItem
 from app.models.project import ProjectMember
 from app.services import ktp_estimate_service as svc
+from app.services import work_taxonomy_service
 
 router = APIRouter(prefix="/projects/{project_id}/ktp-estimate", tags=["ktp-estimate"])
 
@@ -178,6 +179,7 @@ class SessionSubtypeOut(BaseModel):
     subtype_name: str
     work_subtype_code: str | None = None
     work_subtype_name: str | None = None
+    taxonomy_code: str | None = None
     item_id: str | None = None
     session_subtype_key: str | None = None
     macro_name: str | None = None
@@ -199,6 +201,9 @@ class SessionSubtypeOut(BaseModel):
             subtype_name=s.subtype_name,
             work_subtype_code=s.work_subtype_code or svc.base_subtype_code(s.subtype_code),
             work_subtype_name=s.work_subtype_name,
+            taxonomy_code=work_taxonomy_service.taxonomy_code_for_subtype(
+                s.work_subtype_code or svc.base_subtype_code(s.subtype_code)
+            ),
             item_id=s.item_id,
             session_subtype_key=s.session_subtype_key,
             macro_name=s.macro_name,

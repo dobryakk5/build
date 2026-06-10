@@ -163,6 +163,9 @@ async def test_work_taxonomy_helpers_fallback_to_json_v4():
 
     assert len(sections) == 19
     assert len(subtypes) == 111
+    taxonomy_codes = [s["taxonomy_code"] for s in subtypes]
+    assert len(set(taxonomy_codes)) == len(subtypes)
+    assert all(code and "." in code for code in taxonomy_codes)
     assert sections[0]["examples"]
     electrical = next(s for s in subtypes if s["work_subtype_code"] == "mep_internal/electrical")
     assert electrical["display_code"] == electrical["legacy_csv_codes"][0] == "7.4"

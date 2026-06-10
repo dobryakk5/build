@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import { useSearchParams } from "next/navigation";
 
 import { workTaxonomy } from "@/lib/api";
 import type { WorkTaxonomySection, WorkTaxonomySubtype } from "@/lib/types";
@@ -15,17 +16,51 @@ const COLORS = {
   primaryBg: "#0284c715",
 };
 
+const LABEL_HINTS = {
+  legacy: "Старый код из прежнего CSV/ФЕР-справочника. Нужен для сопоставления со старыми сметами и привычными кодами оператора.",
+  strong: "Сильные термины: прямые признаки подтипа. При совпадении дают основной вес классификатору.",
+  weak: "Слабые термины: вспомогательные признаки. Они уточняют классификацию, но сами по себе слабее сильных терминов.",
+  pairs: "Пары действий: связки действие + объект, например монтаж + перегородка. Нужны для более точного выбора подтипа.",
+};
+
+const SECTION_TERM_LABELS: Record<string, string> = {
+  strong_terms: "strong",
+  action_terms: "action",
+  object_terms: "object",
+  material_terms: "material",
+  weak_terms: "weak",
+  document_terms: "document",
+  unit_hints: "unit",
+  negative_terms: "negative",
+};
+
 function Code({ children }: { children: string }) {
   return (
-    <code style={{ fontSize: 11, color: COLORS.muted, fontFamily: "var(--mono, monospace)" }}>
+    <code
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        flex: "0 0 auto",
+        minWidth: 34,
+        padding: "2px 6px",
+        borderRadius: 5,
+        border: `1px solid ${COLORS.border}`,
+        background: COLORS.bg,
+        fontSize: 11,
+        lineHeight: 1.2,
+        color: COLORS.muted,
+        fontFamily: "var(--mono, monospace)",
+      }}
+    >
       {children}
     </code>
   );
 }
 
-function Chip({ children }: { children: ReactNode }) {
+function Chip({ children, title }: { children: ReactNode; title?: string }) {
   return (
     <span
+      title={title}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -43,7 +78,44 @@ function Chip({ children }: { children: ReactNode }) {
   );
 }
 
+function pairToText(pair: string[] | undefined) {
+  return (pair || []).filter(Boolean).join(" + ");
+}
+
+function TermGroup({ label, terms, title }: { label: string; terms: string[]; title?: string }) {
+  const cleanTerms = terms.filter(Boolean);
+  if (!cleanTerms.length) return null;
+
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 6, flexWrap: "wrap" }}>
+      <span title={title} style={{ minWidth: 58, paddingTop: 3, color: COLORS.muted, fontSize: 11, fontWeight: 650 }}>
+        {label}
+      </span>
+      <span style={{ display: "flex", flexWrap: "wrap", gap: 4, minWidth: 0, flex: 1 }}>
+        {cleanTerms.map((term, index) => (
+          <span
+            key={`${label}-${term}-${index}`}
+            style={{
+              padding: "2px 6px",
+              borderRadius: 5,
+              background: "#f1f5f9",
+              color: COLORS.text,
+              fontSize: 11,
+              lineHeight: 1.25,
+            }}
+          >
+            {term}
+          </span>
+        ))}
+      </span>
+    </div>
+  );
+}
+
 export default function WorkTaxonomyPanel() {
+  const searchParams = useSearchParams();
+  const urlSection = searchParams.get("section");
+  const urlSearch = searchParams.get("q") ?? "";
   const [sections, setSections] = useState<WorkTaxonomySection[]>([]);
   const [subtypes, setSubtypes] = useState<WorkTaxonomySubtype[]>([]);
   const [selectedSection, setSelectedSection] = useState<string | null>(null);
@@ -55,10 +127,15 @@ export default function WorkTaxonomyPanel() {
       .sections()
       .then((data) => {
         setSections(data);
-        setSelectedSection(data[0]?.section_code ?? null);
+        const urlSectionExists = urlSection && data.some((section) => section.section_code === urlSection);
+        setSelectedSection(urlSectionExists ? urlSection : data[0]?.section_code ?? null);
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [urlSection]);
+
+  useEffect(() => {
+    setSearch(urlSearch);
+  }, [urlSearch]);
 
   const reloadSubtypes = useCallback(() => {
     workTaxonomy
@@ -106,7 +183,7 @@ export default function WorkTaxonomyPanel() {
                 display: "grid",
                 gridTemplateColumns: "minmax(0, 1fr) auto",
                 gap: 8,
-                alignItems: "center",
+                alignItems: "start",
                 textAlign: "left",
                 padding: "8px 10px",
                 marginBottom: 3,
@@ -118,9 +195,11 @@ export default function WorkTaxonomyPanel() {
               }}
             >
               <span style={{ minWidth: 0 }}>
-                <Code>{section.section_code}</Code>
-                <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13 }}>
-                  {section.section_name}
+                <span style={{ display: "flex", alignItems: "flex-start", gap: 7, minWidth: 0 }}>
+                  {section.taxonomy_code ? <Code>{section.taxonomy_code}</Code> : null}
+                  <span style={{ display: "block", fontSize: 13, lineHeight: 1.25, whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                    {section.section_name}
+                  </span>
                 </span>
               </span>
               <span style={{ color: COLORS.muted, fontSize: 12 }}>{section.subtypes_count}</span>
@@ -131,7 +210,7 @@ export default function WorkTaxonomyPanel() {
         <main style={{ padding: 16, overflow: "auto" }}>
           <input
             type="search"
-            placeholder="Поиск по подтипу, canonical code или legacy-коду"
+            placeholder="Поиск по названию, ID или старому коду"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             style={{
@@ -160,19 +239,44 @@ export default function WorkTaxonomyPanel() {
               >
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 650 }}>{subtype.work_subtype_name}</div>
-                    <Code>{subtype.work_subtype_code}</Code>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
+                      {subtype.taxonomy_code ? <Code>{subtype.taxonomy_code}</Code> : null}
+                      <span style={{ minWidth: 0, fontSize: 14, fontWeight: 650 }}>{subtype.work_subtype_name}</span>
+                    </div>
                   </div>
-                  {subtype.display_code ? <Chip>{subtype.display_code}</Chip> : null}
                 </div>
 
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {subtype.legacy_csv_codes.map((code) => (
-                    <Chip key={code}>legacy {code}</Chip>
+                  {subtype.legacy_csv_codes
+                    .map((code) => (
+                      <Chip key={code} title={LABEL_HINTS.legacy}>legacy {code}</Chip>
+                    ))}
+                  <Chip title={LABEL_HINTS.strong}>strong {subtype.term_summary.strong_terms}</Chip>
+                  <Chip title={LABEL_HINTS.weak}>weak {subtype.term_summary.weak_terms}</Chip>
+                  <Chip title={LABEL_HINTS.pairs}>pairs {subtype.term_summary.action_object_pairs}</Chip>
+                </div>
+
+                <div style={{ display: "grid", gap: 7 }}>
+                  <div style={{ color: COLORS.muted, fontSize: 12, fontWeight: 650 }}>Слова первичного типа</div>
+                  {Object.entries(SECTION_TERM_LABELS).map(([key, label]) => (
+                    <TermGroup
+                      key={key}
+                      label={label}
+                      terms={subtype.terms_json?.section?.[key as keyof NonNullable<WorkTaxonomySubtype["terms_json"]>["section"]] ?? []}
+                      title={key === "negative_terms" ? "Отрицательные признаки: снижают вероятность выбора этого первичного типа." : undefined}
+                    />
                   ))}
-                  <Chip>strong {subtype.term_summary.strong_terms}</Chip>
-                  <Chip>weak {subtype.term_summary.weak_terms}</Chip>
-                  <Chip>pairs {subtype.term_summary.action_object_pairs}</Chip>
+                </div>
+
+                <div style={{ display: "grid", gap: 7 }}>
+                  <div style={{ color: COLORS.muted, fontSize: 12, fontWeight: 650 }}>Слова подтипа</div>
+                  <TermGroup label="strong" terms={subtype.terms_json?.subtype?.strong_terms ?? []} title={LABEL_HINTS.strong} />
+                  <TermGroup label="weak" terms={subtype.terms_json?.subtype?.weak_terms ?? []} title={LABEL_HINTS.weak} />
+                  <TermGroup
+                    label="pairs"
+                    terms={(subtype.terms_json?.subtype?.action_object_pairs ?? []).map(pairToText)}
+                    title={LABEL_HINTS.pairs}
+                  />
                 </div>
               </article>
             ))}

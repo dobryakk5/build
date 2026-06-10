@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
-import { ktpEstimate } from "@/lib/api";
+import { ktpEstimate, workTaxonomy } from "@/lib/api";
 import { trackActivity } from "@/lib/activity";
 import { useJobPoller } from "@/lib/useJobPoller";
 import type {
@@ -12,6 +12,9 @@ import type {
   KtpWbs,
   KtpWbsGroup,
   KtpWbsItem,
+  KtpSessionSubtype,
+  WorkTaxonomySection,
+  WorkTaxonomySubtype,
 } from "@/lib/types";
 
 const ORIGIN_BADGE: Record<KtpWbsItem["origin"], { label: string; color: string }> = {
@@ -37,6 +40,16 @@ const btn = (variant: "primary" | "ghost" | "danger" = "ghost"): React.CSSProper
     variant === "primary" ? "var(--blue-dark)" : variant === "danger" ? "rgba(239,68,68,.08)" : "var(--surface)",
   color: variant === "primary" ? "#fff" : variant === "danger" ? "var(--red)" : "var(--text)",
 });
+
+const inputLike: React.CSSProperties = {
+  padding: "7px 9px",
+  border: "1px solid var(--border2)",
+  borderRadius: 6,
+  background: "var(--surface)",
+  color: "var(--text)",
+  fontSize: 12,
+  outline: "none",
+};
 
 function buttonStyle(
   variant: "primary" | "ghost" | "danger" = "ghost",
@@ -206,6 +219,21 @@ export default function KtpEstimateWizardPage() {
 
   const stage1Processing = status === "stage1_processing" || status === "stage1_pending";
   const gprProcessing = status === "gpr_processing";
+  const actualStepIndex =
+    status === "stage1_review"
+      ? 2
+      : status === "stage2_review"
+      ? 3
+      : status === "prod_pending" || status === "prod_review"
+      ? 4
+      : 5;
+  const [viewStep, setViewStep] = useState<number | null>(null);
+  const stepIndex = viewStep ?? actualStepIndex;
+  const revisitingCompletedStep = stepIndex < actualStepIndex;
+
+  useEffect(() => {
+    setViewStep(null);
+  }, [actualStepIndex]);
 
   const restartStage1 = useCallback(async () => {
     if (!batchId) return;
@@ -299,19 +327,20 @@ export default function KtpEstimateWizardPage() {
     );
   }
 
-  const stepIndex =
-    status === "stage1_review"
-      ? 2
-      : status === "stage2_review"
-      ? 3
-      : status === "prod_pending" || status === "prod_review"
-      ? 4
-      : 5;
-
   return (
     <div style={{ height: "100%", overflow: "auto", padding: 24, maxWidth: 1080, margin: "0 auto", boxSizing: "border-box" }}>
       <Steps
         current={stepIndex}
+        maxAvailable={actualStepIndex}
+        onStep={(step) => {
+          if (step === 1) {
+            router.push(
+              `/projects/${projectId}/upload${batchId ? `?batch=${batchId}&session=${sessionId}&fromKtp=1` : ""}`,
+            );
+            return;
+          }
+          if (step <= actualStepIndex) setViewStep(step === actualStepIndex ? null : step);
+        }}
         onNewEstimate={() =>
           router.push(
             `/projects/${projectId}/upload${batchId ? `?batch=${batchId}&session=${sessionId}&fromKtp=1` : ""}`,
@@ -319,13 +348,15 @@ export default function KtpEstimateWizardPage() {
         }
       />
 
-      {status === "stage1_review" && (
+      {stepIndex === 2 && (
         <Stage1
           wbs={wbs}
           busy={busy}
           run={run}
           projectId={projectId}
           sessionId={sessionId}
+          revisiting={revisitingCompletedStep}
+          onReturn={() => setViewStep(null)}
           onApprove={async () => {
             setBusy(true);
             try {
@@ -346,7 +377,7 @@ export default function KtpEstimateWizardPage() {
         />
       )}
 
-      {status === "stage2_review" && (
+      {stepIndex === 3 && (
         <Stage2
           wbs={wbs}
           projectId={projectId}
@@ -355,10 +386,12 @@ export default function KtpEstimateWizardPage() {
           setBusy={setBusy}
           setError={setError}
           reload={loadWbs}
+          revisiting={revisitingCompletedStep}
+          onReturn={() => setViewStep(null)}
         />
       )}
 
-      {(status === "prod_pending" || status === "prod_review") && (
+      {stepIndex === 4 && (
         <StageProductivity
           wbs={wbs}
           projectId={projectId}
@@ -550,14 +583,25 @@ function Spinner() {
   );
 }
 
-function Steps({ current, onNewEstimate }: { current: number; onNewEstimate: () => void }) {
+function Steps({
+  current,
+  maxAvailable,
+  onStep,
+  onNewEstimate,
+}: {
+  current: number;
+  maxAvailable: number;
+  onStep: (step: number) => void;
+  onNewEstimate: () => void;
+}) {
   const labels = ["Новая смета", "Структура работ", "КТП", "Производительность", "ГПР"];
   return (
     <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
       {labels.map((label, i) => {
         const n = i + 1;
         const active = n === current;
-        const done = n < current;
+        const done = n < maxAvailable;
+        const available = n <= maxAvailable;
         const stepStyle: React.CSSProperties = {
           flex: 1,
           padding: "9px 12px",
@@ -569,19 +613,19 @@ function Steps({ current, onNewEstimate }: { current: number; onNewEstimate: () 
           background: active ? "var(--blue-dark)" : done ? "rgba(34,197,94,.1)" : "var(--surface)",
           color: active ? "#fff" : done ? "#15803d" : "var(--muted)",
         };
-        if (n === 1) {
+        if (n === 1 || available) {
           return (
             <button
               key={label}
               type="button"
-              onClick={onNewEstimate}
+              onClick={() => (n === 1 ? onNewEstimate() : onStep(n))}
               style={{
                 ...stepStyle,
                 cursor: "pointer",
                 fontFamily: "var(--sans)",
               }}
             >
-              {done ? "✓ " : `${n}. `}
+              {done && !active ? "✓ " : `${n}. `}
               {label}
             </button>
           );
@@ -608,6 +652,8 @@ function Stage1({
   run,
   projectId,
   sessionId,
+  revisiting,
+  onReturn,
   onApprove,
 }: {
   wbs: KtpWbs;
@@ -615,6 +661,8 @@ function Stage1({
   run: (fn: () => Promise<KtpWbs>) => Promise<void>;
   projectId: string;
   sessionId: string;
+  revisiting?: boolean;
+  onReturn?: () => void;
   onApprove: () => void;
 }) {
   const [newGroup, setNewGroup] = useState("");
@@ -632,14 +680,20 @@ function Stage1({
         title="Структура работ"
         hint="ИИ собрал позиции сметы в группы и добавил недостающие работы. Проверьте и поправьте структуру, затем утвердите."
         right={
-          <button
-            style={btn("primary")}
-            disabled={busy || pendingAi > 0}
-            onClick={onApprove}
-            title={pendingAi > 0 ? `Проверьте ${pendingAi} добавленных ИИ работ` : ""}
-          >
-            Утвердить структуру →
-          </button>
+          revisiting ? (
+            <button type="button" style={btn("primary")} onClick={onReturn}>
+              Вернуться к производительности
+            </button>
+          ) : (
+            <button
+              style={btn("primary")}
+              disabled={busy || pendingAi > 0}
+              onClick={onApprove}
+              title={pendingAi > 0 ? `Проверьте ${pendingAi} добавленных ИИ работ` : ""}
+            >
+              Утвердить структуру →
+            </button>
+          )
         }
       />
       {pendingAi > 0 && (
@@ -915,6 +969,8 @@ function Stage2({
   setBusy,
   setError,
   reload,
+  revisiting,
+  onReturn,
 }: {
   wbs: KtpWbs;
   projectId: string;
@@ -923,6 +979,8 @@ function Stage2({
   setBusy: (v: boolean) => void;
   setError: (v: string | null) => void;
   reload: () => Promise<void>;
+  revisiting?: boolean;
+  onReturn?: () => void;
 }) {
   const groupsWithWorks = wbs.groups.filter((g) =>
     g.items.some((item) => item.review_status !== "rejected"),
@@ -952,43 +1010,49 @@ function Stage2({
         title="КТП"
         hint="Создайте КТП для каждой группы работ. ИИ может задать уточняющие вопросы."
         right={
-          <button
-            style={buttonStyle("primary", busy || hasGeneratingCards)}
-            disabled={busy || hasGeneratingCards}
-            onClick={async () => {
-              if (hasGeneratingCards) {
-                setNotice(`Дождитесь завершения создания КТП. В работе: ${generatingGroupIds.size}.`);
-                return;
-              }
-              if (!allReady) {
-                setNotice(`Сначала создайте все КТП. Осталось: ${missingCards}.`);
-                return;
-              }
-              setNotice(null);
-              setApproving(true);
-              setBusy(true);
-              try {
-                await ktpEstimate.approveStage2(projectId, sessionId);
-                trackActivity("KTP_STAGE2_APPROVED", {
-                  projectId,
-                  entityType: "ktp_estimate_session",
-                  entityId: sessionId,
-                  metadata: {
-                    estimate_batch_id: wbs.session.estimate_batch_id,
-                    groups_count: groupsWithWorks.length,
-                  },
-                });
-                await reload();
-              } catch (e: any) {
-                setError(e.message);
-              } finally {
-                setApproving(false);
-                setBusy(false);
-              }
-            }}
-          >
-            <ButtonContent loading={approving}>Все карточки готовы → к ГПР</ButtonContent>
-          </button>
+          revisiting ? (
+            <button type="button" style={buttonStyle("primary", busy || hasGeneratingCards)} disabled={busy || hasGeneratingCards} onClick={onReturn}>
+              Вернуться к производительности
+            </button>
+          ) : (
+            <button
+              style={buttonStyle("primary", busy || hasGeneratingCards)}
+              disabled={busy || hasGeneratingCards}
+              onClick={async () => {
+                if (hasGeneratingCards) {
+                  setNotice(`Дождитесь завершения создания КТП. В работе: ${generatingGroupIds.size}.`);
+                  return;
+                }
+                if (!allReady) {
+                  setNotice(`Сначала создайте все КТП. Осталось: ${missingCards}.`);
+                  return;
+                }
+                setNotice(null);
+                setApproving(true);
+                setBusy(true);
+                try {
+                  await ktpEstimate.approveStage2(projectId, sessionId);
+                  trackActivity("KTP_STAGE2_APPROVED", {
+                    projectId,
+                    entityType: "ktp_estimate_session",
+                    entityId: sessionId,
+                    metadata: {
+                      estimate_batch_id: wbs.session.estimate_batch_id,
+                      groups_count: groupsWithWorks.length,
+                    },
+                  });
+                  await reload();
+                } catch (e: any) {
+                  setError(e.message);
+                } finally {
+                  setApproving(false);
+                  setBusy(false);
+                }
+              }}
+            >
+              <ButtonContent loading={approving}>Все карточки готовы → к ГПР</ButtonContent>
+            </button>
+          )
         }
       />
       {notice && (
@@ -1374,11 +1438,86 @@ function StageProductivity({
   reload: () => Promise<void>;
   onApprove: () => Promise<void>;
 }) {
-  const subtypes = wbs.session_subtypes ?? [];
+  const [optimisticSubtypePatches, setOptimisticSubtypePatches] = useState<Record<string, Partial<KtpSessionSubtype>>>({});
+  const [optimisticItemPatches, setOptimisticItemPatches] = useState<Record<string, Partial<KtpWbsItem>>>({});
+  const subtypes = useMemo(
+    () =>
+      (wbs.session_subtypes ?? []).map((row) => ({
+        ...row,
+        ...(optimisticSubtypePatches[row.id] || {}),
+      })),
+    [optimisticSubtypePatches, wbs.session_subtypes],
+  );
+  const itemById = useMemo(() => {
+    const map = new Map<string, KtpWbsItem>();
+    for (const group of wbs.groups) {
+      for (const item of group.items) {
+        map.set(item.id, {
+          ...item,
+          ...(optimisticItemPatches[item.id] || {}),
+        });
+      }
+    }
+    return map;
+  }, [optimisticItemPatches, wbs.groups]);
+  const groupedSubtypes = useMemo(() => {
+    const rowsByGroup = new Map<string, KtpSessionSubtype[]>();
+    for (const row of subtypes) {
+      const item = row.item_id ? itemById.get(row.item_id) : undefined;
+      const key = item?.group_id || "__ungrouped__";
+      const rows = rowsByGroup.get(key) || [];
+      rows.push(row);
+      rowsByGroup.set(key, rows);
+    }
+
+    const groups = wbs.groups
+      .map((group) => ({
+        key: group.id,
+        title: group.title,
+        rows: rowsByGroup.get(group.id) || [],
+      }))
+      .filter((group) => group.rows.length > 0);
+
+    const ungrouped = rowsByGroup.get("__ungrouped__") || [];
+    if (ungrouped.length) {
+      groups.push({ key: "__ungrouped__", title: "Без группы", rows: ungrouped });
+    }
+    return groups;
+  }, [itemById, subtypes, wbs.groups]);
+  const [taxonomySections, setTaxonomySections] = useState<WorkTaxonomySection[]>([]);
+  const [taxonomySubtypes, setTaxonomySubtypes] = useState<WorkTaxonomySubtype[]>([]);
+  const [selectingSubtypeId, setSelectingSubtypeId] = useState<string | null>(null);
+  const [selectedTaxonomySection, setSelectedTaxonomySection] = useState<string>("");
   const filled = subtypes.filter(
     (s) => s.output_per_day != null && s.output_per_day > 0 && s.volume != null && s.volume > 0,
   ).length;
   const canContinue = subtypes.length > 0 && filled === subtypes.length;
+
+  useEffect(() => {
+    setOptimisticSubtypePatches({});
+    setOptimisticItemPatches({});
+  }, [wbs]);
+
+  useEffect(() => {
+    workTaxonomy
+      .sections()
+      .then((data) => {
+        setTaxonomySections(data);
+        setSelectedTaxonomySection((current) => current || data[0]?.section_code || "");
+      })
+      .catch((e) => setError(e.message));
+  }, [setError]);
+
+  useEffect(() => {
+    if (!selectedTaxonomySection) {
+      setTaxonomySubtypes([]);
+      return;
+    }
+    workTaxonomy
+      .subtypes({ section_code: selectedTaxonomySection })
+      .then(setTaxonomySubtypes)
+      .catch((e) => setError(e.message));
+  }, [selectedTaxonomySection, setError]);
 
   async function saveField(
     subtypeId: string,
@@ -1405,6 +1544,82 @@ function StageProductivity({
     } finally {
       setBusy(false);
     }
+  }
+
+  function openSubtypeSelector(row: KtpSessionSubtype) {
+    const code = row.work_subtype_code || row.subtype_code;
+    const sectionCode = code.includes("/") ? code.split("/", 1)[0] : "";
+    if (sectionCode && taxonomySections.some((section) => section.section_code === sectionCode)) {
+      setSelectedTaxonomySection(sectionCode);
+    }
+    setSelectingSubtypeId(row.id);
+  }
+
+  async function saveManualSubtype(row: KtpSessionSubtype, workSubtypeCode: string) {
+    if (!row.item_id || !workSubtypeCode) return;
+    const selectedSubtype = taxonomySubtypes.find((subtype) => subtype.work_subtype_code === workSubtypeCode);
+    const currentItem = itemById.get(row.item_id);
+    const fallbackName = selectedSubtype?.work_subtype_name || row.work_subtype_name || row.subtype_name;
+    const previousSubtypePatch = optimisticSubtypePatches[row.id];
+    const previousItemPatch = optimisticItemPatches[row.item_id];
+
+    setOptimisticSubtypePatches((current) => ({
+      ...current,
+      [row.id]: {
+        ...current[row.id],
+        subtype_code: workSubtypeCode,
+        subtype_name: fallbackName,
+        work_subtype_code: workSubtypeCode,
+        work_subtype_name: fallbackName,
+        taxonomy_code: selectedSubtype?.taxonomy_code ?? row.taxonomy_code,
+        macro_name: selectedSubtype?.section_name ?? row.macro_name,
+      },
+    }));
+    setOptimisticItemPatches((current) => ({
+      ...current,
+      [row.item_id!]: {
+        ...current[row.item_id!],
+        work_section_code: selectedSubtype?.section_code ?? current[row.item_id!]?.work_section_code ?? currentItem?.work_section_code,
+        work_section_name: selectedSubtype?.section_name ?? current[row.item_id!]?.work_section_name ?? currentItem?.work_section_name,
+        work_subtype_code: workSubtypeCode,
+        work_subtype_name: fallbackName,
+        work_type_source: "manual",
+        work_type_confidence: "manual",
+        work_type_needs_review: false,
+        operator_review_required: false,
+        manual_override: true,
+      },
+    }));
+    setSelectingSubtypeId(null);
+    try {
+      await ktpEstimate.updateItem(projectId, row.item_id, { work_subtype_code: workSubtypeCode });
+      await reload();
+    } catch (e: any) {
+      setOptimisticSubtypePatches((current) => {
+        const next = { ...current };
+        if (previousSubtypePatch) next[row.id] = previousSubtypePatch;
+        else delete next[row.id];
+        return next;
+      });
+      setOptimisticItemPatches((current) => {
+        const next = { ...current };
+        if (previousItemPatch) next[row.item_id!] = previousItemPatch;
+        else delete next[row.item_id!];
+        return next;
+      });
+      setError(e.message);
+      await reload();
+    }
+  }
+
+  function subtypeDictionaryHref(row: KtpSessionSubtype) {
+    const code = row.work_subtype_code || row.subtype_code;
+    const sectionCode = code.includes("/") ? code.split("/", 1)[0] : "";
+    const params = new URLSearchParams({ tab: "work-types" });
+    if (sectionCode) params.set("section", sectionCode);
+    const query = row.work_subtype_name || row.subtype_name;
+    if (query && !code.startsWith("__unknown__") && code !== "unknown/needs_review") params.set("q", query);
+    return `/projects/${projectId}/fer?${params.toString()}`;
   }
 
   const cols = "minmax(220px, 1fr) 150px 150px 110px 130px";
@@ -1465,65 +1680,210 @@ function StageProductivity({
             <div>Бригада</div>
             <div>Пауза, дн.</div>
           </div>
-          {subtypes.map((s) => {
-            const unknown =
-              s.subtype_code.startsWith("__unknown__") ||
-              s.subtype_code === "unknown/needs_review";
-            return (
+          {groupedSubtypes.map((group) => (
+            <div key={group.key}>
               <div
-                key={s.id}
                 style={{
-                  display: "grid",
-                  gridTemplateColumns: cols,
-                  gap: 10,
-                  alignItems: "center",
-                  padding: "10px 14px",
+                  padding: "9px 14px",
                   borderBottom: "1px solid var(--border)",
+                  background: "#f8fafc",
+                  color: "var(--text)",
                   fontSize: 12,
-                  background: unknown ? "#fef9f9" : undefined,
+                  fontWeight: 700,
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 12,
                 }}
               >
-                <div>
-                  <div style={{ fontWeight: 600, color: unknown ? "var(--red)" : "var(--text)" }}>
-                    {s.subtype_name}
-                  </div>
-                  <div style={{ marginTop: 3, color: "var(--muted)", fontFamily: "var(--mono)", fontSize: 11 }}>
-                    {unknown ? "нужно задать вручную" : `${s.subtype_code}${s.macro_name ? ` · ${s.macro_name}` : ""}`}
-                  </div>
-                </div>
-                <NumCell
-                  value={s.volume}
-                  suffix={s.unit || ""}
-                  disabled={busy}
-                  onSave={(v) => void saveField(s.id, { volume: v })}
-                />
-                <NumCell
-                  value={s.output_per_day}
-                  suffix={s.unit ? `${s.unit}/см` : "/см"}
-                  disabled={busy}
-                  source={s.output_source}
-                  onSave={(v) => void saveField(s.id, { output_per_day: v })}
-                />
-                <NumCell
-                  value={s.crew_size}
-                  suffix="чел"
-                  disabled={busy}
-                  source={s.crew_source}
-                  onSave={(v) => void saveField(s.id, { crew_size: v })}
-                />
-                <NumCell
-                  value={s.lag_after_days}
-                  suffix="дн"
-                  disabled={busy}
-                  allowZero
-                  // Пауза по умолчанию 0 и необязательна — не помечаем как ≈,
-                  // показываем зелёным только если оператор сам её задал.
-                  source={s.lag_source === "manual" ? "manual" : undefined}
-                  onSave={(v) => void saveField(s.id, { lag_after_days: v ?? 0 })}
-                />
+                <span>{group.title}</span>
+                <span style={{ color: "var(--muted)", fontWeight: 600 }}>{group.rows.length}</span>
               </div>
-            );
-          })}
+              {group.rows.map((s) => {
+                const unknown =
+                  s.subtype_code.startsWith("__unknown__") ||
+                  s.subtype_code === "unknown/needs_review";
+                const sourceItem = s.item_id ? itemById.get(s.item_id) : undefined;
+                const typeName = s.work_subtype_name || s.subtype_name;
+                const dictionarySelected =
+                  !unknown &&
+                  Boolean(sourceItem?.manual_override) &&
+                  sourceItem?.work_type_source === "manual";
+                const selectorOpen = selectingSubtypeId === s.id;
+                return (
+                  <div
+                    key={s.id}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: cols,
+                      gap: 10,
+                      alignItems: "center",
+                      padding: "10px 14px",
+                      borderBottom: "1px solid var(--border)",
+                      fontSize: 12,
+                      background: unknown ? "#fef9f9" : dictionarySelected ? "#f0fdf4" : undefined,
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 7,
+                          flexWrap: "wrap",
+                          fontWeight: 600,
+                          color: unknown ? "var(--red)" : dictionarySelected ? "#15803d" : "var(--text)",
+                        }}
+                      >
+                        {!unknown && s.taxonomy_code ? (
+                          <a
+                            href={subtypeDictionaryHref(s)}
+                            title={`Открыть в справочнике: ${typeName}`}
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              flex: "0 0 auto",
+                              minWidth: 34,
+                              padding: "2px 6px",
+                              borderRadius: 5,
+                              border: "1px solid var(--border2)",
+                              background: "var(--surface)",
+                              color: dictionarySelected ? "#15803d" : "var(--blue-dark)",
+                              fontFamily: "var(--mono)",
+                              fontSize: 11,
+                              fontWeight: 700,
+                              lineHeight: 1.2,
+                              textDecoration: "none",
+                            }}
+                          >
+                            {s.taxonomy_code}
+                          </a>
+                        ) : null}
+                        <span>{unknown ? "Тип работы не определён" : typeName}</span>
+                        {dictionarySelected ? (
+                          <button
+                            type="button"
+                            disabled={busy || !s.item_id}
+                            onClick={() => openSubtypeSelector(s)}
+                            title="Тип работы выбран оператором из справочника. Нажмите, чтобы перевыбрать."
+                            style={{
+                              display: "inline-flex",
+                              alignItems: "center",
+                              padding: "2px 6px",
+                              borderRadius: 5,
+                              border: "1px solid #16a34a55",
+                              background: "#22c55e22",
+                              color: "#15803d",
+                              fontSize: 11,
+                              fontWeight: 700,
+                              lineHeight: 1.2,
+                              cursor: busy || !s.item_id ? "not-allowed" : "pointer",
+                              opacity: busy || !s.item_id ? 0.65 : 1,
+                            }}
+                          >
+                            из справочника
+                          </button>
+                        ) : null}
+                      </div>
+                      {!unknown && s.macro_name && (
+                        <div style={{ marginTop: 3, color: "var(--muted)", fontSize: 11, lineHeight: 1.35 }}>
+                          <span>{s.macro_name}</span>
+                        </div>
+                      )}
+                      {sourceItem && (
+                        <div style={{ marginTop: 3, color: "var(--muted)", fontSize: 11, lineHeight: 1.35 }}>
+                          Работа: {sourceItem.name}
+                        </div>
+                      )}
+                      {(unknown || selectorOpen) && (
+                        <div style={{ marginTop: 6 }}>
+                          {selectorOpen ? (
+                            <div style={{ display: "grid", gap: 6, maxWidth: 360 }}>
+                              <select
+                                value={selectedTaxonomySection}
+                                disabled={busy}
+                                onChange={(e) => setSelectedTaxonomySection(e.target.value)}
+                                style={{ ...inputLike, width: "100%" }}
+                              >
+                                {taxonomySections.map((section) => (
+                                  <option key={section.section_code} value={section.section_code}>
+                                    {section.section_name}
+                                  </option>
+                                ))}
+                              </select>
+                              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                <select
+                                  value=""
+                                  disabled={busy || !s.item_id}
+                                  onChange={(e) => void saveManualSubtype(s, e.target.value)}
+                                  style={{ ...inputLike, width: "100%", flex: 1 }}
+                                >
+                                  <option value="">Выберите новый подтип работ…</option>
+                                  {taxonomySubtypes.map((subtype) => (
+                                    <option key={subtype.work_subtype_code} value={subtype.work_subtype_code}>
+                                      {subtype.work_subtype_name}
+                                    </option>
+                                  ))}
+                                </select>
+                                {!unknown ? (
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => setSelectingSubtypeId(null)}
+                                    style={buttonStyle("ghost", busy)}
+                                  >
+                                    Отмена
+                                  </button>
+                                ) : null}
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={busy || !s.item_id}
+                              onClick={() => openSubtypeSelector(s)}
+                              style={buttonStyle("ghost", busy || !s.item_id)}
+                            >
+                              Выбрать из справочника
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    <NumCell
+                      value={s.volume}
+                      suffix={s.unit || ""}
+                      disabled={busy}
+                      onSave={(v) => void saveField(s.id, { volume: v })}
+                    />
+                    <NumCell
+                      value={s.output_per_day}
+                      suffix={s.unit ? `${s.unit}/см` : "/см"}
+                      disabled={busy}
+                      source={s.output_source}
+                      onSave={(v) => void saveField(s.id, { output_per_day: v })}
+                    />
+                    <NumCell
+                      value={s.crew_size}
+                      suffix="чел"
+                      disabled={busy}
+                      source={s.crew_source}
+                      onSave={(v) => void saveField(s.id, { crew_size: v })}
+                    />
+                    <NumCell
+                      value={s.lag_after_days}
+                      suffix="дн"
+                      disabled={busy}
+                      allowZero
+                      // Пауза по умолчанию 0 и необязательна — не помечаем как ≈,
+                      // показываем зелёным только если оператор сам её задал.
+                      source={s.lag_source === "manual" ? "manual" : undefined}
+                      onSave={(v) => void saveField(s.id, { lag_after_days: v ?? 0 })}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </div>
       )}
     </div>

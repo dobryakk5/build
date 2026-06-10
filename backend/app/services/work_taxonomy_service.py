@@ -228,6 +228,22 @@ def _term_summary(terms_json: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _flatten_term_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        values: list[str] = []
+        for item in value:
+            values.extend(_flatten_term_values(item))
+        return values
+    if isinstance(value, dict):
+        values: list[str] = []
+        for item in value.values():
+            values.extend(_flatten_term_values(item))
+        return values
+    return []
+
+
 def _section_examples(subtypes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     examples: list[dict[str, Any]] = []
     for subtype in subtypes[:4]:
@@ -235,10 +251,35 @@ def _section_examples(subtypes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             {
                 "work_subtype_code": subtype["work_subtype_code"],
                 "work_subtype_name": subtype["work_subtype_name"],
+                "taxonomy_code": subtype.get("taxonomy_code"),
                 "display_code": subtype.get("display_code"),
             }
         )
     return examples
+
+
+def _taxonomy_code_map(payload: dict[str, Any] | None = None) -> dict[str, str]:
+    payload = payload or _load_dictionary()
+    codes: dict[str, str] = {}
+    for section_index, section in enumerate(payload.get("sections") or [], start=1):
+        section_code = str(section["id"])
+        for subtype_index, subtype in enumerate(section.get("subtypes") or [], start=1):
+            codes[f"{section_code}/{subtype['id']}"] = f"{section_index}.{subtype_index}"
+    return codes
+
+
+def _section_taxonomy_code_map(payload: dict[str, Any] | None = None) -> dict[str, str]:
+    payload = payload or _load_dictionary()
+    return {
+        str(section["id"]): str(section_index)
+        for section_index, section in enumerate(payload.get("sections") or [], start=1)
+    }
+
+
+def taxonomy_code_for_subtype(code: str | None) -> str | None:
+    if not code:
+        return None
+    return _taxonomy_code_map().get(str(code))
 
 
 def _dictionary_subtypes_from_json() -> list[dict[str, Any]]:
@@ -246,7 +287,7 @@ def _dictionary_subtypes_from_json() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for macro_id, section in enumerate(payload.get("sections") or [], start=1):
         section_code = str(section["id"])
-        for subtype in section.get("subtypes") or []:
+        for subtype_index, subtype in enumerate(section.get("subtypes") or [], start=1):
             legacy_codes = _legacy_csv_codes(subtype.get("legacy_csv_codes"))
             work_subtype_code = f"{section_code}/{subtype['id']}"
             terms = {
@@ -276,6 +317,7 @@ def _dictionary_subtypes_from_json() -> list[dict[str, Any]]:
                     "section_scope": section.get("scope"),
                     "work_subtype_code": work_subtype_code,
                     "work_subtype_name": subtype.get("title"),
+                    "taxonomy_code": f"{macro_id}.{subtype_index}",
                     "display_code": legacy_codes[0] if legacy_codes else None,
                     "legacy_csv_codes": legacy_codes,
                     "terms_json": terms,
@@ -317,6 +359,7 @@ async def get_work_taxonomy_subtypes(
     else:
         items = _dictionary_subtypes_from_json()
 
+    taxonomy_codes = _taxonomy_code_map()
     if section_code:
         items = [item for item in items if item.get("section_code") == section_code]
     needle = normalize_text(q) if q else ""
@@ -330,8 +373,10 @@ async def get_work_taxonomy_subtypes(
                     for part in (
                         item.get("work_subtype_code"),
                         item.get("work_subtype_name"),
+                        item.get("taxonomy_code") or taxonomy_codes.get(str(item.get("work_subtype_code") or "")),
                         item.get("display_code"),
                         " ".join(item.get("legacy_csv_codes") or []),
+                        " ".join(_flatten_term_values(item.get("terms_json"))),
                     )
                 )
             )
@@ -343,9 +388,11 @@ async def get_work_taxonomy_subtypes(
             "work_subtype_name": item["work_subtype_name"],
             "section_code": item["section_code"],
             "section_name": item["section_name"],
+            "taxonomy_code": item.get("taxonomy_code") or taxonomy_codes.get(str(item["work_subtype_code"])),
             "display_code": item.get("display_code"),
             "legacy_csv_codes": item.get("legacy_csv_codes") or [],
             "term_summary": _term_summary(_terms_json(item.get("terms_json"))),
+            "terms_json": _terms_json(item.get("terms_json")),
             "dictionary_version": item.get("dictionary_version"),
         }
         for item in items
@@ -357,6 +404,7 @@ async def get_work_taxonomy_sections(db: AsyncSession) -> list[dict[str, Any]]:
     scope_by_code: dict[str, str | None] = {}
     for item in _dictionary_subtypes_from_json():
         scope_by_code.setdefault(str(item["section_code"]), item.get("section_scope"))
+    taxonomy_codes = _section_taxonomy_code_map()
 
     grouped: dict[str, dict[str, Any]] = {}
     order: list[str] = []
@@ -366,6 +414,7 @@ async def get_work_taxonomy_sections(db: AsyncSession) -> list[dict[str, Any]]:
             grouped[section_code] = {
                 "section_code": section_code,
                 "section_name": subtype.get("section_name"),
+                "taxonomy_code": taxonomy_codes.get(section_code),
                 "scope": scope_by_code.get(section_code),
                 "subtypes_count": 0,
                 "_subtypes": [],
