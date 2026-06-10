@@ -208,6 +208,9 @@ def _row_hash(section, name, unit, quantity, total_price) -> str:
 
 def _row_preview_dict(row, index: int | None = None) -> dict:
     raw = getattr(row, "raw_data", None) or {}
+    item_type_confidence = raw.get("item_type_confidence")
+    if item_type_confidence is None and isinstance(raw.get("classification_confidence"), (int, float)):
+        item_type_confidence = raw.get("classification_confidence")
     return {
         "index":       index,
         "row_order":   getattr(row, "row_order", 0),
@@ -218,32 +221,65 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
         "unit":        row.unit,
         "quantity":    float(row.quantity) if row.quantity is not None else None,
         "total_price": float(row.total_price) if row.total_price is not None else None,
-        "confidence":  raw.get("classification_confidence"),
+        "confidence":  item_type_confidence,
         "reason":      raw.get("classification_reason"),
         "macro_id":    raw.get("macro_id"),
-        "subtype_code": raw.get("subtype_code"),
-        "subtype_name": raw.get("subtype_name"),
+        "subtype_code": raw.get("work_subtype_code") or raw.get("subtype_code"),
+        "subtype_name": raw.get("work_subtype_name") or raw.get("subtype_name"),
+        "work_section_code": raw.get("work_section_code"),
+        "work_section_name": raw.get("work_section_name"),
+        "work_subtype_code": raw.get("work_subtype_code") or raw.get("subtype_code"),
+        "work_subtype_name": raw.get("work_subtype_name") or raw.get("subtype_name"),
+        "classification_score": raw.get("classification_score"),
+        "classification_confidence": raw.get("classification_confidence"),
+        "classification_needs_review": raw.get("classification_needs_review"),
+        "classification_source": raw.get("classification_source"),
+        "classification_candidates": raw.get("classification_candidates"),
+        "classification_matched_terms": raw.get("classification_matched_terms"),
+        "operator_review_required": raw.get("operator_review_required"),
         "row_hash":    _row_hash(row.section, row.work_name, row.unit, row.quantity, row.total_price),
     }
 
 
 async def _enrich_work_subtypes(rows: list, db: AsyncSession) -> None:
-    """Финальный проход классификации подтипа (CSV-таксономия). Только для
-    work-строк; у остальных подтип очищается. Запускать ПОСЛЕ правок оператора."""
-    from app.services.work_taxonomy_service import classify_subtype, load_taxonomy
+    """Финальный проход классификации работ по JSON v3.
 
-    taxonomy = await load_taxonomy(db)
+    Только work-строки получают canonical ``work_subtype_code``. У остальных
+    поля типизации очищаются. Запускать ПОСЛЕ правок оператора.
+    """
+    from app.services.work_taxonomy_service import classify_work
+
     for row in rows:
         raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        if isinstance(raw.get("classification_confidence"), (int, float)):
+            raw.setdefault("item_type_confidence", raw.get("classification_confidence"))
         row.raw_data = raw
         if resolve_item_type(row) == "work":
-            match = classify_subtype(row.work_name or "", row.section, taxonomy)
-            if match:
-                raw["macro_id"] = match.macro_id
-                raw["subtype_code"] = match.code
-                raw["subtype_name"] = match.name
-                continue
-        for key in ("macro_id", "subtype_code", "subtype_name"):
+            result = classify_work(row.work_name or "", row.section)
+            raw.update(result.as_raw_data())
+            raw["operator_review_required"] = bool(result.needs_review)
+            raw["operator_review_status"] = None
+            raw["operator_review_reason"] = result.reason if result.needs_review else None
+            continue
+        for key in (
+            "macro_id",
+            "subtype_code",
+            "subtype_name",
+            "work_section_code",
+            "work_section_name",
+            "work_subtype_code",
+            "work_subtype_name",
+            "classification_score",
+            "classification_confidence",
+            "classification_needs_review",
+            "classification_source",
+            "classification_candidates",
+            "classification_matched_terms",
+            "operator_review_required",
+            "operator_review_status",
+            "operator_review_reason",
+            "dictionary_version",
+        ):
             raw.pop(key, None)
 
 
@@ -379,7 +415,9 @@ def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
         raw = getattr(row, "raw_data", None) or {}
         if item_type == "unknown" and len(unknown_rows) < 20:
             unknown_rows.append(_row_preview_dict(row))
-        conf = raw.get("classification_confidence")
+        conf = raw.get("item_type_confidence")
+        if conf is None and isinstance(raw.get("classification_confidence"), (int, float)):
+            conf = raw.get("classification_confidence")
         if conf is not None and conf < _LOW_CONFIDENCE and len(low_confidence_rows) < 20:
             low_confidence_rows.append(_row_preview_dict(row))
 
@@ -713,6 +751,7 @@ async def _process_upload(job_id: str) -> None:
             # ── 3. Сохраняем estimates ────────────────────────────────────────
             estimates = []
             for i, row in enumerate(rows):
+                raw = row.raw_data if isinstance(row.raw_data, dict) else {}
                 est = Estimate(
                     id          = str(uuid4()),
                     project_id  = job.project_id,
@@ -725,7 +764,22 @@ async def _process_upload(job_id: str) -> None:
                     total_price = row.total_price,
                     materials   = getattr(row, "materials", None) or None,
                     row_order   = i,
-                    raw_data    = row.raw_data,
+                    raw_data    = raw,
+                    work_section_code = raw.get("work_section_code"),
+                    work_section_name = raw.get("work_section_name"),
+                    work_subtype_code = raw.get("work_subtype_code") or raw.get("subtype_code"),
+                    work_subtype_name = raw.get("work_subtype_name") or raw.get("subtype_name"),
+                    classification_score = raw.get("classification_score"),
+                    classification_confidence = raw.get("classification_confidence"),
+                    classification_needs_review = bool(raw.get("classification_needs_review")),
+                    classification_source = raw.get("classification_source"),
+                    classification_candidates = raw.get("classification_candidates"),
+                    classification_matched_terms = raw.get("classification_matched_terms"),
+                    operator_review_required = bool(raw.get("operator_review_required")),
+                    operator_review_status = raw.get("operator_review_status"),
+                    operator_review_reason = raw.get("operator_review_reason"),
+                    dictionary_version = raw.get("dictionary_version"),
+                    manual_override = bool(raw.get("manual_override")),
                 )
                 db.add(est)
                 estimates.append(est)
@@ -921,7 +975,7 @@ async def _build_precedence_dependencies(task_dtos, estimates, db: AsyncSession)
     subtype_by_estimate_id: dict[str, str] = {}
     for est in estimates:
         raw = est.raw_data if isinstance(est.raw_data, dict) else {}
-        code = raw.get("subtype_code")
+        code = est.work_subtype_code or raw.get("work_subtype_code") or raw.get("subtype_code")
         if code:
             subtype_by_estimate_id[est.id] = code
 

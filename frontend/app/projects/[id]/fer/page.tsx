@@ -5,7 +5,7 @@ import type { CSSProperties } from "react";
 import Link from "next/link";
 import { usePathname, useSearchParams } from "next/navigation";
 
-import NwDictionaryPage from "@/app/nw/page";
+import WorkTaxonomyPanel from "@/components/WorkTaxonomyPanel";
 import { fer as ferApi } from "@/lib/api";
 import type {
   FerBreadcrumbItem,
@@ -279,7 +279,7 @@ export default function FerPage() {
     <div style={{ height: "100%", overflow: "auto" }}>
       <ReferenceTabs activeTab={activeDirectoryTab} basePath={pathname} />
       {activeDirectoryTab === "work-types" ? (
-        <NwDictionaryPage />
+        <WorkTaxonomyPanel />
       ) : activeDirectoryTab === "estimate" ? (
         <EstimatePage />
       ) : (

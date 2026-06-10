@@ -32,6 +32,8 @@ import type {
   NwItem,
   NwItemDetail,
   NwWorkType,
+  WorkTaxonomySection,
+  WorkTaxonomySubtype,
   WorkPlanAutoSummary,
   WorkPlanCard,
   WorkPlanCardPatch,
@@ -613,6 +615,9 @@ export const ktpEstimate = {
       unit: string | null;
       quantity: number | null;
       sort_order: number;
+      work_subtype_code: string;
+      manual_override: boolean;
+      reclassify: boolean;
     }>,
   ) =>
     request<KtpWbs>(`/projects/${projectId}/ktp-estimate/items/${itemId}`, {
@@ -786,6 +791,17 @@ export const nw = {
     });
     const qs = params.toString();
     return request<NwFerMapping[]>(`/nw/mapping${qs ? `?${qs}` : ""}`);
+  },
+};
+
+export const workTaxonomy = {
+  sections: () => request<WorkTaxonomySection[]>("/work-taxonomy/sections"),
+  subtypes: (filters: { section_code?: string; q?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.section_code) params.set("section_code", filters.section_code);
+    if (filters.q) params.set("q", filters.q);
+    const qs = params.toString();
+    return request<WorkTaxonomySubtype[]>(`/work-taxonomy/subtypes${qs ? `?${qs}` : ""}`);
   },
 };
 

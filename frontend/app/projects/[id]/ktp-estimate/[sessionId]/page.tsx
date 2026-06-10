@@ -1466,7 +1466,9 @@ function StageProductivity({
             <div>Пауза, дн.</div>
           </div>
           {subtypes.map((s) => {
-            const unknown = s.subtype_code.startsWith("__unknown__");
+            const unknown =
+              s.subtype_code.startsWith("__unknown__") ||
+              s.subtype_code === "unknown/needs_review";
             return (
               <div
                 key={s.id}

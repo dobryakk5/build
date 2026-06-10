@@ -13,7 +13,11 @@ from app.services.work_taxonomy_service import (  # noqa: E402
     PrecedenceEdge,
     SubtypeDef,
     build_precedence_dependencies,
+    build_work_section_palette,
+    classify_work,
     classify_subtype,
+    get_work_taxonomy_sections,
+    get_work_taxonomy_subtypes,
 )
 
 _DATA = Path(__file__).resolve().parents[1] / "app" / "data" / "work_subtypes.csv"
@@ -59,6 +63,98 @@ def test_classify_subtype_prefers_more_specific_keyword():
     match = classify_subtype("Обратная засыпка пазух грунтом", None, TAXONOMY)
     assert match is not None
     assert match.code == "1.3"
+
+
+@pytest.mark.parametrize(
+    "name,expected_section,expected_subtype",
+    [
+        (
+            "Разработка грунта в котловане экскаватором с погрузкой в самосвалы",
+            "earthworks",
+            "earthworks/excavation_pit_trench",
+        ),
+        (
+            "Устройство гидроизоляции фундамента битумной мастикой в 2 слоя",
+            "waterproofing",
+            "waterproofing/coating_waterproofing",
+        ),
+        (
+            "Монтаж плит перекрытия ПК с заделкой швов раствором",
+            "floor_slabs",
+            "floor_slabs/precast_rc_slabs",
+        ),
+        (
+            "Устройство кровельного ковра из ПВХ-мембраны с примыканием к парапетам",
+            "roofing",
+            "roofing/flat_roll_membrane_roof",
+        ),
+        (
+            "Монтаж перегородок из ГКЛ по металлическому каркасу с заполнением минватой",
+            "partitions",
+            "partitions/drywall_partitions",
+        ),
+        (
+            "Устройство полусухой стяжки пола с фиброармированием и затиркой вертолетом",
+            "floor_screed",
+            "floor_screed/semi_dry_screed",
+        ),
+    ],
+)
+def test_classify_work_json_v3_examples(name, expected_section, expected_subtype):
+    result = classify_work(name)
+    assert result.section_code == expected_section
+    assert result.subtype_code == expected_subtype
+    assert not result.needs_review
+
+
+def test_classify_work_related_sections_from_ambiguous_terms():
+    result = classify_work("Устройство гидроизоляции фундамента битумной мастикой")
+    assert result.section_code == "waterproofing"
+    assert "foundation" in result.related_sections
+
+
+@pytest.mark.parametrize(
+    "name,expected_section",
+    [
+        ("Устройство ПВХ-мембраны по кровле с примыканием к парапету", "roofing"),
+        ("Полусухая стяжка пола с фиброармированием", "floor_screed"),
+        ("Армирование монолитной плиты перекрытия", "floor_slabs"),
+        ("Бетонирование ленточного фундамента", "foundation"),
+        ("Кладка несущих стен из газоблока", "load_bearing_walls"),
+        ("Монтаж перегородок из пеноблока", "partitions"),
+        ("Вязка арматуры монолитных колонн и ригелей", "structural_frame"),
+    ],
+)
+def test_classify_work_json_v3_conflict_cases(name, expected_section):
+    result = classify_work(name)
+    assert result.section_code == expected_section
+
+
+@pytest.mark.asyncio
+async def test_work_taxonomy_helpers_fallback_to_json_v3():
+    db = MagicMock()
+    db.scalars = AsyncMock(return_value=[])
+
+    sections = await get_work_taxonomy_sections(db)
+    subtypes = await get_work_taxonomy_subtypes(db)
+
+    assert len(sections) == 19
+    assert len(subtypes) == 94
+    assert sections[0]["examples"]
+    electrical = next(s for s in subtypes if s["work_subtype_code"] == "mep_internal/electrical")
+    assert electrical["display_code"] == electrical["legacy_csv_codes"][0] == "7.4"
+
+
+@pytest.mark.asyncio
+async def test_build_work_section_palette_uses_all_sections_when_primary_empty():
+    db = MagicMock()
+    db.scalars = AsyncMock(return_value=[])
+    estimate = SimpleNamespace(raw_data={}, work_section_code=None)
+
+    palette = await build_work_section_palette(db, [estimate])
+
+    assert len(palette) == 19
+    assert all(section["is_primary"] for section in palette)
 
 
 def test_build_precedence_dependencies_basic_with_lag():

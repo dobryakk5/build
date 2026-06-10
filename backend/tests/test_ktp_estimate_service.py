@@ -30,6 +30,17 @@ def make_est(
     e.section = section
     e.row_order = row_order
     e.total_price = None
+    e.raw_data = {}
+    e.work_section_code = None
+    e.work_section_name = None
+    e.work_subtype_code = None
+    e.work_subtype_name = None
+    e.classification_confidence = None
+    e.classification_needs_review = False
+    e.classification_candidates = None
+    e.classification_source = None
+    e.operator_review_required = False
+    e.manual_override = False
     return e
 
 
@@ -39,10 +50,25 @@ def _make_diag() -> dict:
         "raw_samples": [],
         "coverage": [],
         "wt_code_conflicts": [],
+        "work_section_code_conflicts": [],
+        "invalid_work_section_codes": [],
         "gap_fill_trimmed": [],
         "repeated_sections": [],
         "unassigned_ai_items": [],
     }
+
+
+def test_gpr_blocker_is_computed_from_review_flags_and_confirmation():
+    from app.services.ktp_estimate_service import gpr_blocker
+
+    item = MagicMock()
+    item.operator_review_required = True
+    item.work_type_needs_review = False
+    item.gpr_confirmed = False
+    assert gpr_blocker(item) is True
+
+    item.gpr_confirmed = True
+    assert gpr_blocker(item) is False
 
 
 # ── инвариант покрытия ───────────────────────────────────────────────────────
@@ -153,15 +179,29 @@ def test_build_stage1_prompt_contains_row_keys_and_gap_instruction():
     from app.services.ktp_estimate_service import _build_stage1_prompt
 
     rows = [("R001", make_est("e1", "Кладка стен"))]
-    wt_palette = [{"wt_code": "WT-01", "wt_name": "Каменные работы", "examples": []}]
+    section_palette = [
+        {
+            "section_code": "load_bearing_walls",
+            "section_name": "Несущие стены",
+            "examples": [
+                {
+                    "work_subtype_code": "load_bearing_walls/block_walls",
+                    "work_subtype_name": "Кладка из блоков",
+                    "display_code": "3.2",
+                }
+            ],
+            "is_primary": True,
+        }
+    ]
 
-    with_gap = _build_stage1_prompt(rows, wt_palette, "Жилое здание", gap_fill=True)
+    with_gap = _build_stage1_prompt(rows, section_palette, "Жилое здание", gap_fill=True)
     assert "R001" in with_gap
     assert "Кладка стен" in with_gap
-    assert "WT-01" in with_gap
+    assert "work_section_code" in with_gap
+    assert "load_bearing_walls" in with_gap
     assert "ОТСУТСТВУЮТ" in with_gap
 
-    no_gap = _build_stage1_prompt(rows, wt_palette, "Жилое здание", gap_fill=False)
+    no_gap = _build_stage1_prompt(rows, section_palette, "Жилое здание", gap_fill=False)
     assert "НЕ добавляй" in no_gap
 
 
@@ -355,7 +395,7 @@ def test_validate_section_response_drops_invalid_items():
     out = _validate_section_response(
         {
             "cleaned_title": "  Кровля  ",
-            "wt_code": "wt-12",
+            "work_section_code": "roofing",
             "items": [
                 {"row_key": "R007", "name": "Монтаж"},
                 {"row_key": "  ", "name": "пусто"},
@@ -365,7 +405,7 @@ def test_validate_section_response_drops_invalid_items():
         }
     )
     assert out["cleaned_title"] == "Кровля"
-    assert out["wt_code"] == "WT-12"
+    assert out["work_section_code"] == "roofing"
     assert out["items"] == [{"row_key": "R007", "name": "Монтаж"}]
 
 
@@ -425,7 +465,8 @@ def test_assemble_canonical_adds_fallback_for_global_missing():
             "rows": [("R1", e1)],
             "sort_order": 0,
             "cleaned_items": [{"name": "A", "origin": "from_estimate", "row_key": "R1"}],
-            "wt_code": "WT-12",
+            "work_section_code": "roofing",
+            "work_section_name": "Кровельные работы",
             "gap_items": [
                 {
                     "name": "Снегозадержатели",
@@ -460,7 +501,8 @@ def test_assemble_canonical_includes_ai_added_with_required_fields():
             "rows": [("R1", e1)],
             "sort_order": 0,
             "cleaned_items": [{"name": "A", "origin": "from_estimate", "row_key": "R1"}],
-            "wt_code": None,
+            "work_section_code": "roofing",
+            "work_section_name": "Кровельные работы",
             "gap_items": [
                 {
                     "name": "Снегозадержатели",
@@ -497,7 +539,8 @@ def test_assemble_canonical_dedups_ai_added_against_estimate_and_across_groups()
             "cleaned_title": "Фундамент",
             "rows": [("R1", e_hydro)],
             "sort_order": 0,
-            "wt_code": None,
+            "work_section_code": "foundation",
+            "work_section_name": "Фундаментные работы",
             "cleaned_items": [
                 {"name": "Гидроизоляция фундамента", "origin": "from_estimate", "row_key": "R1"}
             ],
@@ -516,7 +559,8 @@ def test_assemble_canonical_dedups_ai_added_against_estimate_and_across_groups()
             "cleaned_title": "Цоколь",
             "rows": [("R2", e_other)],
             "sort_order": 1,
-            "wt_code": None,
+            "work_section_code": "load_bearing_walls",
+            "work_section_name": "Несущие стены",
             "cleaned_items": [
                 {"name": "Кладка цоколя", "origin": "from_estimate", "row_key": "R2"}
             ],
@@ -604,7 +648,8 @@ def test_materialize_wbs_handles_ai_added_with_null_row_key():
         {
             "title": "Кровля",
             "sort_order": 1,
-            "wt_code": "WT-12",
+            "work_section_code": "roofing",
+            "work_section_name": "Кровельные работы",
             "items": [
                 {"name": "A", "origin": "from_estimate", "row_key": "R1"},
                 {
@@ -618,6 +663,8 @@ def test_materialize_wbs_handles_ai_added_with_null_row_key():
         }
     ]
     groups, items, warnings = _materialize_wbs(make_session(), raw_groups, row_keys)
+    assert groups[0].work_section_code == "roofing"
+    assert groups[0].work_section_name == "Кровельные работы"
     by_origin = {it.origin: it for it in items}
     assert by_origin["from_estimate"].estimate_id == "e1"
     assert by_origin["ai_added"].estimate_id is None

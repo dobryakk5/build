@@ -81,6 +81,17 @@ export interface PreviewRow {
   macro_id?: number | null;
   subtype_code?: string | null;
   subtype_name?: string | null;
+  work_section_code?: string | null;
+  work_section_name?: string | null;
+  work_subtype_code?: string | null;
+  work_subtype_name?: string | null;
+  classification_score?: number | null;
+  classification_confidence?: string | null;
+  classification_needs_review?: boolean | null;
+  classification_source?: string | null;
+  classification_candidates?: Array<Record<string, unknown>> | null;
+  classification_matched_terms?: Record<string, string[]> | null;
+  operator_review_required?: boolean | null;
   row_hash?: string | null;
   materials?: PreviewRow[];
 }
@@ -179,6 +190,21 @@ export interface EstimateRow {
   fer_words_match_score?: number | null;
   fer_words_match_count?: number | null;
   labor_hours?: number | null;
+  work_section_code?: string | null;
+  work_section_name?: string | null;
+  work_subtype_code?: string | null;
+  work_subtype_name?: string | null;
+  classification_score?: number | null;
+  classification_confidence?: string | null;
+  classification_needs_review?: boolean;
+  classification_source?: string | null;
+  classification_candidates?: Array<Record<string, unknown>> | null;
+  classification_matched_terms?: Record<string, string[]> | null;
+  operator_review_required?: boolean;
+  operator_review_status?: string | null;
+  operator_review_reason?: string | null;
+  dictionary_version?: string | null;
+  manual_override?: boolean;
   fer_multiplier?: number | null;
   req_hidden_work_act?: boolean;
   req_intermediate_act?: boolean;
@@ -741,6 +767,18 @@ export interface KtpWbsItem {
   fer_unit?: string | null;
   fer_unit_multiplier?: number | null;
   fer_match_label?: string | null;
+  work_section_code?: string | null;
+  work_section_name?: string | null;
+  work_subtype_code?: string | null;
+  work_subtype_name?: string | null;
+  work_type_confidence?: string | null;
+  work_type_needs_review: boolean;
+  work_type_candidates: Array<Record<string, unknown>>;
+  work_type_source?: string | null;
+  operator_review_required: boolean;
+  manual_override: boolean;
+  gpr_confirmed: boolean;
+  gpr_blocker: boolean;
 }
 
 export interface KtpWbsGroup {
@@ -749,6 +787,10 @@ export interface KtpWbsGroup {
   sort_order: number;
   wt_code?: string | null;
   wt_name?: string | null;
+  work_section_code?: string | null;
+  work_section_name?: string | null;
+  work_type_confidence?: string | null;
+  work_type_source?: string | null;
   status: "draft" | "card_questions" | "card_generated" | "card_failed";
   start_date?: string | null;
   duration_days?: number | null;
@@ -764,6 +806,10 @@ export interface KtpSessionSubtype {
   id: string;
   subtype_code: string;
   subtype_name: string;
+  work_subtype_code?: string | null;
+  work_subtype_name?: string | null;
+  item_id?: string | null;
+  session_subtype_key?: string | null;
   macro_name?: string | null;
   unit?: string | null;
   volume?: number | null;
@@ -796,6 +842,40 @@ export interface KtpEstimateCard {
 export type KtpEstimateCardResponse =
   | { sufficient: false; questions: KtpQuestion[]; group_id: null; card: null }
   | { sufficient: true; questions: []; group_id: string; card: KtpEstimateCard };
+
+// ─────────────── JSON v3 work taxonomy ───────────────
+
+export interface WorkTaxonomyExample {
+  work_subtype_code: string;
+  work_subtype_name: string;
+  display_code?: string | null;
+}
+
+export interface WorkTaxonomyTermSummary {
+  strong_terms: number;
+  weak_terms: number;
+  action_object_pairs: number;
+}
+
+export interface WorkTaxonomySection {
+  section_code: string;
+  section_name: string;
+  scope?: string | null;
+  subtypes_count: number;
+  examples: WorkTaxonomyExample[];
+  dictionary_version?: string | null;
+}
+
+export interface WorkTaxonomySubtype {
+  work_subtype_code: string;
+  work_subtype_name: string;
+  section_code: string;
+  section_name: string;
+  display_code?: string | null;
+  legacy_csv_codes: string[];
+  term_summary: WorkTaxonomyTermSummary;
+  dictionary_version?: string | null;
+}
 
 // ─────────────── NW (нормализованные виды работ) ───────────────
 

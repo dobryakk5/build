@@ -42,16 +42,14 @@ from app.models import (
 from app.services.ktp_service import (
     _assert_batch_belongs_to_project,
     _estimate_item_type,
-    _build_wt_palette,
-    _format_wt_palette_for_prompt,
 )
 from app.services.ktp_item_fer_service import extract_fer_unit, match_session_items, normalize_unit
-from app.services.nw_palette_service import get_palette
 from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
+from app.services.work_taxonomy_service import build_work_section_palette
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "estimate-v3"
+PROMPT_VERSION = "estimate-v4"
 
 ESTIMATE_KIND_LABELS: dict[int, str] = {
     1: "Земляные грунтовые работы",
@@ -117,6 +115,14 @@ def _now() -> datetime:
 
 def _uuid() -> str:
     return str(uuid.uuid4())
+
+
+def gpr_blocker(item: KtpWbsItem) -> bool:
+    """Computed GPR blocker, not stored in DB."""
+    return bool(
+        (item.operator_review_required or item.work_type_needs_review)
+        and not item.gpr_confirmed
+    )
 
 
 def _stringify_clarification_value(value: Any) -> str | None:
@@ -641,9 +647,7 @@ async def _process_stage1(job_id: str) -> None:
                 f"R{idx:03d}": est for idx, est in enumerate(estimates, start=1)
             }
 
-            wt_palette = _build_wt_palette(
-                await get_palette(db, batch.estimate_kind)
-            )
+            work_section_palette = await build_work_section_palette(db, estimates)
             kind_label = ESTIMATE_KIND_LABELS.get(
                 batch.estimate_kind, "Строительные работы"
             )
@@ -652,7 +656,7 @@ async def _process_stage1(job_id: str) -> None:
             raw_groups = await _run_stage1_ai(
                 estimates,
                 row_keys,
-                wt_palette,
+                work_section_palette,
                 kind_label,
                 batch.clarification_answers,
                 _progress,
@@ -676,6 +680,12 @@ async def _process_stage1(job_id: str) -> None:
                     f"ИИ-сбой на блоке {err['chunk']}: {err['error']} "
                     f"(позиции попали в «{FALLBACK_GROUP_TITLE}»)"
                 )
+            invalid_section_codes = diagnostics.get("invalid_work_section_codes") or []
+            if invalid_section_codes:
+                warnings_out.append(
+                    f"ИИ вернул {len(invalid_section_codes)} неизвестных кодов секций JSON v3; "
+                    "для этих групп секция оставлена пустой"
+                )
 
             session.stage1_raw_json = {
                 "groups": raw_groups,
@@ -683,6 +693,8 @@ async def _process_stage1(job_id: str) -> None:
                 "raw_samples": diagnostics.get("raw_samples") or [],
                 "coverage": diagnostics.get("coverage") or [],
                 "wt_code_conflicts": diagnostics.get("wt_code_conflicts") or [],
+                "work_section_code_conflicts": diagnostics.get("work_section_code_conflicts") or [],
+                "invalid_work_section_codes": diagnostics.get("invalid_work_section_codes") or [],
                 "gap_fill_trimmed": diagnostics.get("gap_fill_trimmed") or [],
                 "repeated_sections": diagnostics.get("repeated_sections") or [],
                 "unassigned_ai_items": diagnostics.get("unassigned_ai_items") or [],
@@ -716,13 +728,13 @@ async def _process_stage1(job_id: str) -> None:
 async def _run_stage1_ai(
     estimates: list[Estimate],
     row_keys: dict[str, Estimate],
-    wt_palette: list[dict[str, Any]],
+    work_section_palette: list[dict[str, Any]],
     kind_label: str,
     clarification_answers: dict | None,
     on_progress: Callable[[str], Awaitable[None]] | None = None,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Возвращает канонический список групп {title, sort_order, wt_code, items:[…]}.
+    """Возвращает канонический список групп {title, work_section_code, items:[…]}.
 
     Если у сметы есть `Estimate.section` — backend строит группы сам, LLM их не
     меняет. Если ни одна строка не имеет section — fallback на старый промпт,
@@ -734,6 +746,8 @@ async def _run_stage1_ai(
     diagnostics.setdefault("raw_samples", [])
     diagnostics.setdefault("coverage", [])
     diagnostics.setdefault("wt_code_conflicts", [])
+    diagnostics.setdefault("work_section_code_conflicts", [])
+    diagnostics.setdefault("invalid_work_section_codes", [])
     diagnostics.setdefault("gap_fill_trimmed", [])
     diagnostics.setdefault("repeated_sections", [])
     diagnostics.setdefault("unassigned_ai_items", [])
@@ -752,7 +766,7 @@ async def _run_stage1_ai(
             {"chunk": "no_sections", "error": "В смете не заполнены разделы — используем legacy-промпт"}
         )
         return await _run_stage1_legacy(
-            row_keys, wt_palette, kind_label, clarification_answers, on_progress, diagnostics
+            row_keys, work_section_palette, kind_label, clarification_answers, on_progress, diagnostics
         )
 
     if has_ungrouped:
@@ -763,7 +777,7 @@ async def _run_stage1_ai(
         await _run_ungrouped_pass(
             ungrouped_rows["rows"],
             python_groups,
-            wt_palette,
+            work_section_palette,
             kind_label,
             clarification_answers,
             diagnostics,
@@ -771,7 +785,7 @@ async def _run_stage1_ai(
 
     await _run_section_clean_pass(
         python_groups,
-        wt_palette,
+        work_section_palette,
         kind_label,
         clarification_answers,
         on_progress,
@@ -913,8 +927,14 @@ def _validate_section_response(parsed: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(items_raw, list):
         raise ValueError("section-call: нет списка items")
     cleaned_title = str(parsed.get("cleaned_title") or "").strip() or None
-    wt_code = parsed.get("wt_code")
-    wt_code = str(wt_code).strip().upper() if isinstance(wt_code, str) and wt_code.strip() else None
+    section_code = parsed.get("work_section_code")
+    if section_code is None:
+        section_code = parsed.get("wt_code")  # legacy LLM/test compatibility
+    section_code = (
+        str(section_code).strip()
+        if isinstance(section_code, str) and section_code.strip()
+        else None
+    )
     items: list[dict[str, Any]] = []
     for raw_it in items_raw:
         if not isinstance(raw_it, dict):
@@ -924,7 +944,7 @@ def _validate_section_response(parsed: dict[str, Any]) -> dict[str, Any]:
             continue
         name = str(raw_it.get("name") or "").strip()
         items.append({"row_key": row_key.strip(), "name": name})
-    return {"cleaned_title": cleaned_title, "wt_code": wt_code, "items": items}
+    return {"cleaned_title": cleaned_title, "work_section_code": section_code, "items": items}
 
 
 def _validate_ungrouped_response(parsed: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1153,15 +1173,52 @@ def _format_rows_for_prompt(rows: list[tuple[str, Estimate]]) -> str:
     return "\n".join(lines)
 
 
+def _format_work_section_palette_for_prompt(
+    work_section_palette: list[dict[str, Any]],
+) -> str:
+    primary: list[str] = []
+    secondary: list[str] = []
+    for section in work_section_palette:
+        code = str(section.get("section_code") or "").strip()
+        name = str(section.get("section_name") or "").strip()
+        if not code or not name:
+            continue
+        examples = [
+            str(example.get("work_subtype_name") or "").strip()
+            for example in (section.get("examples") or [])
+            if isinstance(example, dict) and str(example.get("work_subtype_name") or "").strip()
+        ]
+        suffix = f" | примеры: {'; '.join(examples)}" if examples else ""
+        line = f"- {code}: {name}{suffix}"
+        if section.get("is_primary"):
+            primary.append(line)
+        else:
+            secondary.append(line)
+    parts: list[str] = []
+    if primary:
+        parts.append("Основные секции по классификации строк сметы:\n" + "\n".join(primary))
+    if secondary:
+        parts.append("Остальные секции справочника для добавленных работ:\n" + "\n".join(secondary))
+    return "\n\n".join(parts)
+
+
+def _section_name_by_code(work_section_palette: list[dict[str, Any]]) -> dict[str, str]:
+    return {
+        str(section.get("section_code")): str(section.get("section_name") or "")
+        for section in work_section_palette
+        if section.get("section_code") and section.get("section_name")
+    }
+
+
 def _build_section_prompt(
     *,
     kind_label: str,
     display_title: str,
     rows: list[tuple[str, Estimate]],
-    wt_palette: list[dict[str, Any]],
+    work_section_palette: list[dict[str, Any]],
     clarification_answers: dict | None,
 ) -> str:
-    palette_block = _format_wt_palette_for_prompt(wt_palette) or "(палитра пуста)"
+    palette_block = _format_work_section_palette_for_prompt(work_section_palette) or "(палитра пуста)"
     rows_block = _format_rows_for_prompt(rows)
     clarification_block = _format_clarification_answers_for_prompt(clarification_answers)
     clarification_section = f"\n\n{clarification_block}" if clarification_block else ""
@@ -1169,7 +1226,7 @@ def _build_section_prompt(
     return f"""Тип объекта: {kind_label}
 Группа работ (из сметы): «{display_title}»
 
-ПАЛИТРА WT (выбери ОДИН код для этой группы):
+ПАЛИТРА СЕКЦИЙ JSON v3 (выбери ОДИН work_section_code для этой группы):
 {palette_block}
 {clarification_section}
 
@@ -1182,7 +1239,7 @@ def _build_section_prompt(
 2. Если в названии группы явная опечатка/неаккуратное оформление (точка в конце,
    нижний регистр, лишние пробелы), верни очищенный вариант в "cleaned_title".
    Сохраняй смысл; не меняй существительное на синоним.
-3. Подбери ОДИН wt_code из палитры, наиболее подходящий всей группе.
+3. Подбери ОДИН work_section_code из палитры, наиболее подходящий всей группе.
 4. Для КАЖДОГО row_key из списка верни запись с этим row_key и нормализованным
    "name" (убрать сокращения и опечатки). НЕ объединяй похожие позиции,
    НЕ удаляй ничего — исходные строки сметы должны вернуться все.
@@ -1190,7 +1247,7 @@ def _build_section_prompt(
 Верни строго JSON без markdown:
 {{
   "cleaned_title": "Кровля",
-  "wt_code": "WT-12",
+  "work_section_code": "roofing",
   "items": [
     {{"row_key": "R007", "name": "Монтаж стропильной системы"}}
   ]
@@ -1320,13 +1377,13 @@ def _build_project_gap_fill_prompt(
 # Legacy prompt (используется в no_sections fallback и в существующем тесте).
 def _build_stage1_prompt(
     rows: list[tuple[str, Estimate]],
-    wt_palette: list[dict[str, Any]],
+    work_section_palette: list[dict[str, Any]],
     kind_label: str,
     clarification_answers: dict | None = None,
     gap_fill: bool = False,
 ) -> str:
     rows_block = _format_rows_for_prompt(rows)
-    palette_block = _format_wt_palette_for_prompt(wt_palette) or "(палитра пуста)"
+    palette_block = _format_work_section_palette_for_prompt(work_section_palette) or "(палитра пуста)"
     clarification_block = _format_clarification_answers_for_prompt(clarification_answers)
     clarification_section = f"\n\n{clarification_block}" if clarification_block else ""
 
@@ -1345,8 +1402,7 @@ def _build_stage1_prompt(
 
     return f"""Тип объекта: {kind_label}
 
-СПРАВОЧНО (необязательная подсказка по категориям WT — учитывай, но не обязан
-привязывать каждую работу; свободная категоризация разрешена):
+СПРАВОЧНО (категории работ JSON v3 — используй work_section_code из палитры):
 {palette_block}
 {clarification_section}
 
@@ -1372,7 +1428,7 @@ def _build_stage1_prompt(
 
 Верни строго JSON без markdown:
 {{"groups": [
-  {{"title": "Земляные работы", "sort_order": 1, "wt_code": "WT-01",
+  {{"title": "Земляные работы", "sort_order": 1, "work_section_code": "earthworks",
     "items": [
       {{"name": "Разработка грунта экскаватором", "origin": "from_estimate",
        "row_key": "R004", "ai_reason": "нормализовано из 'разраб. грунта'"}},
@@ -1389,7 +1445,7 @@ def _build_stage1_prompt(
 async def _run_ungrouped_pass(
     orphan_rows: list[tuple[str, Estimate]],
     python_groups: dict[str, dict[str, Any]],
-    wt_palette: list[dict[str, Any]],
+    work_section_palette: list[dict[str, Any]],
     kind_label: str,
     clarification_answers: dict | None,
     diagnostics: dict[str, Any],
@@ -1461,22 +1517,24 @@ def _push_to_fallback(
 
 async def _run_section_clean_pass(
     python_groups: dict[str, dict[str, Any]],
-    wt_palette: list[dict[str, Any]],
+    work_section_palette: list[dict[str, Any]],
     kind_label: str,
     clarification_answers: dict | None,
     on_progress: Callable[[str], Awaitable[None]] | None,
     diagnostics: dict[str, Any],
 ) -> None:
-    """C: per-section clean-only LLM-вызов. Заполняет grp['cleaned_items'] и grp['wt_code']."""
+    """C: per-section clean-only LLM-вызов. Заполняет cleaned_items и work_section_code."""
     chunk_size = max(20, int(settings.KTP_ESTIMATE_CHUNK_ROWS))
     sections_ordered = sorted(python_groups.values(), key=lambda g: g["sort_order"])
     total = len(sections_ordered)
+    valid_sections = _section_name_by_code(work_section_palette)
 
     for idx, grp in enumerate(sections_ordered, start=1):
         rows = grp["rows"]
         if not rows:
             grp["cleaned_items"] = []
-            grp["wt_code"] = None
+            grp["work_section_code"] = None
+            grp["work_section_name"] = None
             grp["cleaned_title"] = grp["display_title"]
             continue
 
@@ -1487,7 +1545,7 @@ async def _run_section_clean_pass(
 
         chunks = [rows[i : i + chunk_size] for i in range(0, len(rows), chunk_size)]
         all_items: list[dict[str, Any]] = []
-        wt_code_votes: list[str] = []
+        section_code_votes: list[str] = []
         cleaned_title: str | None = None
 
         for c_idx, chunk in enumerate(chunks, start=1):
@@ -1500,7 +1558,7 @@ async def _run_section_clean_pass(
                 kind_label=kind_label,
                 display_title=grp["display_title"],
                 rows=chunk,
-                wt_palette=wt_palette,
+                work_section_palette=work_section_palette,
                 clarification_answers=clarification_answers,
             )
             parsed, err = await _call_and_capture(prompt, chunk_label, diagnostics)
@@ -1540,27 +1598,38 @@ async def _run_section_clean_pass(
                 diagnostics=diagnostics,
             )
             all_items.extend(cleaned)
-            if validated["wt_code"]:
-                wt_code_votes.append(validated["wt_code"])
+            if validated["work_section_code"]:
+                section_code = validated["work_section_code"]
+                if section_code in valid_sections:
+                    section_code_votes.append(section_code)
+                else:
+                    diagnostics["invalid_work_section_codes"].append(
+                        {
+                            "section_key": grp["section_key"],
+                            "chunk": chunk_label,
+                            "invalid_code": section_code,
+                        }
+                    )
             if cleaned_title is None and validated["cleaned_title"]:
                 cleaned_title = validated["cleaned_title"]
 
         # majority vote
-        final_wt_code: str | None = None
-        if wt_code_votes:
-            counter = Counter(wt_code_votes)
-            final_wt_code = counter.most_common(1)[0][0]
-            if len(set(wt_code_votes)) > 1:
-                diagnostics["wt_code_conflicts"].append(
+        final_section_code: str | None = None
+        if section_code_votes:
+            counter = Counter(section_code_votes)
+            final_section_code = counter.most_common(1)[0][0]
+            if len(set(section_code_votes)) > 1:
+                diagnostics["work_section_code_conflicts"].append(
                     {
                         "section_key": grp["section_key"],
                         "votes": dict(counter),
-                        "chosen": final_wt_code,
+                        "chosen": final_section_code,
                     }
                 )
 
         grp["cleaned_items"] = all_items
-        grp["wt_code"] = final_wt_code
+        grp["work_section_code"] = final_section_code
+        grp["work_section_name"] = valid_sections.get(final_section_code) if final_section_code else None
         grp["cleaned_title"] = cleaned_title or grp["display_title"]
 
 
@@ -1768,7 +1837,9 @@ def _assemble_canonical_groups(
             {
                 "title": grp.get("cleaned_title") or grp["display_title"] or FALLBACK_DISPLAY_TITLE,
                 "sort_order": float(grp["sort_order"]),
-                "wt_code": grp.get("wt_code"),
+                "wt_code": None,
+                "work_section_code": grp.get("work_section_code"),
+                "work_section_name": grp.get("work_section_name"),
                 "section_key": grp["section_key"],
                 "items": items,
             }
@@ -1800,6 +1871,8 @@ def _assemble_canonical_groups(
                 "title": FALLBACK_DISPLAY_TITLE,
                 "sort_order": float(10**9),
                 "wt_code": None,
+                "work_section_code": None,
+                "work_section_name": None,
                 "section_key": FALLBACK_SECTION_KEY,
                 "items": fallback_items,
             }
@@ -1814,7 +1887,7 @@ def _assemble_canonical_groups(
 
 async def _run_stage1_legacy(
     row_keys: dict[str, Estimate],
-    wt_palette: list[dict[str, Any]],
+    work_section_palette: list[dict[str, Any]],
     kind_label: str,
     clarification_answers: dict | None,
     on_progress: Callable[[str], Awaitable[None]] | None,
@@ -1823,6 +1896,22 @@ async def _run_stage1_legacy(
     """Старое поведение: LLM группирует по технологической последовательности."""
     chunk_size = max(20, int(settings.KTP_ESTIMATE_CHUNK_ROWS))
     keys = list(row_keys.keys())
+    valid_sections = _section_name_by_code(work_section_palette)
+
+    def _clean_group_section(group: dict[str, Any], label: str) -> None:
+        raw_code = group.get("work_section_code") or group.get("wt_code")
+        code = str(raw_code).strip() if isinstance(raw_code, str) and raw_code.strip() else None
+        if code and code in valid_sections:
+            group["work_section_code"] = code
+            group["work_section_name"] = valid_sections[code]
+        else:
+            if code:
+                diagnostics["invalid_work_section_codes"].append(
+                    {"chunk": label, "invalid_code": code}
+                )
+            group["work_section_code"] = None
+            group["work_section_name"] = None
+        group["wt_code"] = None
 
     async def _call_and_parse_legacy(prompt: str, label: str) -> tuple[list[dict[str, Any]], str | None]:
         raw = ""
@@ -1841,7 +1930,7 @@ async def _run_stage1_legacy(
             await on_progress(f"ИИ анализирует {len(keys)} позиций сметы (legacy)…")
         prompt = _build_stage1_prompt(
             [(k, row_keys[k]) for k in keys],
-            wt_palette,
+            work_section_palette,
             kind_label,
             clarification_answers,
             gap_fill=True,
@@ -1849,6 +1938,8 @@ async def _run_stage1_legacy(
         groups, err = await _call_and_parse_legacy(prompt, "legacy/single")
         if err and not groups:
             return []
+        for group in groups:
+            _clean_group_section(group, "legacy/single")
         return groups
 
     total_chunks = (len(keys) + chunk_size - 1) // chunk_size
@@ -1863,7 +1954,7 @@ async def _run_stage1_legacy(
         chunk = keys[start : start + chunk_size]
         prompt = _build_stage1_prompt(
             [(k, row_keys[k]) for k in chunk],
-            wt_palette,
+            work_section_palette,
             kind_label,
             clarification_answers,
             gap_fill=False,
@@ -1883,13 +1974,21 @@ async def _run_stage1_legacy(
                 bucket = {
                     "title": title,
                     "sort_order": order,
-                    "wt_code": grp.get("wt_code"),
+                    "wt_code": None,
+                    "work_section_code": grp.get("work_section_code"),
+                    "work_section_name": None,
                     "items": [],
                 }
                 merged[slug] = bucket
+            if bucket.get("work_section_code") is None:
+                bucket["work_section_code"] = grp.get("work_section_code")
+                bucket["work_section_name"] = grp.get("work_section_name")
             bucket["items"].extend(grp.get("items") or [])
 
-    return list(merged.values())
+    groups = list(merged.values())
+    for group in groups:
+        _clean_group_section(group, "legacy/merged")
+    return groups
 
 
 def _materialize_wbs(
@@ -1903,6 +2002,62 @@ def _materialize_wbs(
     warnings: list[str] = []
     seen_estimate_ids: set[str] = set()
 
+    def _work_type_fields(name: str, estimate: Estimate | None) -> dict[str, Any]:
+        raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
+        if estimate is not None:
+            return {
+                "work_section_code": estimate.work_section_code or raw.get("work_section_code"),
+                "work_section_name": estimate.work_section_name or raw.get("work_section_name"),
+                "work_subtype_code": estimate.work_subtype_code or raw.get("work_subtype_code") or raw.get("subtype_code"),
+                "work_subtype_name": estimate.work_subtype_name or raw.get("work_subtype_name") or raw.get("subtype_name"),
+                "work_type_confidence": estimate.classification_confidence or raw.get("classification_confidence"),
+                "work_type_needs_review": bool(
+                    estimate.classification_needs_review
+                    or raw.get("classification_needs_review")
+                ),
+                "work_type_candidates": estimate.classification_candidates or raw.get("classification_candidates"),
+                "work_type_source": estimate.classification_source or raw.get("classification_source"),
+                "operator_review_required": bool(
+                    estimate.operator_review_required
+                    or raw.get("operator_review_required")
+                ),
+                "manual_override": bool(estimate.manual_override or raw.get("manual_override")),
+            }
+        from app.services.work_taxonomy_service import (
+            UNKNOWN_SUBTYPE_CODE,
+            UNKNOWN_SUBTYPE_NAME,
+            classify_work,
+        )
+
+        try:
+            result = classify_work(name, None)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("KTP item work type classification failed: %s", name)
+            return {
+                "work_section_code": None,
+                "work_section_name": None,
+                "work_subtype_code": UNKNOWN_SUBTYPE_CODE,
+                "work_subtype_name": UNKNOWN_SUBTYPE_NAME,
+                "work_type_confidence": "low",
+                "work_type_needs_review": True,
+                "work_type_candidates": [],
+                "work_type_source": "rule_based_error",
+                "operator_review_required": True,
+                "manual_override": False,
+            }
+        return {
+            "work_section_code": result.section_code,
+            "work_section_name": result.section_name,
+            "work_subtype_code": result.subtype_code,
+            "work_subtype_name": result.subtype_name,
+            "work_type_confidence": result.confidence,
+            "work_type_needs_review": bool(result.needs_review),
+            "work_type_candidates": [c.as_dict() for c in result.candidates],
+            "work_type_source": result.source,
+            "operator_review_required": bool(result.needs_review),
+            "manual_override": False,
+        }
+
     for g_idx, raw_g in enumerate(raw_groups, start=1):
         title = str(raw_g.get("title") or "").strip() or f"Группа {g_idx}"
         try:
@@ -1911,6 +2066,18 @@ def _materialize_wbs(
             sort_order = float(g_idx)
         wt_code = raw_g.get("wt_code")
         wt_code = str(wt_code).strip().upper() if isinstance(wt_code, str) and wt_code.strip() else None
+        raw_section_code = raw_g.get("work_section_code")
+        work_section_code = (
+            str(raw_section_code).strip()
+            if isinstance(raw_section_code, str) and raw_section_code.strip()
+            else None
+        )
+        raw_section_name = raw_g.get("work_section_name")
+        work_section_name = (
+            str(raw_section_name).strip()
+            if isinstance(raw_section_name, str) and raw_section_name.strip()
+            else None
+        )
 
         group = KtpWbsGroup(
             id=_uuid(),
@@ -1919,6 +2086,8 @@ def _materialize_wbs(
             title=title,
             sort_order=sort_order,
             wt_code=wt_code,
+            work_section_code=work_section_code,
+            work_section_name=work_section_name,
             status="draft",
         )
         groups.append(group)
@@ -1966,6 +2135,7 @@ def _materialize_wbs(
                         if raw_it.get("ai_reason")
                         else None
                     ),
+                    **_work_type_fields(name, estimate),
                 )
             )
 
@@ -2001,6 +2171,7 @@ def _materialize_wbs(
                     quantity=est.quantity,
                     quantity_source="estimate",
                     review_status="accepted",
+                    **_work_type_fields(est.work_name, est),
                 )
             )
 
@@ -2011,10 +2182,133 @@ def _materialize_wbs(
 # ЭТАП 1 — РУЧНЫЕ ПРАВКИ
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _apply_manual_work_subtype(
+    db: AsyncSession,
+    item: KtpWbsItem,
+    code: str,
+) -> None:
+    ref = await db.scalar(select(WorkSubtype).where(WorkSubtype.code == code))
+    if not ref:
+        raise ValueError(f"Подтип работ {code} не найден")
+
+    previous_code = item.work_subtype_code
+    item.work_section_code = ref.section_code
+    item.work_section_name = ref.section_name
+    item.work_subtype_code = ref.code
+    item.work_subtype_name = ref.name
+    item.work_type_confidence = "manual"
+    item.work_type_needs_review = False
+    item.work_type_candidates = []
+    item.work_type_source = "manual"
+    item.operator_review_required = False
+    item.manual_override = True
+    item.gpr_confirmed = False
+
+    if item.estimate_id:
+        estimate = await db.get(Estimate, item.estimate_id)
+        if estimate:
+            estimate.work_section_code = ref.section_code
+            estimate.work_section_name = ref.section_name
+            estimate.work_subtype_code = ref.code
+            estimate.work_subtype_name = ref.name
+            estimate.classification_confidence = "manual"
+            estimate.classification_needs_review = False
+            estimate.classification_source = "manual"
+            estimate.classification_candidates = []
+            estimate.operator_review_required = False
+            estimate.operator_review_status = (
+                "confirmed" if previous_code == ref.code else "changed"
+            )
+            estimate.operator_review_reason = None
+            estimate.manual_override = True
+            estimate.manual_changed_at = _now()
+            raw = estimate.raw_data if isinstance(estimate.raw_data, dict) else {}
+            raw.update(
+                {
+                    "work_section_code": ref.section_code,
+                    "work_section_name": ref.section_name,
+                    "work_subtype_code": ref.code,
+                    "work_subtype_name": ref.name,
+                    "subtype_code": ref.code,
+                    "subtype_name": ref.name,
+                    "classification_confidence": "manual",
+                    "classification_needs_review": False,
+                    "classification_source": "manual",
+                    "classification_candidates": [],
+                    "operator_review_required": False,
+                    "operator_review_status": estimate.operator_review_status,
+                    "operator_review_reason": None,
+                    "manual_override": True,
+                }
+            )
+            estimate.raw_data = raw
+            flag_modified(estimate, "raw_data")
+
+
+async def _reset_item_work_type(
+    db: AsyncSession,
+    item: KtpWbsItem,
+) -> None:
+    from app.services.work_taxonomy_service import classify_work
+
+    estimate = await db.get(Estimate, item.estimate_id) if item.estimate_id else None
+    name = (estimate.work_name if estimate else item.name) or item.name
+    section = estimate.section if estimate else None
+    result = classify_work(name or "", section)
+
+    item.work_section_code = result.section_code
+    item.work_section_name = result.section_name
+    item.work_subtype_code = result.subtype_code
+    item.work_subtype_name = result.subtype_name
+    item.work_type_confidence = result.confidence
+    item.work_type_needs_review = bool(result.needs_review)
+    item.work_type_candidates = [c.as_dict() for c in result.candidates]
+    item.work_type_source = result.source
+    item.operator_review_required = bool(result.needs_review)
+    item.manual_override = False
+    item.gpr_confirmed = False
+
+    if estimate:
+        estimate.work_section_code = result.section_code
+        estimate.work_section_name = result.section_name
+        estimate.work_subtype_code = result.subtype_code
+        estimate.work_subtype_name = result.subtype_name
+        estimate.classification_score = result.score
+        estimate.classification_confidence = result.confidence
+        estimate.classification_needs_review = bool(result.needs_review)
+        estimate.classification_source = result.source
+        estimate.classification_candidates = [c.as_dict() for c in result.candidates]
+        estimate.classification_matched_terms = result.matched_terms
+        estimate.operator_review_required = bool(result.needs_review)
+        estimate.operator_review_status = None
+        estimate.operator_review_reason = result.reason if result.needs_review else None
+        estimate.dictionary_version = result.dictionary_version
+        estimate.manual_override = False
+        estimate.manual_changed_at = None
+        raw = estimate.raw_data if isinstance(estimate.raw_data, dict) else {}
+        raw.update(result.as_raw_data())
+        raw["operator_review_required"] = bool(result.needs_review)
+        raw["operator_review_status"] = None
+        raw["operator_review_reason"] = result.reason if result.needs_review else None
+        raw["manual_override"] = False
+        estimate.raw_data = raw
+        flag_modified(estimate, "raw_data")
+
+
+async def _rebuild_subtypes_if_needed(
+    db: AsyncSession,
+    session_id: str,
+) -> None:
+    session = await db.get(KtpEstimateSession, session_id)
+    if session and session.status in {"prod_pending", "prod_review"}:
+        await build_session_subtypes(db, session)
+
+
 async def update_item(
     db: AsyncSession, project_id: str, item_id: str, patch: dict[str, Any]
 ) -> dict[str, Any]:
     item = await _get_item(db, project_id, item_id)
+    work_type_changed = False
     if "name" in patch and patch["name"]:
         item.name = str(patch["name"]).strip()
     if "group_id" in patch and patch["group_id"]:
@@ -2035,6 +2329,14 @@ async def update_item(
             item.quantity_source = "user"
     if "sort_order" in patch and patch["sort_order"] is not None:
         item.sort_order = float(patch["sort_order"])
+    if patch.get("manual_override") is False and patch.get("reclassify"):
+        await _reset_item_work_type(db, item)
+        work_type_changed = True
+    elif "work_subtype_code" in patch and patch["work_subtype_code"]:
+        await _apply_manual_work_subtype(db, item, str(patch["work_subtype_code"]))
+        work_type_changed = True
+    if work_type_changed:
+        await _rebuild_subtypes_if_needed(db, item.session_id)
     item.updated_at = _now()
     await db.commit()
     return await get_wbs(db, project_id, item.session_id)
@@ -2048,6 +2350,38 @@ async def create_item(
     if not name:
         raise ValueError("Имя работы не может быть пустым")
     max_order = max((float(it.sort_order) for it in group.items), default=0.0)
+    from app.services.work_taxonomy_service import (
+        UNKNOWN_SUBTYPE_CODE,
+        UNKNOWN_SUBTYPE_NAME,
+        classify_work,
+    )
+
+    try:
+        result = classify_work(name, None)
+        work_type_fields = {
+            "work_section_code": result.section_code,
+            "work_section_name": result.section_name,
+            "work_subtype_code": result.subtype_code,
+            "work_subtype_name": result.subtype_name,
+            "work_type_confidence": result.confidence,
+            "work_type_needs_review": bool(result.needs_review),
+            "work_type_candidates": [c.as_dict() for c in result.candidates],
+            "work_type_source": result.source,
+            "operator_review_required": bool(result.needs_review),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Manual KTP item work type classification failed: %s", name)
+        work_type_fields = {
+            "work_section_code": None,
+            "work_section_name": None,
+            "work_subtype_code": UNKNOWN_SUBTYPE_CODE,
+            "work_subtype_name": UNKNOWN_SUBTYPE_NAME,
+            "work_type_confidence": "low",
+            "work_type_needs_review": True,
+            "work_type_candidates": [],
+            "work_type_source": "rule_based_error",
+            "operator_review_required": True,
+        }
     item = KtpWbsItem(
         id=_uuid(),
         group_id=group.id,
@@ -2061,6 +2395,7 @@ async def create_item(
         if payload.get("quantity") not in (None, "")
         else None,
         quantity_source="user" if payload.get("quantity") not in (None, "") else None,
+        **work_type_fields,
     )
     db.add(item)
     await db.commit()
@@ -2637,8 +2972,8 @@ async def approve_stage2(
 # ЭТАП 4 — ПРОИЗВОДИТЕЛЬНОСТЬ ПО ПОДТИПАМ РАБОТ
 # ─────────────────────────────────────────────────────────────────────────────
 
-UNKNOWN_SUBTYPE_CODE = "__unknown__"
-UNKNOWN_SUBTYPE_NAME = "Без определённого подтипа"
+UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
+UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 _DEFAULT_VOLUME = 100.0
 
 
@@ -2670,26 +3005,44 @@ def _resolve_item_subtype(
 ) -> tuple[str, str, str | None, str | None]:
     """Определить (subtype_code, subtype_name, macro_name, unit) для работы КТП.
 
-    Порядок: raw_data сметы → классификация по имени → ``__unknown__``.
+    Порядок: item.work_subtype_code → Estimate.work_subtype_code → raw_data
+    сметы → классификация по имени → ``unknown/needs_review``.
     """
-    from app.services.work_taxonomy_service import classify_subtype
+    from app.services.work_taxonomy_service import UNKNOWN_SUBTYPE_CODE, classify_work
 
     code: str | None = None
     name: str | None = None
     unit = item.unit or (estimate.unit if estimate else None)
 
+    if item.work_subtype_code:
+        code = item.work_subtype_code
+        name = item.work_subtype_name
+
+    if not code and estimate and estimate.work_subtype_code:
+        code = estimate.work_subtype_code
+        name = estimate.work_subtype_name
+
     raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
-    if raw.get("subtype_code"):
-        code = str(raw["subtype_code"])
-        name = raw.get("subtype_name") or None
+    if not code and (raw.get("work_subtype_code") or raw.get("subtype_code")):
+        code = str(raw.get("work_subtype_code") or raw["subtype_code"])
+        name = raw.get("work_subtype_name") or raw.get("subtype_name") or None
 
     if not code:
-        match = classify_subtype(item.name or "", None, taxonomy)
-        if match:
-            code = match.code
-            name = match.name
+        result = classify_work(item.name or "", estimate.section if estimate else None)
+        code = result.subtype_code
+        name = result.subtype_name
+        if result.subtype_code != UNKNOWN_SUBTYPE_CODE:
+            item.work_section_code = result.section_code
+            item.work_section_name = result.section_name
+            item.work_subtype_code = result.subtype_code
+            item.work_subtype_name = result.subtype_name
+            item.work_type_confidence = result.confidence
+            item.work_type_needs_review = bool(result.needs_review)
+            item.work_type_candidates = [c.as_dict() for c in result.candidates]
+            item.work_type_source = result.source
+            item.operator_review_required = bool(result.needs_review)
 
-    if not code:
+    if not code or code == UNKNOWN_SUBTYPE_CODE:
         return UNKNOWN_SUBTYPE_CODE, UNKNOWN_SUBTYPE_NAME, None, unit
 
     ref = subtypes_by_code.get(code)
@@ -2717,9 +3070,10 @@ async def build_session_subtypes(
 
     Одна строка = одна работа (``item``) «как есть» — ничего не схлопываем, чтобы
     разные работы одного грубого подтипа не сливались и не терялись. Подтип из
-    справочника даёт дефолты (производительность/бригада/пауза) и контекст
-    (код, macro). ``volume`` берётся из объёма работы; правки оператора
-    (``*_source='manual'``) не перезатираются. Исчезнувшие работы удаляются.
+    справочника читается с ``KtpWbsItem.work_subtype_code``; он даёт дефолты
+    (производительность/бригада/пауза) и контекст (код, macro). ``volume``
+    берётся из объёма работы; правки оператора (``*_source='manual'``) не
+    перезатираются. Исчезнувшие работы удаляются.
     """
     from app.services.work_taxonomy_service import load_taxonomy
 
@@ -2798,6 +3152,10 @@ async def build_session_subtypes(
                 session_id=session.id,
                 subtype_code=stored_code,
                 subtype_name=display_name,
+                work_subtype_code=base_code,
+                work_subtype_name=sub_name,
+                item_id=it.id,
+                session_subtype_key=stored_code,
                 macro_name=macro_name,
                 unit=unit,
                 volume=volume,
@@ -2812,6 +3170,10 @@ async def build_session_subtypes(
         else:
             # имя/подтип/объём — всегда из актуальных данных работы
             row.subtype_name = display_name
+            row.work_subtype_code = base_code
+            row.work_subtype_name = sub_name
+            row.item_id = it.id
+            row.session_subtype_key = stored_code
             row.macro_name = macro_name
             row.volume = volume
             # дефолтные поля обновляем из источника, ручные правки не трогаем
@@ -2869,6 +3231,10 @@ async def update_session_subtype(
             raise ValueError("Производительность должна быть больше нуля")
         row.output_per_day = float(v) if v is not None else None
         row.output_source = "manual"
+        if row.output_per_day is not None and row.item_id:
+            item = await db.get(KtpWbsItem, row.item_id)
+            if item and (item.operator_review_required or item.work_type_needs_review):
+                item.gpr_confirmed = True
     if "crew_size" in patch:
         v = patch["crew_size"]
         if v is not None and int(v) <= 0:
@@ -2910,6 +3276,18 @@ async def approve_prod(
         raise ValueError(
             f"Не у всех подтипов задана производительность и объём: {preview}"
         )
+
+    items = list(
+        await db.scalars(
+            select(KtpWbsItem)
+            .where(KtpWbsItem.session_id == session_id)
+            .where(KtpWbsItem.review_status != "rejected")
+        )
+    )
+    blockers = [it.name for it in items if gpr_blocker(it)]
+    if blockers:
+        preview = ", ".join(blockers[:5])
+        raise ValueError(f"Есть работы, требующие проверки перед ГПР: {preview}")
 
     session.status = "gpr_pending"
     session.error_message = None

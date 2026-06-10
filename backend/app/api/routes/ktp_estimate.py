@@ -68,6 +68,18 @@ class ItemOut(BaseModel):
     fer_unit: str | None = None
     fer_unit_multiplier: float | None = None
     fer_match_label: str | None = None
+    work_section_code: str | None = None
+    work_section_name: str | None = None
+    work_subtype_code: str | None = None
+    work_subtype_name: str | None = None
+    work_type_confidence: str | None = None
+    work_type_needs_review: bool = False
+    work_type_candidates: list[dict] = Field(default_factory=list)
+    work_type_source: str | None = None
+    operator_review_required: bool = False
+    manual_override: bool = False
+    gpr_confirmed: bool = False
+    gpr_blocker: bool = False
 
     @classmethod
     def of(cls, it: KtpWbsItem) -> "ItemOut":
@@ -106,6 +118,18 @@ class ItemOut(BaseModel):
             fer_unit=it.fer_unit,
             fer_unit_multiplier=float(it.fer_unit_multiplier) if it.fer_unit_multiplier is not None else None,
             fer_match_label=fer_match_label,
+            work_section_code=it.work_section_code,
+            work_section_name=it.work_section_name,
+            work_subtype_code=it.work_subtype_code,
+            work_subtype_name=it.work_subtype_name,
+            work_type_confidence=it.work_type_confidence,
+            work_type_needs_review=bool(it.work_type_needs_review),
+            work_type_candidates=it.work_type_candidates or [],
+            work_type_source=it.work_type_source,
+            operator_review_required=bool(it.operator_review_required),
+            manual_override=bool(it.manual_override),
+            gpr_confirmed=bool(it.gpr_confirmed),
+            gpr_blocker=svc.gpr_blocker(it),
         )
 
 
@@ -115,6 +139,10 @@ class GroupOut(BaseModel):
     sort_order: float
     wt_code: str | None = None
     wt_name: str | None = None
+    work_section_code: str | None = None
+    work_section_name: str | None = None
+    work_type_confidence: str | None = None
+    work_type_source: str | None = None
     status: str
     start_date: str | None = None
     duration_days: int | None = None
@@ -128,6 +156,10 @@ class GroupOut(BaseModel):
             sort_order=float(g.sort_order),
             wt_code=g.wt_code,
             wt_name=g.wt_name,
+            work_section_code=g.work_section_code,
+            work_section_name=g.work_section_name,
+            work_type_confidence=g.work_type_confidence,
+            work_type_source=g.work_type_source,
             status=g.status,
             start_date=str(g.start_date) if g.start_date else None,
             duration_days=g.duration_days,
@@ -144,6 +176,10 @@ class SessionSubtypeOut(BaseModel):
     id: str
     subtype_code: str
     subtype_name: str
+    work_subtype_code: str | None = None
+    work_subtype_name: str | None = None
+    item_id: str | None = None
+    session_subtype_key: str | None = None
     macro_name: str | None = None
     unit: str | None = None
     volume: float | None = None
@@ -161,6 +197,10 @@ class SessionSubtypeOut(BaseModel):
             # на фронт отдаём чистый код подтипа (без per-item суффикса)
             subtype_code=svc.base_subtype_code(s.subtype_code),
             subtype_name=s.subtype_name,
+            work_subtype_code=s.work_subtype_code or svc.base_subtype_code(s.subtype_code),
+            work_subtype_name=s.work_subtype_name,
+            item_id=s.item_id,
+            session_subtype_key=s.session_subtype_key,
             macro_name=s.macro_name,
             unit=s.unit,
             volume=float(s.volume) if s.volume is not None else None,
@@ -224,6 +264,9 @@ class ItemPatch(BaseModel):
     unit: str | None = None
     quantity: float | None = None
     sort_order: float | None = None
+    work_subtype_code: str | None = None
+    manual_override: bool | None = None
+    reclassify: bool | None = None
 
 
 class CreateItemRequest(BaseModel):

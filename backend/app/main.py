@@ -24,6 +24,7 @@ from app.api.routes.ktp           import router as ktp_router
 from app.api.routes.ktp_estimate  import router as ktp_estimate_router
 from app.api.routes.nw            import router as nw_router
 from app.api.routes.work_plan     import router as work_plan_router
+from app.api.routes.work_taxonomy import router as work_taxonomy_router
 from app.api.routes.activity      import router as activity_router
 
 
@@ -71,6 +72,7 @@ app.include_router(ktp_router)
 app.include_router(ktp_estimate_router)
 app.include_router(nw_router)
 app.include_router(work_plan_router)
+app.include_router(work_taxonomy_router)
 app.include_router(activity_router)
 
 

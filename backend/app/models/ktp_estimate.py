@@ -88,6 +88,10 @@ class KtpWbsGroup(Base, TimestampMixin):
     )
     wt_code: Mapped[str | None] = mapped_column(String(10))
     wt_name: Mapped[str | None] = mapped_column(Text)
+    work_section_code: Mapped[str | None] = mapped_column(Text)
+    work_section_name: Mapped[str | None] = mapped_column(Text)
+    work_type_confidence: Mapped[str | None] = mapped_column(String(16))
+    work_type_source: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default="draft"
     )
@@ -180,6 +184,26 @@ class KtpWbsItem(Base, TimestampMixin):
         Boolean, nullable=False, server_default="false"
     )
 
+    work_section_code: Mapped[str | None] = mapped_column(Text)
+    work_section_name: Mapped[str | None] = mapped_column(Text)
+    work_subtype_code: Mapped[str | None] = mapped_column(Text)
+    work_subtype_name: Mapped[str | None] = mapped_column(Text)
+    work_type_confidence: Mapped[str | None] = mapped_column(String(16))
+    work_type_needs_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    work_type_candidates: Mapped[list | None] = mapped_column(JSONB)
+    work_type_source: Mapped[str | None] = mapped_column(String(32))
+    operator_review_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    manual_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    gpr_confirmed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
     # Сопоставление с конкретной строкой ФЕР (источник трудоёмкости h_hour).
     fer_table_id: Mapped[int | None] = mapped_column(BigInteger)
     fer_row_id: Mapped[int | None] = mapped_column(BigInteger)
@@ -237,6 +261,13 @@ class KtpSessionSubtype(Base, TimestampMixin):
     )
     subtype_code: Mapped[str] = mapped_column(Text, nullable=False)
     subtype_name: Mapped[str] = mapped_column(Text, nullable=False)
+    work_subtype_code: Mapped[str | None] = mapped_column(Text)
+    work_subtype_name: Mapped[str | None] = mapped_column(Text)
+    item_id: Mapped[str | None] = mapped_column(
+        PGUUID(as_uuid=False),
+        ForeignKey("ktp_wbs_items.id", ondelete="CASCADE"),
+    )
+    session_subtype_key: Mapped[str | None] = mapped_column(Text)
     macro_name: Mapped[str | None] = mapped_column(Text)
     unit: Mapped[str | None] = mapped_column(String(50))
     volume: Mapped[float | None] = mapped_column(Numeric(12, 3))
