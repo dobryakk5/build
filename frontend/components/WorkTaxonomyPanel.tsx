@@ -89,7 +89,7 @@ export default function WorkTaxonomyPanel() {
       <div style={{ padding: "14px 16px", borderBottom: `1px solid ${COLORS.border}`, background: "white" }}>
         <h2 style={{ margin: 0, fontSize: 18 }}>Справочник работ</h2>
         <div style={{ marginTop: 4, color: COLORS.muted, fontSize: 12 }}>
-          {sections.length} секций · {totalSubtypes} подтипов · JSON v3
+          {sections.length} секций · {totalSubtypes} подтипов · JSON v4
         </div>
       </div>
 

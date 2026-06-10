@@ -1,8 +1,8 @@
 """Work taxonomy classification and precedence helpers.
 
-``construction_work_dictionary_v3.json`` is the canonical work classifier. The
+``construction_work_dictionary_v4.json`` is the canonical work classifier. The
 old CSV taxonomy is still supported by ``classify_subtype`` for legacy tests and
-callers, but import/KTP should use the JSON v3 result fields.
+callers, but import/KTP should use the JSON result fields.
 """
 from __future__ import annotations
 
@@ -22,8 +22,9 @@ from app.models import WorkPrecedence, WorkSubtype
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v3.json"
+    / "construction_work_dictionary_v4.json"
 )
+DICTIONARY_SOURCE = "construction_work_dictionary_v4"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 
@@ -157,7 +158,7 @@ def dictionary_version(payload: dict[str, Any] | None = None) -> str:
     payload = payload or _load_dictionary()
     meta = payload.get("meta") or {}
     schema_version = meta.get("schema_version") or "unknown"
-    return f"construction_work_dictionary_v3@{schema_version}"
+    return f"{DICTIONARY_SOURCE}@{schema_version}"
 
 
 async def load_taxonomy(db: AsyncSession) -> list[SubtypeDef]:
@@ -167,7 +168,7 @@ async def load_taxonomy(db: AsyncSession) -> list[SubtypeDef]:
             await db.scalars(
                 select(WorkSubtype).where(
                     WorkSubtype.dictionary_source.in_(
-                        ("construction_work_dictionary_v3", "system")
+                        (DICTIONARY_SOURCE, "system")
                     )
                 )
             )
@@ -292,7 +293,7 @@ async def get_work_taxonomy_subtypes(
     rows = list(
         await db.scalars(
             select(WorkSubtype)
-            .where(WorkSubtype.dictionary_source == "construction_work_dictionary_v3")
+            .where(WorkSubtype.dictionary_source == DICTIONARY_SOURCE)
             .order_by(WorkSubtype.macro_id, WorkSubtype.id)
         )
     )
@@ -462,6 +463,7 @@ _RU_SUFFIXES = (
     "и",
     "у",
     "ю",
+    "ь",
     "е",
     "о",
 )
@@ -480,12 +482,16 @@ def _term_matches(term: str, haystack: str, hay_tokens: list[str] | None = None)
     norm_term = normalize_text(term)
     if not norm_term:
         return False
-    if norm_term in haystack:
-        return True
     hay_tokens = hay_tokens or haystack.split()
     term_tokens = [t for t in norm_term.split() if t]
     if not term_tokens:
         return False
+    if len(term_tokens) > 1:
+        pattern = rf"(?<!\w){re.escape(norm_term)}(?!\w)"
+        if re.search(pattern, haystack):
+            return True
+    elif norm_term in hay_tokens:
+        return True
     hay_stems = [_stem(t) for t in hay_tokens]
     for token in term_tokens:
         token_stem = _stem(token)
@@ -565,11 +571,22 @@ def _apply_conflict_rules(
     payload: dict[str, Any],
 ) -> list[str]:
     weights = (payload.get("scoring") or {}).get("weights") or {}
+    thresholds = (payload.get("scoring") or {}).get("decision_thresholds") or {}
+    min_delta = int(thresholds.get("min_delta_between_top_two", 3))
     applied: list[str] = []
     for rule in payload.get("global_conflict_rules") or []:
-        if not _match_terms(rule.get("if_any") or [], haystack, hay_tokens):
+        if_any = rule.get("if_any") or []
+        if_all = rule.get("if_all") or []
+        if if_any and not _match_terms(if_any, haystack, hay_tokens):
+            continue
+        if if_all and not all(
+            _match_terms([term], haystack, hay_tokens) for term in if_all
+        ):
+            continue
+        if not if_any and not if_all:
             continue
         rule_id = str(rule.get("id") or "conflict_rule")
+        preferred_sections: set[str] = set()
         for prefer in rule.get("prefer") or []:
             section_id = str(prefer.get("section_id") or "")
             if section_id not in sections_by_id:
@@ -583,6 +600,7 @@ def _apply_conflict_rules(
             section_matches.setdefault(section_id, {}).setdefault(
                 "conflict_prefer_terms", []
             ).extend(terms)
+            preferred_sections.add(section_id)
             applied.append(f"{rule_id}:prefer:{section_id}")
         for penalty in rule.get("penalize") or []:
             section_id = str(penalty.get("section_id") or "")
@@ -598,6 +616,22 @@ def _apply_conflict_rules(
                 "conflict_penalty_terms", []
             ).extend(terms)
             applied.append(f"{rule_id}:penalize:{section_id}")
+        if len(preferred_sections) == 1:
+            section_id = next(iter(preferred_sections))
+            other_max = max(
+                (
+                    score
+                    for other_id, score in section_scores.items()
+                    if other_id != section_id
+                ),
+                default=0,
+            )
+            if section_scores.get(section_id, 0) <= other_max:
+                section_scores[section_id] = other_max + min_delta
+                section_matches.setdefault(section_id, {}).setdefault(
+                    "conflict_override_rules", []
+                ).append(rule_id)
+                applied.append(f"{rule_id}:override:{section_id}")
     return applied
 
 
@@ -658,10 +692,21 @@ def _related_sections(
         term_is_matched = any(
             normalize_text(ambiguous_term) == normalize_text(term)
             for term in matched_flat
-        ) or _term_matches(str(ambiguous_term), haystack, hay_tokens)
+        )
         if not term_is_matched:
             continue
         for section_id in section_ids or []:
+            section_id = str(section_id)
+            if section_id == winner_section_id or section_id in seen:
+                continue
+            seen.add(section_id)
+            related.append(section_id)
+    for rule in payload.get("related_section_rules") or []:
+        if str(rule.get("main_section_id") or "") != str(winner_section_id or ""):
+            continue
+        if not _match_terms(rule.get("when_any") or [], haystack, hay_tokens):
+            continue
+        for section_id in rule.get("related_sections") or []:
             section_id = str(section_id)
             if section_id == winner_section_id or section_id in seen:
                 continue
@@ -911,7 +956,7 @@ def classify_subtype(
 ) -> SubtypeMatch | None:
     """Backward-compatible subtype selector.
 
-    CSV callers get the old keyword behavior. V3 callers get the canonical
+    CSV callers get the old keyword behavior. JSON callers get the canonical
     ``section/subtype`` code unless the classifier needs operator review.
     """
     if not any("/" in sub.code or sub.section_code for sub in taxonomy):

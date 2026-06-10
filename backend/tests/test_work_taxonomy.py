@@ -1,4 +1,5 @@
 import csv
+import json
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,12 @@ from app.services.work_taxonomy_service import (  # noqa: E402
 )
 
 _DATA = Path(__file__).resolve().parents[1] / "app" / "data" / "work_subtypes.csv"
+_DICTIONARY_JSON = (
+    Path(__file__).resolve().parents[1]
+    / "app"
+    / "data"
+    / "construction_work_dictionary_v4.json"
+)
 
 
 def _load_taxonomy_from_csv() -> list[SubtypeDef]:
@@ -37,6 +44,12 @@ def _load_taxonomy_from_csv() -> list[SubtypeDef]:
 
 
 TAXONOMY = _load_taxonomy_from_csv()
+
+
+def _load_json_v4_examples() -> list[tuple[str, dict]]:
+    with open(_DICTIONARY_JSON, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    return [(row["row"], row["expected"]) for row in payload["example_rows"]]
 
 
 @pytest.mark.parametrize(
@@ -100,17 +113,27 @@ def test_classify_subtype_prefers_more_specific_keyword():
         ),
     ],
 )
-def test_classify_work_json_v3_examples(name, expected_section, expected_subtype):
+def test_classify_work_json_v4_examples(name, expected_section, expected_subtype):
     result = classify_work(name)
     assert result.section_code == expected_section
     assert result.subtype_code == expected_subtype
     assert not result.needs_review
 
 
-def test_classify_work_related_sections_from_ambiguous_terms():
+def test_classify_work_related_sections_from_dictionary_rules():
     result = classify_work("Устройство гидроизоляции фундамента битумной мастикой")
     assert result.section_code == "waterproofing"
     assert "foundation" in result.related_sections
+
+
+@pytest.mark.parametrize("name,expected", _load_json_v4_examples())
+def test_classify_work_json_v4_dictionary_examples(name, expected):
+    result = classify_work(name)
+    expected_subtype = f"{expected['section_id']}/{expected['subtype_id']}"
+    assert result.section_code == expected["section_id"]
+    assert result.subtype_code == expected_subtype
+    for related_section in expected.get("related_sections") or []:
+        assert related_section in result.related_sections
 
 
 @pytest.mark.parametrize(
@@ -125,13 +148,13 @@ def test_classify_work_related_sections_from_ambiguous_terms():
         ("Вязка арматуры монолитных колонн и ригелей", "structural_frame"),
     ],
 )
-def test_classify_work_json_v3_conflict_cases(name, expected_section):
+def test_classify_work_json_v4_conflict_cases(name, expected_section):
     result = classify_work(name)
     assert result.section_code == expected_section
 
 
 @pytest.mark.asyncio
-async def test_work_taxonomy_helpers_fallback_to_json_v3():
+async def test_work_taxonomy_helpers_fallback_to_json_v4():
     db = MagicMock()
     db.scalars = AsyncMock(return_value=[])
 
@@ -139,7 +162,7 @@ async def test_work_taxonomy_helpers_fallback_to_json_v3():
     subtypes = await get_work_taxonomy_subtypes(db)
 
     assert len(sections) == 19
-    assert len(subtypes) == 94
+    assert len(subtypes) == 111
     assert sections[0]["examples"]
     electrical = next(s for s in subtypes if s["work_subtype_code"] == "mep_internal/electrical")
     assert electrical["display_code"] == electrical["legacy_csv_codes"][0] == "7.4"
