@@ -219,7 +219,7 @@ def _work_subtypes_table():
         sa.column("macro_name", sa.String),
         sa.column("code", sa.String),
         sa.column("name", sa.String),
-        sa.column("keywords", jsonb),
+        sa.column("keywords", postgresql.ARRAY(sa.Text())),
         sa.column("section_code", sa.String),
         sa.column("section_name", sa.String),
         sa.column("section_scope", sa.String),

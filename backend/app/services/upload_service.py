@@ -242,45 +242,125 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
 
 
 async def _enrich_work_subtypes(rows: list, db: AsyncSession) -> None:
-    """Финальный проход классификации работ по JSON v4.
+    """Финальный проход классификации работ по JSON v5.
 
     Только work-строки получают canonical ``work_subtype_code``. У остальных
     поля типизации очищаются. Запускать ПОСЛЕ правок оператора.
     """
-    from app.services.work_taxonomy_service import classify_work
+    from app.services.work_taxonomy_service import (
+        UNKNOWN_SUBTYPE_CODE,
+        classify_row_role,
+        classify_work,
+        inherited_context_raw,
+        should_inherit_parent_context,
+    )
+
+    taxonomy_keys = (
+        "macro_id",
+        "subtype_code",
+        "subtype_name",
+        "work_section_code",
+        "work_section_name",
+        "work_subtype_code",
+        "work_subtype_name",
+        "classification_score",
+        "classification_confidence",
+        "classification_needs_review",
+        "classification_source",
+        "classification_candidates",
+        "classification_matched_terms",
+        "classification_reason",
+        "classification_related_sections",
+        "operator_review_required",
+        "operator_review_status",
+        "operator_review_reason",
+        "dictionary_version",
+        "parent_context_source",
+        "parent_context_code",
+        "context_inherited",
+        "context_inheritance_reason",
+    )
+    parent_context: dict | None = None
 
     for row in rows:
         raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
         if isinstance(raw.get("classification_confidence"), (int, float)):
             raw.setdefault("item_type_confidence", raw.get("classification_confidence"))
         row.raw_data = raw
-        if resolve_item_type(row) == "work":
-            result = classify_work(row.work_name or "", row.section)
-            raw.update(result.as_raw_data())
-            raw["operator_review_required"] = bool(result.needs_review)
-            raw["operator_review_status"] = None
-            raw["operator_review_reason"] = result.reason if result.needs_review else None
+        row_role = classify_row_role(
+            row.work_name or "",
+            row.section,
+            row.unit,
+            row.quantity,
+            allow_absent_header=True,
+        )
+        raw["row_role"] = row_role
+        if row_role == "header":
+            context_result = classify_work(row.work_name or "", row.section, row_role="work")
+            if (
+                not context_result.needs_review
+                and context_result.subtype_code != UNKNOWN_SUBTYPE_CODE
+            ):
+                context_raw = context_result.as_raw_data()
+                context_raw["parent_context_source"] = "header"
+                context_raw["context_inherited"] = False
+                parent_context = context_raw
+            for key in taxonomy_keys:
+                raw.pop(key, None)
+            raw.update(
+                {
+                    "row_role": row_role,
+                    "classification_source": "row_role_header",
+                    "classification_reason": "set_context_only",
+                    "operator_review_required": False,
+                    "operator_review_status": None,
+                    "operator_review_reason": None,
+                    "context_inherited": False,
+                }
+            )
             continue
-        for key in (
-            "macro_id",
-            "subtype_code",
-            "subtype_name",
-            "work_section_code",
-            "work_section_name",
-            "work_subtype_code",
-            "work_subtype_name",
-            "classification_score",
-            "classification_confidence",
-            "classification_needs_review",
-            "classification_source",
-            "classification_candidates",
-            "classification_matched_terms",
-            "operator_review_required",
-            "operator_review_status",
-            "operator_review_reason",
-            "dictionary_version",
-        ):
+        if resolve_item_type(row) == "work":
+            result = classify_work(row.work_name or "", row.section, row_role=row_role)
+            inherited = False
+            if (
+                parent_context
+                and should_inherit_parent_context(result.row_role, row.work_name or "", result)
+                and (result.needs_review or result.subtype_code == UNKNOWN_SUBTYPE_CODE)
+            ):
+                raw.update(
+                    inherited_context_raw(
+                        parent_context,
+                        row_role=result.row_role,
+                        reason="generic_or_low_confidence_work_row",
+                    )
+                )
+                inherited = True
+            else:
+                raw.update(result.as_raw_data())
+            raw["operator_review_required"] = False if inherited else bool(result.needs_review)
+            raw["operator_review_status"] = None
+            raw["operator_review_reason"] = None if inherited else (result.reason if result.needs_review else None)
+            if raw.get("work_subtype_code") and raw.get("work_subtype_code") != UNKNOWN_SUBTYPE_CODE:
+                parent_context = dict(raw)
+            continue
+
+        if parent_context and should_inherit_parent_context(row_role, row.work_name or ""):
+            raw.update(
+                inherited_context_raw(
+                    parent_context,
+                    row_role=row_role,
+                    reason=f"{row_role}_inherits_parent_context",
+                )
+            )
+            raw["operator_review_required"] = False
+            raw["operator_review_status"] = None
+            raw["operator_review_reason"] = None
+            continue
+
+        for key in taxonomy_keys:
             raw.pop(key, None)
+        raw["row_role"] = row_role
+        raw["context_inherited"] = False
 
 
 def _apply_operator_edits(rows: list, edits: dict | None) -> list:
@@ -516,7 +596,9 @@ async def preview_upload_job(
         raise HTTPException(422, "Не удалось распознать строки сметы в выбранном формате.")
 
     rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
-    await _enrich_work_subtypes(rows, db)
+    # Keep preview synchronous and cheap: subtype classification can take tens
+    # of seconds on large estimates and is performed in the background import
+    # job after confirmation.
     preview = _compute_preview(rows, subtotal_rows, meta)
     grouped = _build_preview_groups(rows)
     flat_rows = [_row_preview_dict(r, index=i) for i, r in enumerate(rows[:MAX_PREVIEW_GROUP_ROWS])]

@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 from types import SimpleNamespace
+from datetime import date
 
 import pytest
 
@@ -11,6 +12,7 @@ from app.services.upload_service import (
     _split_work_and_subtotal_rows,
     MAX_PREVIEW_GROUP_ROWS,
 )
+from app.services.excel_parser import ParsedRow
 
 SEWERA_PDF = Path.home() / "Downloads" / "Ильинские сады 02.04.2026.pdf"
 
@@ -55,6 +57,59 @@ def test_truncation_keeps_totals_full():
     # totals count ALL rows even though the list is capped
     assert g["totals"]["work"]["count"] == n
     assert len(g["works"]) <= MAX_PREVIEW_GROUP_ROWS
+
+
+@pytest.mark.asyncio
+async def test_preview_upload_skips_expensive_subtype_enrichment(monkeypatch, tmp_path: Path):
+    from app.services import parser_factory, preview_session, upload_service
+
+    class FakeUpload:
+        filename = "large.xlsx"
+
+        async def read(self):
+            return b"xlsx"
+
+    async def fail_enrich(*args, **kwargs):
+        raise AssertionError("preview must not run full subtype enrichment")
+
+    async def fake_save(payload):
+        assert payload["tmp_path"].endswith(".xlsx")
+        assert payload["type_breakdown"]["work"]["count"] == 1
+        return "preview-id"
+
+    def fake_parse(path, parser_profile="auto"):
+        return [
+            ParsedRow(
+                section="Раздел",
+                work_name="Монтаж перегородки",
+                unit="м2",
+                quantity=10,
+                total_price=1000,
+                raw_data={"item_type": "work"},
+            )
+        ], {"format": parser_factory.FORMAT_EXCEL, "strategy": "row", "parser_profile": "auto"}
+
+    monkeypatch.setattr(upload_service, "_save_tmp", lambda data, suffix: str(tmp_path / f"preview{suffix}"))
+    monkeypatch.setattr(upload_service, "_enrich_work_subtypes", fail_enrich)
+    monkeypatch.setattr(parser_factory, "parse_estimate", fake_parse)
+    monkeypatch.setattr(preview_session, "save_preview_session", fake_save)
+
+    result = await upload_service.preview_upload_job(
+        file=FakeUpload(),
+        project_id="project-id",
+        user_id="user-id",
+        parser_profile="auto",
+        start_date=date(2026, 6, 11),
+        workers=3,
+        estimate_kind=6,
+        complex_mode=False,
+        build_gantt=True,
+        clarification_answers=None,
+        db=None,
+    )
+
+    assert result["preview_id"] == "preview-id"
+    assert result["rows"][0]["subtype_code"] is None
 
 
 @pytest.mark.skipif(not SEWERA_PDF.exists(), reason="Sewera sample PDF not present")

@@ -1,4 +1,4 @@
-"""Read-only public API for the canonical JSON v4 work taxonomy."""
+"""Read-only public API for the canonical JSON v5 work taxonomy."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query

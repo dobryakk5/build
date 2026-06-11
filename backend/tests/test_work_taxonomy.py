@@ -15,10 +15,13 @@ from app.services.work_taxonomy_service import (  # noqa: E402
     SubtypeDef,
     build_precedence_dependencies,
     build_work_section_palette,
+    classify_row_role,
     classify_work,
     classify_subtype,
+    dictionary_version,
     get_work_taxonomy_sections,
     get_work_taxonomy_subtypes,
+    should_inherit_parent_context,
 )
 
 _DATA = Path(__file__).resolve().parents[1] / "app" / "data" / "work_subtypes.csv"
@@ -26,7 +29,7 @@ _DICTIONARY_JSON = (
     Path(__file__).resolve().parents[1]
     / "app"
     / "data"
-    / "construction_work_dictionary_v4.json"
+    / "construction_work_dictionary_v5.json"
 )
 
 
@@ -46,10 +49,14 @@ def _load_taxonomy_from_csv() -> list[SubtypeDef]:
 TAXONOMY = _load_taxonomy_from_csv()
 
 
-def _load_json_v4_examples() -> list[tuple[str, dict]]:
+def _load_json_v5_examples() -> list[tuple[str, dict]]:
     with open(_DICTIONARY_JSON, encoding="utf-8") as fh:
         payload = json.load(fh)
-    return [(row["row"], row["expected"]) for row in payload["example_rows"]]
+    return [
+        (row.get("row") or row.get("text"), row["expected"])
+        for row in payload["example_rows"]
+        if row.get("row") or row.get("text")
+    ]
 
 
 @pytest.mark.parametrize(
@@ -113,7 +120,7 @@ def test_classify_subtype_prefers_more_specific_keyword():
         ),
     ],
 )
-def test_classify_work_json_v4_examples(name, expected_section, expected_subtype):
+def test_classify_work_json_v5_examples(name, expected_section, expected_subtype):
     result = classify_work(name)
     assert result.section_code == expected_section
     assert result.subtype_code == expected_subtype
@@ -126,8 +133,8 @@ def test_classify_work_related_sections_from_dictionary_rules():
     assert "foundation" in result.related_sections
 
 
-@pytest.mark.parametrize("name,expected", _load_json_v4_examples())
-def test_classify_work_json_v4_dictionary_examples(name, expected):
+@pytest.mark.parametrize("name,expected", _load_json_v5_examples())
+def test_classify_work_json_v5_dictionary_examples(name, expected):
     result = classify_work(name)
     expected_subtype = f"{expected['section_id']}/{expected['subtype_id']}"
     assert result.section_code == expected["section_id"]
@@ -148,13 +155,47 @@ def test_classify_work_json_v4_dictionary_examples(name, expected):
         ("Вязка арматуры монолитных колонн и ригелей", "structural_frame"),
     ],
 )
-def test_classify_work_json_v4_conflict_cases(name, expected_section):
+def test_classify_work_json_v5_conflict_cases(name, expected_section):
     result = classify_work(name)
     assert result.section_code == expected_section
 
 
+@pytest.mark.parametrize(
+    "name,expected_subtype",
+    [
+        ("Мягкая отмостка из профилированной мембраны", "landscape/soft_blind_area"),
+        ("Основание пошаговых плит в газоне", "landscape/stepping_stone_base"),
+        ("Уголок металлический по прямолинейным периметрам мощения", "landscape/curbs_edging"),
+        ("Мощение брусчаткой гранитной", "landscape/granite_paving"),
+        ("Укладка крупноформатных плит", "landscape/large_format_stone_paving"),
+        ("Облицовка крышки подпорной стенки", "landscape/natural_stone_cladding"),
+        ("Формирование корыта разработка грунта", "earthworks/forming_trough"),
+        ("Перемещение вынутого грунта в пределах участка", "earthworks/onsite_soil_movement"),
+    ],
+)
+def test_classify_work_json_v5_landscape_smoke_cases(name, expected_subtype):
+    result = classify_work(name)
+    assert result.subtype_code == expected_subtype
+    assert not result.needs_review
+
+
+@pytest.mark.parametrize("name", ["Транспортные расходы", "Накладные расходы"])
+def test_classify_work_json_v5_overhead_rows_do_not_create_work_subtype(name):
+    result = classify_work(name)
+    assert classify_row_role(name) == "overhead"
+    assert result.subtype_code == "unknown/needs_review"
+    assert result.source == "row_role_overhead"
+    assert not result.needs_review
+
+
+def test_classify_work_json_v5_row_role_policy():
+    assert classify_row_role("БЛАГОУСТРОЙСТВО", allow_absent_header=True) == "header"
+    assert should_inherit_parent_context("material", "Профилированная мембрана") is True
+    assert should_inherit_parent_context("overhead", "Транспортные расходы") is False
+
+
 @pytest.mark.asyncio
-async def test_work_taxonomy_helpers_fallback_to_json_v4():
+async def test_work_taxonomy_helpers_fallback_to_json_v5():
     db = MagicMock()
     db.scalars = AsyncMock(return_value=[])
 
@@ -162,7 +203,8 @@ async def test_work_taxonomy_helpers_fallback_to_json_v4():
     subtypes = await get_work_taxonomy_subtypes(db)
 
     assert len(sections) == 19
-    assert len(subtypes) == 111
+    assert len(subtypes) == 123
+    assert dictionary_version() == "construction_work_dictionary_v5@1.4.0"
     taxonomy_codes = [s["taxonomy_code"] for s in subtypes]
     assert len(set(taxonomy_codes)) == len(subtypes)
     assert all(code and "." in code for code in taxonomy_codes)

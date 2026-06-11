@@ -1,8 +1,7 @@
 """Work taxonomy classification and precedence helpers.
 
-``construction_work_dictionary_v4.json`` is the canonical work classifier. The
-old CSV taxonomy is still supported by ``classify_subtype`` for legacy tests and
-callers, but import/KTP should use the JSON result fields.
+``construction_work_dictionary_v5.json`` is the canonical work classifier. The
+CSV helper remains only for legacy callers; import/KTP use v5 JSON fields.
 """
 from __future__ import annotations
 
@@ -22,11 +21,12 @@ from app.models import WorkPrecedence, WorkSubtype
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v4.json"
+    / "construction_work_dictionary_v5.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v4"
+DICTIONARY_SOURCE = "construction_work_dictionary_v5"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
+SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
 
 
 @dataclass(frozen=True)
@@ -114,6 +114,11 @@ class ClassificationResult:
     related_sections: list[str]
     reason: str
     dictionary_version: str
+    row_role: str = "work"
+    parent_context_source: str | None = None
+    parent_context_code: str | None = None
+    context_inherited: bool = False
+    context_inheritance_reason: str | None = None
 
     def as_raw_data(self) -> dict[str, Any]:
         return {
@@ -128,7 +133,13 @@ class ClassificationResult:
             "classification_candidates": [c.as_dict() for c in self.candidates],
             "classification_matched_terms": self.matched_terms,
             "classification_reason": self.reason,
+            "classification_related_sections": self.related_sections,
             "dictionary_version": self.dictionary_version,
+            "row_role": self.row_role,
+            "parent_context_source": self.parent_context_source,
+            "parent_context_code": self.parent_context_code,
+            "context_inherited": self.context_inherited,
+            "context_inheritance_reason": self.context_inheritance_reason,
             # Legacy names kept until the UI/API is fully migrated.
             "subtype_code": self.subtype_code,
             "subtype_name": self.subtype_name,
@@ -549,6 +560,7 @@ def _term_matches(term: str, haystack: str, hay_tokens: list[str] | None = None)
             or hs == token_stem
             or (len(token_stem) >= 5 and ht.startswith(token_stem))
             or (len(token_stem) >= 5 and len(hs) >= 5 and token_stem.startswith(hs))
+            or (token_stem.startswith("разраб") and hs.startswith("разраб"))
             for ht, hs in zip(hay_tokens, hay_stems, strict=False)
         ):
             return False
@@ -569,6 +581,179 @@ def _match_terms(terms: list[str], haystack: str, hay_tokens: list[str]) -> list
             seen.add(key)
             matched.append(term)
     return matched
+
+
+def _row_role_rules(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or _load_dictionary()
+    return payload.get("row_role_rules") or {}
+
+
+def classify_row_role(
+    name: str | None,
+    section: str | None = None,
+    unit: str | None = None,
+    quantity: float | int | None = None,
+    payload: dict[str, Any] | None = None,
+    allow_absent_header: bool = False,
+) -> str:
+    """Classify an estimate row role before assigning a work subtype."""
+    payload = payload or _load_dictionary()
+    rules = _row_role_rules(payload)
+    text = " ".join(str(part) for part in (section, name, unit) if part)
+    haystack = normalize_text(text)
+    hay_tokens = haystack.split()
+    name_text = normalize_text(name or "")
+    if not name_text:
+        return "unknown"
+
+    for term in rules.get("skip_if_name_matches") or []:
+        if normalize_text(term) == name_text:
+            if _match_terms(rules.get("overhead_markers") or [], haystack, hay_tokens):
+                return "overhead"
+            if str(term).casefold() in {"смета", "сводная смета", "материалы / трудозатраты"}:
+                return "header"
+            return "total"
+
+    header_rules = rules.get("header_detection") or {}
+    context_rules = payload.get("context_inheritance_rules") or {}
+    profile_header_terms: list[str] = []
+    for profile in payload.get("estimate_profiles") or []:
+        profile_header_terms.extend(profile.get("context_header_terms") or [])
+    header_terms = list(context_rules.get("header_markers") or []) + profile_header_terms
+    can_check_header = allow_absent_header or unit is not None or quantity is not None
+    if can_check_header and header_rules.get("unit_empty_or_absent") and not str(unit or "").strip():
+        empty_qty = quantity is None or quantity == 0
+        if header_rules.get("quantity_empty_zero_or_absent") and empty_qty:
+            if _match_terms(header_terms, name_text, name_text.split()):
+                return "header"
+
+    for role, marker_key in (
+        ("overhead", "overhead_markers"),
+        ("work", "work_markers"),
+        ("logistics", "logistics_markers"),
+        ("mechanism", "mechanism_markers"),
+        ("labor", "labor_markers"),
+        ("material", "material_markers"),
+    ):
+        if _match_terms(rules.get(marker_key) or [], haystack, hay_tokens):
+            return role
+
+    if (
+        can_check_header
+        and header_rules.get("unit_empty_or_absent")
+        and not str(unit or "").strip()
+    ):
+        empty_qty = quantity is None or quantity == 0
+        short_name = len(name_text.split()) <= 6
+        if (
+            header_rules.get("quantity_empty_zero_or_absent")
+            and empty_qty
+            and header_rules.get("short_section_like_name")
+            and short_name
+        ):
+            return "header"
+
+    return "unknown"
+
+
+def service_row_roles(payload: dict[str, Any] | None = None) -> set[str]:
+    rules = _row_role_rules(payload)
+    return {
+        role
+        for role, policy in (rules.get("classification_policy") or {}).items()
+        if policy in {"do_not_create_work_subtype_unless_operator_confirms", "skip", "set_context_only"}
+    }
+
+
+def _apply_estimate_profiles(
+    section_scores: dict[str, int],
+    section_matches: dict[str, dict[str, list[str]]],
+    haystack: str,
+    hay_tokens: list[str],
+    payload: dict[str, Any],
+) -> list[str]:
+    weights = (payload.get("scoring") or {}).get("weights") or {}
+    boost = int(weights.get("conflict_prefer_boost", 4))
+    penalty_value = int(weights.get("conflict_penalty", -4))
+    applied: list[str] = []
+    for profile in payload.get("estimate_profiles") or []:
+        terms = _match_terms(profile.get("strong_terms") or [], haystack, hay_tokens)
+        if not terms:
+            continue
+        profile_id = str(profile.get("id") or "estimate_profile")
+        for section_id in profile.get("prefer_sections") or []:
+            section_id = str(section_id)
+            if section_id not in section_scores:
+                continue
+            section_scores[section_id] = section_scores.get(section_id, 0) + boost
+            section_matches.setdefault(section_id, {}).setdefault(
+                "estimate_profile_terms", []
+            ).extend(terms)
+            applied.append(f"{profile_id}:prefer:{section_id}")
+        for section_id in profile.get("penalize_sections") or []:
+            section_id = str(section_id)
+            if section_id not in section_scores:
+                continue
+            section_scores[section_id] = section_scores.get(section_id, 0) + penalty_value
+            section_matches.setdefault(section_id, {}).setdefault(
+                "estimate_profile_penalty_terms", []
+            ).extend(terms)
+            applied.append(f"{profile_id}:penalize:{section_id}")
+    return applied
+
+
+def should_inherit_parent_context(
+    row_role: str,
+    name: str | None,
+    result: ClassificationResult | None = None,
+    payload: dict[str, Any] | None = None,
+) -> bool:
+    payload = payload or _load_dictionary()
+    rules = _row_role_rules(payload)
+    policy = (rules.get("classification_policy") or {}).get(row_role)
+    if policy in {"do_not_create_work_subtype_unless_operator_confirms", "skip", "set_context_only"}:
+        return False
+    context_rules = payload.get("context_inheritance_rules") or {}
+    if row_role in set(rules.get("inherit_parent_for_roles") or []):
+        return True
+    if row_role != "work" or not context_rules.get("generic_work_rows_inherit_parent_context_if_low_delta"):
+        return False
+    if result and not result.needs_review:
+        return False
+    haystack = normalize_text(name or "")
+    return bool(_match_terms(context_rules.get("generic_work_terms") or [], haystack, haystack.split()))
+
+
+def inherited_context_raw(
+    parent: dict[str, Any],
+    *,
+    row_role: str,
+    reason: str,
+    source: str = "nearest_work_or_group",
+) -> dict[str, Any]:
+    return {
+        "work_section_code": parent.get("work_section_code"),
+        "work_section_name": parent.get("work_section_name"),
+        "work_subtype_code": parent.get("work_subtype_code") or parent.get("subtype_code"),
+        "work_subtype_name": parent.get("work_subtype_name") or parent.get("subtype_name"),
+        "classification_score": parent.get("classification_score"),
+        "classification_confidence": parent.get("classification_confidence") or "medium",
+        "classification_needs_review": False,
+        "classification_source": "context_inherited",
+        "classification_candidates": parent.get("classification_candidates") or [],
+        "classification_matched_terms": parent.get("classification_matched_terms") or {},
+        "classification_reason": reason,
+        "classification_related_sections": parent.get("classification_related_sections") or [],
+        "dictionary_version": parent.get("dictionary_version") or dictionary_version(),
+        "subtype_code": parent.get("work_subtype_code") or parent.get("subtype_code"),
+        "subtype_name": parent.get("work_subtype_name") or parent.get("subtype_name"),
+        "macro_id": None,
+        "row_role": row_role,
+        "parent_context_source": source,
+        "parent_context_code": parent.get("work_subtype_code") or parent.get("subtype_code"),
+        "context_inherited": True,
+        "context_inheritance_reason": reason,
+    }
 
 
 def _score_section(
@@ -692,7 +877,11 @@ def _score_subtype(
 ) -> tuple[int, dict[str, list[str]]]:
     matched: dict[str, list[str]] = {}
     strong = _match_terms(subtype.get("strong_terms") or [], haystack, hay_tokens)
-    score = len(strong) * int(weights.get("subtype_strong_term", 5))
+    score = 0
+    for term in strong:
+        score += int(weights.get("subtype_strong_term", 5))
+        if normalize_text(term) == haystack:
+            score += int(weights.get("exact_strong_phrase", 7)) * 2
     if strong:
         matched["subtype_strong_terms"] = strong
 
@@ -842,7 +1031,12 @@ def _subtype_candidates(
     return candidates, best_matches
 
 
-def classify_work(name: str, section: str | None = None) -> ClassificationResult:
+def classify_work(
+    name: str,
+    section: str | None = None,
+    *,
+    row_role: str | None = None,
+) -> ClassificationResult:
     payload = _load_dictionary()
     weights = (payload.get("scoring") or {}).get("weights") or {}
     thresholds = (payload.get("scoring") or {}).get("decision_thresholds") or {}
@@ -850,6 +1044,7 @@ def classify_work(name: str, section: str | None = None) -> ClassificationResult
     haystack = normalize_text(text)
     hay_tokens = haystack.split()
     version = dictionary_version(payload)
+    resolved_role = row_role or classify_row_role(name, section, payload=payload)
     sections = payload.get("sections") or []
     sections_by_id = {str(section["id"]): section for section in sections}
 
@@ -868,6 +1063,25 @@ def classify_work(name: str, section: str | None = None) -> ClassificationResult
             related_sections=[],
             reason="empty_name",
             dictionary_version=version,
+            row_role=resolved_role,
+        )
+
+    if resolved_role in service_row_roles(payload):
+        return ClassificationResult(
+            section_code=None,
+            section_name=None,
+            subtype_code=UNKNOWN_SUBTYPE_CODE,
+            subtype_name=SERVICE_ROW_SUBTYPE_NAME,
+            score=0,
+            confidence="low",
+            needs_review=False,
+            source=f"row_role_{resolved_role}",
+            matched_terms={"row_role": [resolved_role]},
+            candidates=[],
+            related_sections=[],
+            reason="row_role_skip",
+            dictionary_version=version,
+            row_role=resolved_role,
         )
 
     section_scores: dict[str, int] = {}
@@ -878,6 +1092,9 @@ def classify_work(name: str, section: str | None = None) -> ClassificationResult
         section_scores[section_id] = score
         section_matches[section_id] = matched
 
+    profile_rules = _apply_estimate_profiles(
+        section_scores, section_matches, haystack, hay_tokens, payload
+    )
     conflict_rules = _apply_conflict_rules(
         sections_by_id, section_scores, section_matches, haystack, hay_tokens, payload
     )
@@ -905,6 +1122,7 @@ def classify_work(name: str, section: str | None = None) -> ClassificationResult
             related_sections=[],
             reason="no_section_match",
             dictionary_version=version,
+            row_role=resolved_role,
         )
 
     section_candidates = _section_candidates(ranked_sections, sections_by_id, thresholds)
@@ -929,6 +1147,8 @@ def classify_work(name: str, section: str | None = None) -> ClassificationResult
         **winner_matches,
         **(subtype_matches or {}),
     }
+    if profile_rules:
+        matched_terms["estimate_profiles_applied"] = profile_rules
     if conflict_rules:
         matched_terms["conflict_rules_applied"] = conflict_rules
     related = _related_sections(winner_id, matched_terms, haystack, hay_tokens, payload)
@@ -968,6 +1188,7 @@ def classify_work(name: str, section: str | None = None) -> ClassificationResult
         related_sections=related,
         reason=reason,
         dictionary_version=version,
+        row_role=resolved_role,
     )
 
 

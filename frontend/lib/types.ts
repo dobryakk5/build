@@ -844,7 +844,7 @@ export type KtpEstimateCardResponse =
   | { sufficient: false; questions: KtpQuestion[]; group_id: null; card: null }
   | { sufficient: true; questions: []; group_id: string; card: KtpEstimateCard };
 
-// ─────────────── JSON v4 work taxonomy ───────────────
+// ─────────────── JSON v5 work taxonomy ───────────────
 
 export interface WorkTaxonomyExample {
   work_subtype_code: string;
