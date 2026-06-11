@@ -448,6 +448,15 @@ export default function UploadPage() {
     void handleKtpEstimate(batchId);
   }, [handleKtpEstimate, result?.estimate_batch_id, status]);
 
+  const importProgressTitle =
+    status === "pending"
+      ? "В очереди..."
+      : result?._progress || "Обрабатываем смету...";
+  const importProgressHint =
+    status === "pending"
+      ? "Ничего нажимать не нужно — страница сама начнёт обработку."
+      : "Ничего нажимать не нужно — страница обновится автоматически. Большие сметы могут обрабатываться несколько минут.";
+
   return (
     <div
       style={{
@@ -816,9 +825,9 @@ export default function UploadPage() {
       {(status === "pending" || status === "processing") && (
         <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.2)", borderRadius: 6 }}>
           <div style={{ fontSize: 13, color: "var(--blue-dark)", fontWeight: 500 }}>
-            ⏳ {status === "pending" ? "В очереди..." : "Парсим смету ..."}
+            ⏳ {importProgressTitle}
           </div>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>Это займёт несколько секунд</div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{importProgressHint}</div>
         </div>
       )}
 
@@ -1143,7 +1152,7 @@ function EditablePreviewPanel({
           disabled={confirming}
           style={{ flex: 1, padding: "11px", background: "var(--blue-dark)", color: "#fff", border: "none", borderRadius: 6, fontSize: 14, fontWeight: 600, cursor: "pointer", opacity: confirming ? 0.7 : 1 }}
         >
-          {confirming ? "Импортируем..." : complexMode ? "→ Добавить смету в комплекс" : "→ Импортировать смету"}
+          {confirming ? "Создаём задачу импорта..." : complexMode ? "→ Добавить смету в комплекс" : "→ Импортировать смету"}
         </button>
         <button
           onClick={onCancel}
@@ -1153,6 +1162,11 @@ function EditablePreviewPanel({
           Отмена
         </button>
       </div>
+      {confirming && (
+        <div style={{ marginTop: 8, fontSize: 11, color: "var(--muted)" }}>
+          Ничего нажимать не нужно. После создания задачи появится статус обработки.
+        </div>
+      )}
       {changedCount > 0 && (
         <div style={{ marginTop: 8, fontSize: 11, color: "var(--muted)" }}>Правок к применению: {changedCount}</div>
       )}

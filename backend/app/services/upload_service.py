@@ -37,6 +37,7 @@ from uuid import uuid4
 from fastapi import UploadFile, HTTPException
 from sqlalchemy import bindparam, select, delete, func, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.core.date_utils             import working_days_between, task_end_date
 from app.core.estimate_types         import resolve_item_type, VALID_ESTIMATE_ITEM_TYPES
@@ -241,7 +242,7 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
     }
 
 
-async def _enrich_work_subtypes(rows: list, db: AsyncSession) -> None:
+def _enrich_work_subtypes_sync(rows: list) -> None:
     """Финальный проход классификации работ по JSON v5.
 
     Только work-строки получают canonical ``work_subtype_code``. У остальных
@@ -363,6 +364,10 @@ async def _enrich_work_subtypes(rows: list, db: AsyncSession) -> None:
         raw["context_inherited"] = False
 
 
+async def _enrich_work_subtypes(rows: list, db: AsyncSession) -> None:
+    await run_in_threadpool(_enrich_work_subtypes_sync, rows)
+
+
 def _apply_operator_edits(rows: list, edits: dict | None) -> list:
     """Применить правки шага 2: смена item_type по (index, row_hash) и добавленные
     строки. Возвращает итоговый список строк (с добавленными в конце)."""
@@ -405,6 +410,48 @@ def _apply_operator_edits(rows: list, edits: dict | None) -> list:
         ))
 
     return rows
+
+
+def _parse_upload_rows_for_import(
+    tmp_path: str,
+    col_mapping: dict | None,
+    sheet: str | None,
+    parser_profile: str,
+    edits: dict | None,
+) -> tuple[list, list[dict], dict]:
+    if col_mapping is not None:
+        int_mapping = {int(k): v for k, v in col_mapping.items()}
+        rows, meta = _parser.parse_mapped(tmp_path, int_mapping, sheet=sheet)
+    else:
+        from app.services.parser_factory import parse_estimate, FORMAT_SCAN, FORMAT_UNKNOWN
+
+        rows, meta = parse_estimate(tmp_path, parser_profile=parser_profile)
+        if meta.get("format") == FORMAT_SCAN:
+            raise ValueError(
+                "PDF содержит только изображения (скан). "
+                "Загрузите текстовый PDF или Excel-файл."
+            )
+        if meta.get("format") == FORMAT_UNKNOWN:
+            raise ValueError("Не удалось определить формат файла сметы.")
+
+    if not rows:
+        raise ValueError(
+            "Не удалось распознать строки сметы. "
+            "Убедитесь что файл содержит колонки: "
+            "наименование, количество, единица, сумма."
+        )
+
+    rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
+    if not rows:
+        raise ValueError(
+            "В файле найдены только строки подытогов. "
+            "Строки с «Итого» и «Всего» используются для сверки, "
+            "но не считаются работами."
+        )
+
+    rows = _apply_operator_edits(rows, edits)
+    _enrich_work_subtypes_sync(rows)
+    return rows, subtotal_rows, meta
 
 
 def _material_dict(material: dict) -> dict:
@@ -735,6 +782,11 @@ async def _create_and_run_job(
 # ФОНОВАЯ ОБРАБОТКА
 # ─────────────────────────────────────────────────────────────────────────────
 
+async def _set_job_progress(job: Job, db: AsyncSession, message: str) -> None:
+    job.result = {"_progress": message}
+    await db.commit()
+
+
 async def _process_upload(job_id: str) -> None:
     from app.core.database import AsyncSessionLocal
 
@@ -746,7 +798,7 @@ async def _process_upload(job_id: str) -> None:
         tmp_path = job.input.get("tmp_path")
         job.status     = "processing"
         job.started_at = datetime.utcnow()
-        await db.commit()
+        await _set_job_progress(job, db, "Создаём задачу импорта…")
 
         try:
             start_date  = date.fromisoformat(job.input["start_date"])
@@ -758,46 +810,26 @@ async def _process_upload(job_id: str) -> None:
             sheet       = job.input.get("sheet")
             parser_profile = job.input.get("parser_profile", "auto")
             build_gantt = bool(job.input.get("build_gantt", True))
+            edits = job.input.get("edits")
 
-            # ── 1. Парсим файл (ДО любого удаления старой сметы) ──────────────
-            if col_mapping is not None:
-                # Ручной маппинг: ключи из JSON пришли как строки → конвертим
-                int_mapping = {int(k): v for k, v in col_mapping.items()}
-                rows, meta = _parser.parse_mapped(tmp_path, int_mapping, sheet=sheet)
-            else:
-                from app.services.parser_factory import parse_estimate, FORMAT_SCAN, FORMAT_UNKNOWN
-                rows, meta = parse_estimate(tmp_path, parser_profile=parser_profile)
-                if meta.get("format") == FORMAT_SCAN:
-                    raise ValueError(
-                        "PDF содержит только изображения (скан). "
-                        "Загрузите текстовый PDF или Excel-файл."
-                    )
-                if meta.get("format") == FORMAT_UNKNOWN:
-                    raise ValueError("Не удалось определить формат файла сметы.")
-
-            if not rows:
-                raise ValueError(
-                    "Не удалось распознать строки сметы. "
-                    "Убедитесь что файл содержит колонки: "
-                    "наименование, количество, единица, сумма."
-                )
-
-            rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
-            if not rows:
-                raise ValueError(
-                    "В файле найдены только строки подытогов. "
-                    "Строки с «Итого» и «Всего» используются для сверки, "
-                    "но не считаются работами."
-                )
-
-            # ── 1b. Правки оператора (шаг 2): смена типа + добавленные строки ──
-            #        порядок: split → overrides/added → enrich подтипом.
-            rows = _apply_operator_edits(rows, job.input.get("edits"))
-            await _enrich_work_subtypes(rows, db)
+            # ── 1. Парсим и классифицируем файл (ДО любого удаления старой сметы)
+            # CPU-bound Excel parsing and taxonomy matching must not block the
+            # FastAPI event loop; otherwise the "job created" response and polls
+            # can appear stuck until this phase finishes.
+            await _set_job_progress(job, db, "Парсим файл и классифицируем строки сметы…")
+            rows, subtotal_rows, meta = await run_in_threadpool(
+                _parse_upload_rows_for_import,
+                tmp_path,
+                col_mapping,
+                sheet,
+                parser_profile,
+                edits,
+            )
 
             # ── 2. Парсинг успешен — теперь безопасно заменить старую смету ───
             #     (перенос soft-replace ПОСЛЕ парсинга: ошибка парсера больше не
             #      уничтожает прежнюю смету проекта).
+            await _set_job_progress(job, db, f"Сохраняем {len(rows)} строк сметы…")
             if not complex_mode:
                 await _soft_replace_project_estimates(job.project_id, db)
 

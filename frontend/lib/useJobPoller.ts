@@ -37,22 +37,29 @@ export function useJobPoller(jobId: string | null, intervalMs = 1500) {
   const [job,     setJob]     = useState<Job | null>(null);
   const [loading, setLoading] = useState(false);
   const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const failures = useRef(0);
 
   useEffect(() => {
-    if (!jobId) { setJob(null); return; }
+    if (!jobId) { setJob(null); failures.current = 0; return; }
     setLoading(true);
+    failures.current = 0;
 
     const poll = async () => {
       try {
         const data = await jobs.get(jobId);
+        failures.current = 0;
         setJob(data);
         if (data.status === "done" || data.status === "failed") {
           clearInterval(timer.current!);
           setLoading(false);
+        } else {
+          setLoading(true);
         }
       } catch {
-        clearInterval(timer.current!);
-        setLoading(false);
+        failures.current += 1;
+        if (failures.current >= 20) {
+          setLoading(false);
+        }
       }
     };
 
