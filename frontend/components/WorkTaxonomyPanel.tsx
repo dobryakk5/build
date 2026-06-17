@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { workTaxonomy } from "@/lib/api";
-import type { WorkTaxonomySection, WorkTaxonomySubtype } from "@/lib/types";
+import type { WorkEstimateType, WorkProjectHierarchy, WorkProjectVariant, WorkStage } from "@/lib/types";
 
 const COLORS = {
   border: "#e2e8f0",
@@ -14,25 +14,6 @@ const COLORS = {
   muted: "#64748b",
   primary: "#0284c7",
   primaryBg: "#0284c715",
-};
-
-const LABEL_HINTS = {
-  legacy: "Старый код из прежнего CSV/ФЕР-справочника. Нужен для сопоставления со старыми сметами и привычными кодами оператора.",
-  strong: "Сильные термины: прямые признаки подтипа. При совпадении дают основной вес классификатору.",
-  weak: "Слабые термины: вспомогательные признаки. Они уточняют классификацию, но сами по себе слабее сильных терминов.",
-  pairs: "Пары действий: связки действие + объект, например монтаж + перегородка. Нужны для более точного выбора подтипа.",
-  subtypeNegative: "Отрицательные признаки подтипа: снижают вероятность выбора только этого подтипа.",
-};
-
-const SECTION_TERM_LABELS: Record<string, string> = {
-  strong_terms: "strong",
-  action_terms: "action",
-  object_terms: "object",
-  material_terms: "material",
-  weak_terms: "weak",
-  document_terms: "document",
-  unit_hints: "unit",
-  negative_terms: "negative",
 };
 
 function Code({ children }: { children: string }) {
@@ -79,87 +60,111 @@ function Chip({ children, title }: { children: ReactNode; title?: string }) {
   );
 }
 
-function pairToText(pair: string[] | undefined) {
-  return (pair || []).filter(Boolean).join(" + ");
+function formatDictionaryVersion(version: string | null | undefined) {
+  if (!version) return "JSON v6.3.3";
+  const match = version.match(/v(\d+(?:_\d+)*)/);
+  if (!match) return version;
+  return `JSON v${match[1].replaceAll("_", ".")}`;
 }
 
-function TermGroup({ label, terms, title }: { label: string; terms: string[]; title?: string }) {
-  const cleanTerms = terms.filter(Boolean);
-  if (!cleanTerms.length) return null;
+function stageSearchText(stage: WorkStage) {
+  return [
+    stage.id,
+    stage.number,
+    stage.title,
+    stage.stage_role,
+    stage.section_id,
+    stage.subtype_id,
+    stage.primary_work_type,
+    ...(stage.related_work_types ?? []),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
 
-  return (
-    <div style={{ display: "flex", alignItems: "flex-start", gap: 6, flexWrap: "wrap" }}>
-      <span title={title} style={{ minWidth: 58, paddingTop: 3, color: COLORS.muted, fontSize: 11, fontWeight: 650 }}>
-        {label}
-      </span>
-      <span style={{ display: "flex", flexWrap: "wrap", gap: 4, minWidth: 0, flex: 1 }}>
-        {cleanTerms.map((term, index) => (
-          <span
-            key={`${label}-${term}-${index}`}
-            style={{
-              padding: "2px 6px",
-              borderRadius: 5,
-              background: "#f1f5f9",
-              color: COLORS.text,
-              fontSize: 11,
-              lineHeight: 1.25,
-            }}
-          >
-            {term}
-          </span>
-        ))}
-      </span>
-    </div>
-  );
+function optionTitle(number: string, title: string) {
+  return number ? `${number}. ${title}` : title;
 }
 
 export default function WorkTaxonomyPanel() {
   const searchParams = useSearchParams();
-  const urlSection = searchParams.get("section");
   const urlSearch = searchParams.get("q") ?? "";
-  const [sections, setSections] = useState<WorkTaxonomySection[]>([]);
-  const [subtypes, setSubtypes] = useState<WorkTaxonomySubtype[]>([]);
-  const [selectedSection, setSelectedSection] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
+  const [hierarchy, setHierarchy] = useState<WorkProjectHierarchy | null>(null);
+  const [selectedTypeId, setSelectedTypeId] = useState<string | null>(null);
+  const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null);
+  const [search, setSearch] = useState(urlSearch);
   const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    workTaxonomy
-      .sections()
-      .then((data) => {
-        setSections(data);
-        const urlSectionExists = urlSection && data.some((section) => section.section_code === urlSection);
-        setSelectedSection(urlSectionExists ? urlSection : data[0]?.section_code ?? null);
-      })
-      .finally(() => setLoading(false));
-  }, [urlSection]);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setSearch(urlSearch);
   }, [urlSearch]);
 
-  const reloadSubtypes = useCallback(() => {
-    workTaxonomy
-      .subtypes({
-        section_code: selectedSection ?? undefined,
-        q: search.trim() || undefined,
-      })
-      .then(setSubtypes)
-      .catch((err) => console.error("Work taxonomy load failed", err));
-  }, [selectedSection, search]);
-
   useEffect(() => {
-    const t = setTimeout(reloadSubtypes, 180);
-    return () => clearTimeout(t);
-  }, [reloadSubtypes]);
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    workTaxonomy
+      .projectHierarchy({ include_stages: true })
+      .then((data) => {
+        if (cancelled) return;
+        setHierarchy(data);
+        const firstType = data.estimate_types[0] ?? null;
+        setSelectedTypeId((current) => current ?? firstType?.id ?? null);
+        setSelectedVariantId((current) => current ?? firstType?.project_variants[0]?.id ?? null);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err?.message || "Не удалось загрузить иерархию справочника");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  const totalSubtypes = useMemo(
-    () => sections.reduce((sum, section) => sum + section.subtypes_count, 0),
-    [sections],
+  const estimateTypes = hierarchy?.estimate_types ?? [];
+  const selectedType = useMemo<WorkEstimateType | null>(
+    () => estimateTypes.find((item) => item.id === selectedTypeId) ?? null,
+    [estimateTypes, selectedTypeId],
   );
+  const variants = selectedType?.project_variants ?? [];
+  const selectedVariant = useMemo<WorkProjectVariant | null>(
+    () => variants.find((item) => item.id === selectedVariantId) ?? null,
+    [selectedVariantId, variants],
+  );
+  const stages = selectedVariant?.stages ?? [];
+  const totalVariants = useMemo(
+    () => estimateTypes.reduce((sum, type) => sum + type.project_variants.length, 0),
+    [estimateTypes],
+  );
+  const totalStages = useMemo(
+    () => estimateTypes.reduce(
+      (sum, type) => sum + type.project_variants.reduce((variantSum, variant) => variantSum + variant.stages_count, 0),
+      0,
+    ),
+    [estimateTypes],
+  );
+  const dictionaryLabel = formatDictionaryVersion(hierarchy?.dictionary_version);
+  const filteredStages = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    if (!needle) return stages;
+    return stages.filter((stage) => stageSearchText(stage).includes(needle));
+  }, [search, stages]);
+
+  function selectType(type: WorkEstimateType) {
+    setSelectedTypeId(type.id);
+    setSelectedVariantId(type.project_variants[0]?.id ?? null);
+  }
 
   if (loading) {
-    return <div style={{ padding: 24, color: COLORS.muted }}>Загрузка справочника…</div>;
+    return <div style={{ padding: 24, color: COLORS.muted }}>Загрузка справочника...</div>;
+  }
+
+  if (error) {
+    return <div style={{ padding: 24, color: "#dc2626" }}>{error}</div>;
   }
 
   return (
@@ -167,18 +172,23 @@ export default function WorkTaxonomyPanel() {
       <div style={{ padding: "14px 16px", borderBottom: `1px solid ${COLORS.border}`, background: "white" }}>
         <h2 style={{ margin: 0, fontSize: 18 }}>Справочник работ</h2>
         <div style={{ marginTop: 4, color: COLORS.muted, fontSize: 12 }}>
-          {sections.length} секций · {totalSubtypes} подтипов · JSON v6.3.3
+          {estimateTypes.length} типов · {totalVariants} вариантов · {totalStages} этапов · {dictionaryLabel}
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "300px minmax(0, 1fr)", minHeight: "calc(100vh - 164px)" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "300px 360px minmax(0, 1fr)",
+          minHeight: "calc(100vh - 164px)",
+        }}
+      >
         <aside style={{ borderRight: `1px solid ${COLORS.border}`, background: "white", padding: 10 }}>
-          {sections.map((section) => (
+          {estimateTypes.map((type) => (
             <button
-              key={section.section_code}
+              key={type.id}
               type="button"
-              onClick={() => setSelectedSection(section.section_code)}
-              title={section.scope ?? ""}
+              onClick={() => selectType(type)}
               style={{
                 width: "100%",
                 display: "grid",
@@ -191,32 +201,80 @@ export default function WorkTaxonomyPanel() {
                 border: "none",
                 borderRadius: 6,
                 cursor: "pointer",
-                background: selectedSection === section.section_code ? COLORS.primaryBg : "transparent",
-                color: selectedSection === section.section_code ? COLORS.primary : COLORS.text,
+                background: selectedTypeId === type.id ? COLORS.primaryBg : "transparent",
+                color: selectedTypeId === type.id ? COLORS.primary : COLORS.text,
               }}
             >
-              <span style={{ minWidth: 0 }}>
-                <span style={{ display: "flex", alignItems: "flex-start", gap: 7, minWidth: 0 }}>
-                  {section.taxonomy_code ? <Code>{section.taxonomy_code}</Code> : null}
-                  <span style={{ display: "block", fontSize: 13, lineHeight: 1.25, whiteSpace: "normal", overflowWrap: "anywhere" }}>
-                    {section.section_name}
-                  </span>
+              <span style={{ minWidth: 0, display: "flex", alignItems: "flex-start", gap: 7 }}>
+                <Code>{type.number}</Code>
+                <span style={{ display: "block", fontSize: 13, lineHeight: 1.25, whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                  {type.title}
                 </span>
               </span>
-              <span style={{ color: COLORS.muted, fontSize: 12 }}>{section.subtypes_count}</span>
+              <span style={{ color: COLORS.muted, fontSize: 12 }}>{type.project_variants.length}</span>
+            </button>
+          ))}
+        </aside>
+
+        <aside style={{ borderRight: `1px solid ${COLORS.border}`, background: "#fff", padding: 10 }}>
+          <div style={{ padding: "6px 8px 10px", color: COLORS.muted, fontSize: 11, textTransform: "uppercase", letterSpacing: ".06em" }}>
+            Варианты объекта
+          </div>
+          {variants.map((variant) => (
+            <button
+              key={variant.id}
+              type="button"
+              onClick={() => setSelectedVariantId(variant.id)}
+              title={variant.id}
+              style={{
+                width: "100%",
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) auto",
+                gap: 8,
+                alignItems: "start",
+                textAlign: "left",
+                padding: "8px 10px",
+                marginBottom: 3,
+                border: "none",
+                borderRadius: 6,
+                cursor: "pointer",
+                background: selectedVariantId === variant.id ? COLORS.primaryBg : "transparent",
+                color: selectedVariantId === variant.id ? COLORS.primary : COLORS.text,
+              }}
+            >
+              <span style={{ minWidth: 0, display: "flex", alignItems: "flex-start", gap: 7 }}>
+                <Code>{variant.number}</Code>
+                <span style={{ display: "block", fontSize: 13, lineHeight: 1.25, whiteSpace: "normal", overflowWrap: "anywhere" }}>
+                  {variant.title}
+                </span>
+              </span>
+              <span style={{ color: COLORS.muted, fontSize: 12 }}>{variant.stages_count}</span>
             </button>
           ))}
         </aside>
 
         <main style={{ padding: 16, overflow: "auto" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start", marginBottom: 12 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+                {selectedVariant?.number ? <Code>{selectedVariant.number}</Code> : null}
+                <h3 style={{ margin: 0, fontSize: 16, lineHeight: 1.25 }}>{selectedVariant?.title ?? "Вариант не выбран"}</h3>
+              </div>
+              <div style={{ color: COLORS.muted, fontSize: 12 }}>
+                {selectedType ? optionTitle(selectedType.number, selectedType.title) : ""}
+              </div>
+            </div>
+            <Chip>{filteredStages.length} из {stages.length} этапов</Chip>
+          </div>
+
           <input
             type="search"
-            placeholder="Поиск по названию, ID или старому коду"
+            placeholder="Поиск по этапам, section_id или subtype_id"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             style={{
               width: "100%",
-              maxWidth: 560,
+              maxWidth: 620,
               padding: "9px 11px",
               border: `1px solid ${COLORS.border}`,
               borderRadius: 6,
@@ -226,9 +284,9 @@ export default function WorkTaxonomyPanel() {
           />
 
           <div style={{ display: "grid", gap: 8 }}>
-            {subtypes.map((subtype) => (
+            {filteredStages.map((stage) => (
               <article
-                key={subtype.work_subtype_code}
+                key={stage.id}
                 style={{
                   border: `1px solid ${COLORS.border}`,
                   borderRadius: 6,
@@ -238,57 +296,28 @@ export default function WorkTaxonomyPanel() {
                   gap: 8,
                 }}
               >
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline" }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
-                      {subtype.taxonomy_code ? <Code>{subtype.taxonomy_code}</Code> : null}
-                      <span style={{ minWidth: 0, fontSize: 14, fontWeight: 650 }}>{subtype.work_subtype_name}</span>
-                    </div>
-                  </div>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
+                  <Code>{stage.number}</Code>
+                  <span style={{ minWidth: 0, fontSize: 14, fontWeight: 650, lineHeight: 1.3 }}>{stage.title}</span>
                 </div>
-
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {subtype.legacy_csv_codes
-                    .map((code) => (
-                      <Chip key={code} title={LABEL_HINTS.legacy}>legacy {code}</Chip>
+                  {stage.section_id ? <Chip>section {stage.section_id}</Chip> : null}
+                  {stage.subtype_id ? <Chip>subtype {stage.subtype_id}</Chip> : null}
+                  {stage.primary_work_type ? <Chip>primary {stage.primary_work_type}</Chip> : null}
+                  {stage.stage_role ? <Chip>{stage.stage_role}</Chip> : null}
+                  {stage.autofill_enabled ? <Chip>autofill</Chip> : null}
+                </div>
+                {stage.related_work_types.length ? (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {stage.related_work_types.map((workType) => (
+                      <Chip key={workType}>related {workType}</Chip>
                     ))}
-                  <Chip title={LABEL_HINTS.strong}>strong {subtype.term_summary.strong_terms}</Chip>
-                  <Chip title={LABEL_HINTS.weak}>weak {subtype.term_summary.weak_terms}</Chip>
-                  <Chip title={LABEL_HINTS.pairs}>pairs {subtype.term_summary.action_object_pairs}</Chip>
-                  <Chip title={LABEL_HINTS.subtypeNegative}>negative {subtype.term_summary.negative_terms ?? 0}</Chip>
-                </div>
-
-                <div style={{ display: "grid", gap: 7 }}>
-                  <div style={{ color: COLORS.muted, fontSize: 12, fontWeight: 650 }}>Слова первичного типа</div>
-                  {Object.entries(SECTION_TERM_LABELS).map(([key, label]) => (
-                    <TermGroup
-                      key={key}
-                      label={label}
-                      terms={subtype.terms_json?.section?.[key as keyof NonNullable<WorkTaxonomySubtype["terms_json"]>["section"]] ?? []}
-                      title={key === "negative_terms" ? "Отрицательные признаки: снижают вероятность выбора этого первичного типа." : undefined}
-                    />
-                  ))}
-                </div>
-
-                <div style={{ display: "grid", gap: 7 }}>
-                  <div style={{ color: COLORS.muted, fontSize: 12, fontWeight: 650 }}>Слова подтипа</div>
-                  <TermGroup label="strong" terms={subtype.terms_json?.subtype?.strong_terms ?? []} title={LABEL_HINTS.strong} />
-                  <TermGroup label="weak" terms={subtype.terms_json?.subtype?.weak_terms ?? []} title={LABEL_HINTS.weak} />
-                  <TermGroup
-                    label="pairs"
-                    terms={(subtype.terms_json?.subtype?.action_object_pairs ?? []).map(pairToText)}
-                    title={LABEL_HINTS.pairs}
-                  />
-                  <TermGroup
-                    label="negative"
-                    terms={subtype.terms_json?.subtype?.negative_terms ?? []}
-                    title={LABEL_HINTS.subtypeNegative}
-                  />
-                </div>
+                  </div>
+                ) : null}
               </article>
             ))}
-            {!subtypes.length ? (
-              <div style={{ color: COLORS.muted, padding: 18 }}>Подтипы не найдены.</div>
+            {!filteredStages.length ? (
+              <div style={{ color: COLORS.muted, padding: 18 }}>Этапы не найдены.</div>
             ) : null}
           </div>
         </main>

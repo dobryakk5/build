@@ -4,7 +4,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision = "057_estimate_batch_project_hierarchy"
+revision = "057_est_batch_hierarchy"
 down_revision = "056_work_taxonomy_v5_reset"
 branch_labels = None
 depends_on = None

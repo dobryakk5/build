@@ -247,7 +247,7 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
 
 
 def _enrich_work_subtypes_sync(rows: list) -> None:
-    """Финальный проход классификации работ по JSON v5.
+    """Финальный проход классификации работ по JSON v6.
 
     Только work-строки получают canonical ``work_subtype_code``. У остальных
     поля типизации очищаются. Запускать ПОСЛЕ правок оператора.

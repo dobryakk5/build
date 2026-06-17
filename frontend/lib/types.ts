@@ -851,7 +851,7 @@ export type KtpEstimateCardResponse =
   | { sufficient: false; questions: KtpQuestion[]; group_id: null; card: null }
   | { sufficient: true; questions: []; group_id: string; card: KtpEstimateCard };
 
-// ─────────────── JSON v5 work taxonomy ───────────────
+// ─────────────── JSON v6 work taxonomy ───────────────
 
 export interface WorkTaxonomyExample {
   work_subtype_code: string;
@@ -914,6 +914,19 @@ export interface WorkProjectVariant {
   number: string;
   title: string;
   stages_count: number;
+  stages?: WorkStage[];
+}
+
+export interface WorkStage {
+  id: string;
+  number: string;
+  title: string;
+  stage_role?: string | null;
+  autofill_enabled: boolean;
+  section_id?: string | null;
+  subtype_id?: string | null;
+  primary_work_type?: string | null;
+  related_work_types: string[];
 }
 
 export interface WorkEstimateType {

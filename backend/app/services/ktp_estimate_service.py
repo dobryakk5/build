@@ -683,7 +683,7 @@ async def _process_stage1(job_id: str) -> None:
             invalid_section_codes = diagnostics.get("invalid_work_section_codes") or []
             if invalid_section_codes:
                 warnings_out.append(
-                    f"ИИ вернул {len(invalid_section_codes)} неизвестных кодов секций JSON v5; "
+                    f"ИИ вернул {len(invalid_section_codes)} неизвестных кодов секций JSON v6; "
                     "для этих групп секция оставлена пустой"
                 )
 
@@ -1226,7 +1226,7 @@ def _build_section_prompt(
     return f"""Тип объекта: {kind_label}
 Группа работ (из сметы): «{display_title}»
 
-ПАЛИТРА СЕКЦИЙ JSON v5 (выбери ОДИН work_section_code для этой группы):
+ПАЛИТРА СЕКЦИЙ JSON v6 (выбери ОДИН work_section_code для этой группы):
 {palette_block}
 {clarification_section}
 
@@ -1402,7 +1402,7 @@ def _build_stage1_prompt(
 
     return f"""Тип объекта: {kind_label}
 
-СПРАВОЧНО (категории работ JSON v5 — используй work_section_code из палитры):
+СПРАВОЧНО (категории работ JSON v6 — используй work_section_code из палитры):
 {palette_block}
 {clarification_section}
 

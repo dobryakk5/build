@@ -223,6 +223,8 @@ def _public_work_stage(stage: dict[str, Any]) -> dict[str, Any]:
         "title": str(stage.get("title") or ""),
         "stage_role": stage.get("stage_role"),
         "autofill_enabled": bool(stage.get("autofill_enabled", False)),
+        "section_id": stage.get("section_id") or None,
+        "subtype_id": stage.get("subtype_id") or None,
         "primary_work_type": stage.get("primary_work_type") or None,
         "related_work_types": stage.get("related_work_types") or [],
     }
