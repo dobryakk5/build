@@ -105,6 +105,7 @@ async def test_preview_upload_skips_expensive_subtype_enrichment(monkeypatch, tm
         complex_mode=False,
         build_gantt=True,
         clarification_answers=None,
+        hierarchy_selection=None,
         db=None,
     )
 

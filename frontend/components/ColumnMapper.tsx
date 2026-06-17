@@ -20,6 +20,8 @@ interface Props {
   startDate:  string;
   workers:    number;
   estimateKind: number;
+  estimateTypeId?: string | null;
+  projectVariantId?: string | null;
   complexMode: boolean;
   clarificationAnswers: Record<string, unknown>;
   onConfirm:  (jobId: string) => void;
@@ -51,6 +53,8 @@ export default function ColumnMapper({
   startDate,
   workers,
   estimateKind,
+  estimateTypeId,
+  projectVariantId,
   complexMode,
   clarificationAnswers,
   onConfirm,
@@ -116,6 +120,8 @@ export default function ColumnMapper({
           start_date: startDate,
           workers,
           estimate_kind: estimateKind,
+          estimate_type_id: estimateTypeId,
+          project_variant_id: projectVariantId,
           complex_mode: complexMode,
           clarification_answers: clarificationAnswers,
         }),

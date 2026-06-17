@@ -21,6 +21,7 @@ const LABEL_HINTS = {
   strong: "Сильные термины: прямые признаки подтипа. При совпадении дают основной вес классификатору.",
   weak: "Слабые термины: вспомогательные признаки. Они уточняют классификацию, но сами по себе слабее сильных терминов.",
   pairs: "Пары действий: связки действие + объект, например монтаж + перегородка. Нужны для более точного выбора подтипа.",
+  subtypeNegative: "Отрицательные признаки подтипа: снижают вероятность выбора только этого подтипа.",
 };
 
 const SECTION_TERM_LABELS: Record<string, string> = {
@@ -166,7 +167,7 @@ export default function WorkTaxonomyPanel() {
       <div style={{ padding: "14px 16px", borderBottom: `1px solid ${COLORS.border}`, background: "white" }}>
         <h2 style={{ margin: 0, fontSize: 18 }}>Справочник работ</h2>
         <div style={{ marginTop: 4, color: COLORS.muted, fontSize: 12 }}>
-          {sections.length} секций · {totalSubtypes} подтипов · JSON v5
+          {sections.length} секций · {totalSubtypes} подтипов · JSON v6.3.3
         </div>
       </div>
 
@@ -254,6 +255,7 @@ export default function WorkTaxonomyPanel() {
                   <Chip title={LABEL_HINTS.strong}>strong {subtype.term_summary.strong_terms}</Chip>
                   <Chip title={LABEL_HINTS.weak}>weak {subtype.term_summary.weak_terms}</Chip>
                   <Chip title={LABEL_HINTS.pairs}>pairs {subtype.term_summary.action_object_pairs}</Chip>
+                  <Chip title={LABEL_HINTS.subtypeNegative}>negative {subtype.term_summary.negative_terms ?? 0}</Chip>
                 </div>
 
                 <div style={{ display: "grid", gap: 7 }}>
@@ -276,6 +278,11 @@ export default function WorkTaxonomyPanel() {
                     label="pairs"
                     terms={(subtype.terms_json?.subtype?.action_object_pairs ?? []).map(pairToText)}
                     title={LABEL_HINTS.pairs}
+                  />
+                  <TermGroup
+                    label="negative"
+                    terms={subtype.terms_json?.subtype?.negative_terms ?? []}
+                    title={LABEL_HINTS.subtypeNegative}
                   />
                 </div>
               </article>

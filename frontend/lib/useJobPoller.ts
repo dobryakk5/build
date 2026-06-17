@@ -10,6 +10,11 @@ export interface JobResult {
   estimate_batch_id?: string;
   estimate_batch_name?: string;
   estimate_kind?: number;
+  estimate_type_id?: string | null;
+  estimate_type_title?: string | null;
+  project_variant_id?: string | null;
+  project_variant_title?: string | null;
+  taxonomy_dictionary_version?: string | null;
   matched_rows_count?: number;
   low_confidence_count?: number;
   normalized_rows_count?: number;

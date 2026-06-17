@@ -26,10 +26,12 @@ from app.api.routes.nw            import router as nw_router
 from app.api.routes.work_plan     import router as work_plan_router
 from app.api.routes.work_taxonomy import router as work_taxonomy_router
 from app.api.routes.activity      import router as activity_router
+from app.services.work_taxonomy_service import assert_project_hierarchy_compatible
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    assert_project_hierarchy_compatible()
     await init_redis()
     yield
     await close_redis()

@@ -49,6 +49,13 @@ export interface EstimateBatch {
   workers_count?: number | null;
   hours_per_day?: number | null;
   source_filename?: string | null;
+  estimate_type_id?: string | null;
+  estimate_type_title?: string | null;
+  estimate_type_number?: string | null;
+  project_variant_id?: string | null;
+  project_variant_title?: string | null;
+  project_variant_number?: string | null;
+  taxonomy_dictionary_version?: string | null;
   clarification_answers?: Record<string, unknown> | null;
   estimates_count: number;
   gantt_tasks_count: number;
@@ -857,6 +864,7 @@ export interface WorkTaxonomyTermSummary {
   strong_terms: number;
   weak_terms: number;
   action_object_pairs: number;
+  negative_terms?: number;
 }
 
 export interface WorkTaxonomyTermsJson {
@@ -874,6 +882,7 @@ export interface WorkTaxonomyTermsJson {
     strong_terms?: string[];
     weak_terms?: string[];
     action_object_pairs?: string[][];
+    negative_terms?: string[];
   };
 }
 
@@ -898,6 +907,27 @@ export interface WorkTaxonomySubtype {
   term_summary: WorkTaxonomyTermSummary;
   terms_json?: WorkTaxonomyTermsJson | null;
   dictionary_version?: string | null;
+}
+
+export interface WorkProjectVariant {
+  id: string;
+  number: string;
+  title: string;
+  stages_count: number;
+}
+
+export interface WorkEstimateType {
+  id: string;
+  number: string;
+  title: string;
+  estimate_kind: number;
+  estimate_profile_id: string;
+  project_variants: WorkProjectVariant[];
+}
+
+export interface WorkProjectHierarchy {
+  dictionary_version: string;
+  estimate_types: WorkEstimateType[];
 }
 
 // ─────────────── NW (нормализованные виды работ) ───────────────

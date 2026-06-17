@@ -65,6 +65,8 @@ def test_set_and_clear_auth_cookies() -> None:
     raw_cookie = "\n".join(response.raw_headers[i][1].decode() for i in range(len(response.raw_headers)))
     assert "access_token=access" in raw_cookie
     assert "refresh_token=refresh" in raw_cookie
+    assert "Max-Age=86400" in raw_cookie
+    assert "Max-Age=2592000" in raw_cookie
     assert "HttpOnly" in raw_cookie
 
     clear_auth_cookies(response)

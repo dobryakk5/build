@@ -42,6 +42,7 @@ from app.services.upload_service import (
     start_upload_job_with_mapping,
 )
 from app.services.parser_factory import VALID_PARSER_PROFILES, UI_PROFILES, PROFILE_AUTO
+from app.services.work_taxonomy_service import validate_project_hierarchy_selection
 from app.services.preview_session import (
     PreviewStorageUnavailable,
     get_preview_session,
@@ -171,6 +172,25 @@ def _public_clarification_answers(value: dict | None) -> dict | None:
     return public or None
 
 
+def _resolve_upload_hierarchy_selection(
+    estimate_type_id: str | None,
+    project_variant_id: str | None,
+    estimate_kind: int | None,
+) -> tuple[int, dict | None]:
+    if estimate_type_id or project_variant_id:
+        try:
+            selection = validate_project_hierarchy_selection(
+                estimate_type_id,
+                project_variant_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return int(selection["estimate_kind"]), selection
+    if estimate_kind is None:
+        raise HTTPException(400, "Выберите тип сметы и вариант объекта")
+    return estimate_kind, None
+
+
 def _estimate_item_type(estimate: Estimate) -> str:
     return resolve_item_type(estimate)
 
@@ -207,7 +227,9 @@ async def upload_estimate(
     clarification_answers: str | None = Form(default=None),
     start_date:       date       = Query(default_factory=date.today),
     workers:          int        = Query(default=3, ge=1, le=20),
-    estimate_kind:    int        = Query(ge=1, le=9),
+    estimate_kind:    int | None = Query(default=None, ge=1, le=9),
+    estimate_type_id: str | None = Query(default=None),
+    project_variant_id: str | None = Query(default=None),
     complex_mode:     bool       = Query(default=False),
     current_user      = Depends(get_current_user),
     member: ProjectMember = Depends(require_action(Action.EDIT)),
@@ -219,6 +241,11 @@ async def upload_estimate(
     Клиент опрашивает GET /jobs/{job_id} каждые 1-2 секунды.
     """
     parsed_clarification_answers = _parse_clarification_answers(clarification_answers)
+    resolved_estimate_kind, hierarchy_selection = _resolve_upload_hierarchy_selection(
+        estimate_type_id,
+        project_variant_id,
+        estimate_kind,
+    )
 
     job = await start_upload_job(
         file             = file,
@@ -226,9 +253,10 @@ async def upload_estimate(
         user_id          = current_user.id,
         start_date       = start_date,
         workers          = workers,
-        estimate_kind    = estimate_kind,
+        estimate_kind    = resolved_estimate_kind,
         complex_mode     = complex_mode,
         clarification_answers = parsed_clarification_answers,
+        hierarchy_selection = hierarchy_selection,
         db               = db,
     )
     return UploadStartResponse(job_id=job.id)
@@ -245,7 +273,9 @@ class ConfirmMappingRequest(BaseModel):
     col_mapping: dict[int, str]   # {col_0based: "work_name"|"unit"|...|"skip"}
     start_date:  date
     workers:     int = 3
-    estimate_kind: int
+    estimate_kind: int | None = None
+    estimate_type_id: str | None = None
+    project_variant_id: str | None = None
     complex_mode: bool = False
     clarification_answers: dict | None = None
     parser_profile: str = "manual_mapping"
@@ -263,6 +293,11 @@ async def confirm_mapping(
     Принимает ручной маппинг колонок после того как авто-парсинг вернул 422.
     Запускает фоновую обработку с явным маппингом и возвращает job_id.
     """
+    resolved_estimate_kind, hierarchy_selection = _resolve_upload_hierarchy_selection(
+        body.estimate_type_id,
+        body.project_variant_id,
+        body.estimate_kind,
+    )
     job = await start_upload_job_with_mapping(
         tmp_path    = body.tmp_path,
         sheet       = body.sheet,
@@ -271,9 +306,10 @@ async def confirm_mapping(
         user_id     = current_user.id,
         start_date  = body.start_date,
         workers     = body.workers,
-        estimate_kind = body.estimate_kind,
+        estimate_kind = resolved_estimate_kind,
         complex_mode  = body.complex_mode,
         clarification_answers = _normalize_clarification_payload(body.clarification_answers),
+        hierarchy_selection = hierarchy_selection,
         db          = db,
     )
     return UploadStartResponse(job_id=job.id)
@@ -298,7 +334,9 @@ async def preview_estimate(
     clarification_answers: str | None = Form(default=None),
     start_date:       date       = Query(default_factory=date.today),
     workers:          int        = Query(default=3, ge=1, le=20),
-    estimate_kind:    int        = Query(ge=1, le=9),
+    estimate_kind:    int | None = Query(default=None, ge=1, le=9),
+    estimate_type_id: str | None = Query(default=None),
+    project_variant_id: str | None = Query(default=None),
     complex_mode:     bool       = Query(default=False),
     parser_profile:   str        = Query(default=PROFILE_AUTO),
     build_gantt:      bool       = Query(default=True),
@@ -314,6 +352,12 @@ async def preview_estimate(
     if parser_profile not in VALID_PARSER_PROFILES:
         raise HTTPException(400, f"Неизвестный профиль импорта: {parser_profile}")
 
+    resolved_estimate_kind, hierarchy_selection = _resolve_upload_hierarchy_selection(
+        estimate_type_id,
+        project_variant_id,
+        estimate_kind,
+    )
+
     try:
         return await preview_upload_job(
             file             = file,
@@ -322,10 +366,11 @@ async def preview_estimate(
             parser_profile   = parser_profile,
             start_date       = start_date,
             workers          = workers,
-            estimate_kind    = estimate_kind,
+            estimate_kind    = resolved_estimate_kind,
             complex_mode     = complex_mode,
             build_gantt      = build_gantt,
             clarification_answers = _parse_clarification_answers(clarification_answers),
+            hierarchy_selection = hierarchy_selection,
             db               = db,
         )
     except PreviewStorageUnavailable:
@@ -587,6 +632,13 @@ async def list_estimate_batches(
                 workers_count=batch.workers_count,
                 hours_per_day=float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY),
                 source_filename=batch.source_filename,
+                estimate_type_id=batch.estimate_type_id,
+                estimate_type_title=batch.estimate_type_title,
+                estimate_type_number=batch.estimate_type_number,
+                project_variant_id=batch.project_variant_id,
+                project_variant_title=batch.project_variant_title,
+                project_variant_number=batch.project_variant_number,
+                taxonomy_dictionary_version=batch.taxonomy_dictionary_version,
                 clarification_answers=_public_clarification_answers(batch.clarification_answers),
                 estimates_count=estimates_count or 0,
                 gantt_tasks_count=gantt_tasks_count or 0,

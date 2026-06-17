@@ -375,7 +375,7 @@ def upgrade():
                     postgresql_where=sa.text("is_read = false"))
 
     # ─── 17. REFRESH ТОКЕНЫ ──────────────────────────────────────────────────
-    # JWT access_token живёт 15 мин, refresh — 30 дней.
+    # JWT access_token живёт 24 часа, refresh — 30 дней.
     # При logout → удаляем строку → токен инвалидирован.
     op.create_table('refresh_tokens',
         sa.Column('id',          UUID, primary_key=True, server_default=sa.text('gen_random_uuid()')),

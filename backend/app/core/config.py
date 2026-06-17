@@ -15,7 +15,7 @@ class Settings(BaseSettings):
 
     # JWT
     SECRET_KEY: str = "change-me-in-production-256-bit-secret"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 24 * 60
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
     AUTH_COOKIE_DOMAIN: str | None = None
     AUTH_COOKIE_SECURE: bool = False

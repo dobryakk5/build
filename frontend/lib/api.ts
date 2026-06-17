@@ -34,6 +34,7 @@ import type {
   NwWorkType,
   WorkTaxonomySection,
   WorkTaxonomySubtype,
+  WorkProjectHierarchy,
   WorkPlanAutoSummary,
   WorkPlanCard,
   WorkPlanCardPatch,
@@ -308,6 +309,8 @@ export const estimates = {
     workers: number,
     estimateKind: number,
     complexMode: boolean,
+    estimateTypeId?: string | null,
+    projectVariantId?: string | null,
     clarificationAnswers?: Record<string, unknown>,
   ) => {
     const form  = new FormData();
@@ -316,14 +319,16 @@ export const estimates = {
       form.append("clarification_answers", JSON.stringify(clarificationAnswers));
     }
     return fetch(
-      `${BASE}/projects/${pid}/estimates/upload?start_date=${startDate}&workers=${workers}&estimate_kind=${encodeURIComponent(estimateKind)}&complex_mode=${complexMode}`,
+      `${BASE}/projects/${pid}/estimates/upload?start_date=${startDate}&workers=${workers}&estimate_kind=${encodeURIComponent(estimateKind)}&complex_mode=${complexMode}` +
+      `${estimateTypeId ? `&estimate_type_id=${encodeURIComponent(estimateTypeId)}` : ""}` +
+      `${projectVariantId ? `&project_variant_id=${encodeURIComponent(projectVariantId)}` : ""}`,
       { method: "POST", credentials: "include", body: form }
     ).then(async (r) => {
       const data = await r.json().catch(() => ({}));
       if (r.status === 401) {
         const ok = await tryRefresh();
         if (ok) {
-          return estimates.upload(pid, file, startDate, workers, estimateKind, complexMode, clarificationAnswers);
+          return estimates.upload(pid, file, startDate, workers, estimateKind, complexMode, estimateTypeId, projectVariantId, clarificationAnswers);
         }
       }
       if (!r.ok) {
@@ -348,6 +353,8 @@ export const estimates = {
     workers: number,
     estimateKind: number,
     complexMode: boolean,
+    estimateTypeId: string | null | undefined,
+    projectVariantId: string | null | undefined,
     parserProfile: string,
     buildGantt: boolean,
     clarificationAnswers?: Record<string, unknown>,
@@ -361,6 +368,8 @@ export const estimates = {
       `start_date=${startDate}&workers=${workers}` +
       `&estimate_kind=${encodeURIComponent(estimateKind)}` +
       `&complex_mode=${complexMode}` +
+      `${estimateTypeId ? `&estimate_type_id=${encodeURIComponent(estimateTypeId)}` : ""}` +
+      `${projectVariantId ? `&project_variant_id=${encodeURIComponent(projectVariantId)}` : ""}` +
       `&parser_profile=${encodeURIComponent(parserProfile)}` +
       `&build_gantt=${buildGantt}`;
     return fetch(`${BASE}/projects/${pid}/estimates/upload/preview?${qs}`, {
@@ -372,7 +381,7 @@ export const estimates = {
       if (r.status === 401) {
         const ok = await tryRefresh();
         if (ok) {
-          return estimates.preview(pid, file, startDate, workers, estimateKind, complexMode, parserProfile, buildGantt, clarificationAnswers);
+          return estimates.preview(pid, file, startDate, workers, estimateKind, complexMode, estimateTypeId, projectVariantId, parserProfile, buildGantt, clarificationAnswers);
         }
       }
       if (!r.ok) {
@@ -802,6 +811,13 @@ export const workTaxonomy = {
     if (filters.q) params.set("q", filters.q);
     const qs = params.toString();
     return request<WorkTaxonomySubtype[]>(`/work-taxonomy/subtypes${qs ? `?${qs}` : ""}`);
+  },
+  projectHierarchy: (filters: { dictionary_version?: string; include_stages?: boolean } = {}) => {
+    const params = new URLSearchParams();
+    if (filters.dictionary_version) params.set("dictionary_version", filters.dictionary_version);
+    if (filters.include_stages) params.set("include_stages", "true");
+    const qs = params.toString();
+    return request<WorkProjectHierarchy>(`/work-taxonomy/project-hierarchy${qs ? `?${qs}` : ""}`);
   },
 };
 

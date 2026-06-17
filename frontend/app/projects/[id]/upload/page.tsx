@@ -3,13 +3,23 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
-import { estimates, ktpEstimate } from "@/lib/api";
+import { estimates, ktpEstimate, workTaxonomy } from "@/lib/api";
 import ColumnMapper, { type MappingPayload } from "@/components/ColumnMapper";
 import { fmtMoney } from "@/lib/dateUtils";
 import { CLARIFICATION_BY_KIND } from "@/lib/estimateClarificationQuestions";
 import { useJobPoller } from "@/lib/useJobPoller";
 import { trackActivity } from "@/lib/activity";
-import type { EstimateBatch, PreviewResult, PreviewRow, PreviewEdits, PreviewAddedRow, EstimateItemType } from "@/lib/types";
+import type {
+  EstimateBatch,
+  PreviewResult,
+  PreviewRow,
+  PreviewEdits,
+  PreviewAddedRow,
+  EstimateItemType,
+  WorkEstimateType,
+  WorkProjectHierarchy,
+  WorkProjectVariant,
+} from "@/lib/types";
 
 const ITEM_TYPE_LABELS: Record<EstimateItemType, string> = {
   work: "Работы",
@@ -19,19 +29,7 @@ const ITEM_TYPE_LABELS: Record<EstimateItemType, string> = {
   unknown: "Сомнительные",
 };
 
-const KIND_OPTIONS = [
-  { id: 1, title: "Земляные грунтовые работы" },
-  { id: 2, title: "Строительство жилого помещения" },
-  { id: 3, title: "Строительство нежилого помещения" },
-  { id: 4, title: "Реконструкция нежилого помещения" },
-  { id: 5, title: "Отделка жилого помещения" },
-  { id: 6, title: "Отделка нежилого помещения" },
-  { id: 7, title: "Инженерные работы внутренние" },
-  { id: 8, title: "Инженерные работы наружные" },
-  { id: 9, title: "Ландшафтные работы" },
-] as const;
-
-type EstimateKind = (typeof KIND_OPTIONS)[number]["id"];
+type EstimateKind = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
 type ClarificationUploadPayload = {
   version: "v1";
   estimate_kind: EstimateKind;
@@ -39,19 +37,37 @@ type ClarificationUploadPayload = {
   form: Record<string, { section: string; question: string; answers: string[] }>;
 };
 
-const KIND_LABEL = Object.fromEntries(
-  KIND_OPTIONS.map((option) => [option.id, `${option.id}. ${option.title}`]),
-) as Record<EstimateKind, string>;
+type RestoredHierarchySnapshot = {
+  estimate_type_id: string | null;
+  estimate_type_title: string | null;
+  estimate_type_number: string | null;
+  estimate_kind: number | null;
+  project_variant_id: string | null;
+  project_variant_title: string | null;
+  project_variant_number: string | null;
+};
+
+const LEGACY_KIND_LABEL_BY_ID: Record<EstimateKind, string> = {
+  1: "1. Земляные грунтовые работы",
+  2: "2. Строительство жилого помещения",
+  3: "3. Строительство нежилого помещения",
+  4: "4. Реконструкция нежилого помещения",
+  5: "5. Отделка жилого помещения",
+  6: "6. Отделка нежилого помещения",
+  7: "7. Инженерные работы внутренние",
+  8: "8. Инженерные работы наружные",
+  9: "9. Ландшафтные работы",
+};
 
 const LEGACY_KIND_LABEL: Record<string, string> = {
-  country_house: KIND_LABEL[2],
-  apartment: KIND_LABEL[2],
-  non_residential: KIND_LABEL[3],
+  country_house: LEGACY_KIND_LABEL_BY_ID[2],
+  apartment: LEGACY_KIND_LABEL_BY_ID[2],
+  non_residential: LEGACY_KIND_LABEL_BY_ID[3],
 };
 
 function formatEstimateKind(kind: number | string | null | undefined) {
-  if (typeof kind === "number" && kind in KIND_LABEL) {
-    return KIND_LABEL[kind as EstimateKind];
+  if (typeof kind === "number" && kind in LEGACY_KIND_LABEL_BY_ID) {
+    return LEGACY_KIND_LABEL_BY_ID[kind as EstimateKind];
   }
   if (typeof kind === "string" && kind in LEGACY_KIND_LABEL) {
     return LEGACY_KIND_LABEL[kind];
@@ -89,6 +105,12 @@ export default function UploadPage() {
   const [startDate, setStartDate] = useState(new Date().toISOString().split("T")[0]);
   const [workers, setWorkers] = useState(3);
   const [estimateKind, setEstimateKind] = useState<EstimateKind | null>(null);
+  const [hierarchy, setHierarchy] = useState<WorkProjectHierarchy | null>(null);
+  const [hierarchyLoading, setHierarchyLoading] = useState(true);
+  const [hierarchyError, setHierarchyError] = useState<string | null>(null);
+  const [estimateTypeId, setEstimateTypeId] = useState<string | null>(null);
+  const [projectVariantId, setProjectVariantId] = useState<string | null>(null);
+  const [restoredHierarchySnapshot, setRestoredHierarchySnapshot] = useState<RestoredHierarchySnapshot | null>(null);
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string[]>>({});
   const [clarificationsConfirmed, setClarificationsConfirmed] = useState(false);
   const [complexMode, setComplexMode] = useState(false);
@@ -106,10 +128,44 @@ export default function UploadPage() {
   const status = job?.status;
   const result = job?.result;
   const currentClarification = estimateKind ? CLARIFICATION_BY_KIND[estimateKind] : null;
+  const estimateTypes = hierarchy?.estimate_types ?? [];
+  const estimateTypeOptions = useMemo(() => {
+    if (!restoredHierarchySnapshot?.estimate_type_id) return estimateTypes;
+    if (estimateTypes.some((item) => item.id === restoredHierarchySnapshot.estimate_type_id)) return estimateTypes;
+
+    const fallbackVariant: WorkProjectVariant | null = restoredHierarchySnapshot.project_variant_id
+      ? {
+        id: restoredHierarchySnapshot.project_variant_id,
+        number: restoredHierarchySnapshot.project_variant_number || "",
+        title: restoredHierarchySnapshot.project_variant_title || "Сохранённый подтип",
+        stages_count: 0,
+      }
+      : null;
+
+    const fallbackType: WorkEstimateType = {
+      id: restoredHierarchySnapshot.estimate_type_id,
+      number: restoredHierarchySnapshot.estimate_type_number || "",
+      title: restoredHierarchySnapshot.estimate_type_title || "Сохранённый тип",
+      estimate_kind: restoredHierarchySnapshot.estimate_kind || 1,
+      estimate_profile_id: restoredHierarchySnapshot.estimate_type_id,
+      project_variants: fallbackVariant ? [fallbackVariant] : [],
+    };
+
+    return [...estimateTypes, fallbackType];
+  }, [estimateTypes, restoredHierarchySnapshot]);
+  const selectedEstimateType = useMemo(
+    () => estimateTypeOptions.find((item) => item.id === estimateTypeId) ?? null,
+    [estimateTypeId, estimateTypeOptions],
+  );
+  const projectVariants = selectedEstimateType?.project_variants ?? [];
+  const selectedProjectVariant = useMemo(
+    () => projectVariants.find((item) => item.id === projectVariantId) ?? null,
+    [projectVariantId, projectVariants],
+  );
   const answeredCount = Object.values(clarificationAnswers).filter((answers) => answers.length > 0).length;
   const questionsCount = currentClarification?.sections.reduce((sum, section) => sum + section.questions.length, 0) ?? 0;
   const allClarificationsAnswered = questionsCount > 0 && answeredCount === questionsCount;
-  const canUpload = estimateKind !== null && clarificationsConfirmed;
+  const canUpload = estimateKind !== null && !!estimateTypeId && !!projectVariantId && clarificationsConfirmed;
   const wasAllClarificationsAnsweredRef = useRef(false);
   const clarificationStartedRef = useRef(false);
   const trackedJobTerminalStatusRef = useRef<string | null>(null);
@@ -125,9 +181,31 @@ export default function UploadPage() {
   }, [id]);
 
   useEffect(() => {
+    let cancelled = false;
+    setHierarchyLoading(true);
+    setHierarchyError(null);
+    workTaxonomy
+      .projectHierarchy()
+      .then((data) => {
+        if (cancelled) return;
+        setHierarchy(data);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setHierarchyError(error?.message || "Не удалось загрузить справочник типов смет");
+      })
+      .finally(() => {
+        if (!cancelled) setHierarchyLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const wasAllAnswered = wasAllClarificationsAnsweredRef.current;
 
-    if (allClarificationsAnswered && !wasAllAnswered && !clarificationsConfirmed && !status && !fromKtpFlow) {
+    if (selectedProjectVariant && allClarificationsAnswered && !wasAllAnswered && !clarificationsConfirmed && !status && !fromKtpFlow) {
       setClarificationsConfirmed(true);
       trackActivity("CLARIFICATIONS_COMPLETED", {
         projectId: id,
@@ -142,7 +220,7 @@ export default function UploadPage() {
     }
 
     wasAllClarificationsAnsweredRef.current = allClarificationsAnswered;
-  }, [allClarificationsAnswered, answeredCount, clarificationsConfirmed, estimateKind, fromKtpFlow, id, questionsCount, status]);
+  }, [allClarificationsAnswered, answeredCount, clarificationsConfirmed, estimateKind, fromKtpFlow, id, questionsCount, selectedProjectVariant, status]);
 
   useEffect(() => {
     if (!batchIdFromQuery || restoredBatchRef.current === batchIdFromQuery) return;
@@ -154,9 +232,28 @@ export default function UploadPage() {
         if (cancelled) return;
         const batch = batches.find((item) => item.id === batchIdFromQuery);
         if (!batch) return;
+        const restoredType =
+          batch.estimate_type_id
+          || hierarchy?.estimate_types.find((item) => item.estimate_kind === batch.estimate_kind)?.id
+          || null;
+        const restoredKind =
+          hierarchy?.estimate_types.find((item) => item.id === restoredType)?.estimate_kind
+          || batch.estimate_kind;
+        if (!batch.estimate_type_id && !restoredType && !hierarchyLoading) return;
 
         restoredBatchRef.current = batch.id;
-        setEstimateKind(batch.estimate_kind as EstimateKind);
+        setRestoredHierarchySnapshot({
+          estimate_type_id: batch.estimate_type_id ?? restoredType,
+          estimate_type_title: batch.estimate_type_title ?? null,
+          estimate_type_number: batch.estimate_type_number ?? null,
+          estimate_kind: restoredKind ?? null,
+          project_variant_id: batch.project_variant_id ?? null,
+          project_variant_title: batch.project_variant_title ?? null,
+          project_variant_number: batch.project_variant_number ?? null,
+        });
+        setEstimateTypeId(restoredType);
+        setProjectVariantId(batch.project_variant_id ?? null);
+        setEstimateKind(restoredKind as EstimateKind);
         setStartDate(batch.start_date || new Date().toISOString().split("T")[0]);
         setWorkers(batch.workers_count || 3);
         setClarificationAnswers(restoreClarificationAnswers(batch));
@@ -173,7 +270,7 @@ export default function UploadPage() {
     return () => {
       cancelled = true;
     };
-  }, [batchIdFromQuery, fromKtpFlow, id]);
+  }, [batchIdFromQuery, fromKtpFlow, hierarchy, hierarchyLoading, id]);
 
   useEffect(() => {
     if (!job || trackedJobTerminalStatusRef.current === `${job.id}:${job.status}`) return;
@@ -225,14 +322,16 @@ export default function UploadPage() {
           file_name: nextFile.name,
           file_size: nextFile.size,
           estimate_kind: estimateKind,
+          estimate_type_id: estimateTypeId,
+          project_variant_id: projectVariantId,
           complex_mode: complexMode,
         },
       });
     }
-  }, [canUpload, complexMode, estimateKind, id]);
+  }, [canUpload, complexMode, estimateKind, estimateTypeId, id, projectVariantId]);
 
   async function handleUpload() {
-    if (!file || !estimateKind) return;
+    if (!file || !estimateKind || !estimateTypeId || !projectVariantId) return;
 
     setUploading(true);
     autoStartedKtpBatchRef.current = null;
@@ -246,6 +345,8 @@ export default function UploadPage() {
         start_date: startDate,
         workers,
         estimate_kind: estimateKind,
+        estimate_type_id: estimateTypeId,
+        project_variant_id: projectVariantId,
         complex_mode: complexMode,
         answered_count: answeredCount,
         questions_count: questionsCount,
@@ -254,6 +355,7 @@ export default function UploadPage() {
     try {
       const res = await estimates.preview(
         id, file, startDate, workers, estimateKind, complexMode,
+        estimateTypeId, projectVariantId,
         "auto", buildGantt, buildClarificationPayload(),
       );
       setPreview(res);
@@ -372,27 +474,44 @@ export default function UploadPage() {
     };
   }
 
-  function resetClarifications(nextKind: EstimateKind | null) {
-    setEstimateKind(nextKind);
+  function resetClarificationState() {
     setClarificationAnswers({});
     setClarificationsConfirmed(false);
     setFile(null);
     setJobId(null);
+    setPreview(null);
     setMappingPayload(null);
     autoStartedKtpBatchRef.current = null;
     clarificationStartedRef.current = false;
     wasAllClarificationsAnsweredRef.current = false;
-    if (nextKind) {
+  }
+
+  function selectEstimateType(nextTypeId: string | null) {
+    const nextType = estimateTypeOptions.find((item) => item.id === nextTypeId) ?? null;
+    if (!nextType || nextType.id !== restoredHierarchySnapshot?.estimate_type_id) {
+      setRestoredHierarchySnapshot(null);
+    }
+    setEstimateTypeId(nextType?.id ?? null);
+    setProjectVariantId(null);
+    setEstimateKind(nextType ? (nextType.estimate_kind as EstimateKind) : null);
+    resetClarificationState();
+    if (nextType) {
       trackActivity("ESTIMATE_KIND_SELECTED", {
         projectId: id,
         entityType: "project",
         entityId: id,
         metadata: {
-          estimate_kind: nextKind,
-          kind_title: KIND_LABEL[nextKind],
+          estimate_kind: nextType.estimate_kind,
+          estimate_type_id: nextType.id,
+          kind_title: `${nextType.number}. ${nextType.title}`,
         },
       });
     }
+  }
+
+  function selectProjectVariant(nextVariantId: string | null) {
+    setProjectVariantId(nextVariantId);
+    resetClarificationState();
   }
 
   function toggleClarification(questionId: string, option: string) {
@@ -471,7 +590,7 @@ export default function UploadPage() {
         <div>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>Загрузка сметы</h2>
           <div style={{ fontSize: 12, color: "var(--muted)", maxWidth: 620 }}>
-            Сначала выберите тип объекта, затем заполните уточнения. Форма загрузки файла появится после этого шага.
+            Сначала выберите тип и подтип объекта, затем заполните уточнения. Форма загрузки файла появится после этого шага.
           </div>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -532,6 +651,11 @@ export default function UploadPage() {
       )}
 
       <div style={{ display: "grid", gap: 18, marginBottom: 20 }}>
+        {hierarchyError && (
+          <div style={{ padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(239,68,68,.22)", background: "rgba(239,68,68,.06)", color: "var(--red)", fontSize: 12 }}>
+            {hierarchyError}
+          </div>
+        )}
         <div>
           <label
             htmlFor="estimate-kind"
@@ -546,8 +670,9 @@ export default function UploadPage() {
           </label>
           <select
             id="estimate-kind"
-            value={estimateKind ?? ""}
-            onChange={(e) => resetClarifications(e.target.value ? Number(e.target.value) as EstimateKind : null)}
+            value={estimateTypeId ?? ""}
+            disabled={hierarchyLoading || !!hierarchyError}
+            onChange={(e) => selectEstimateType(e.target.value || null)}
             style={{
               width: "100%",
               padding: "11px 12px",
@@ -558,10 +683,46 @@ export default function UploadPage() {
               outline: "none",
             }}
           >
-            <option value="">Выберите тип объекта</option>
-            {KIND_OPTIONS.map((option) => (
+            <option value="">{hierarchyLoading ? "Загружаем типы..." : "Выберите тип объекта"}</option>
+            {estimateTypeOptions.map((option) => (
               <option key={option.id} value={option.id}>
-                {KIND_LABEL[option.id]}
+                {option.number}. {option.title}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label
+            htmlFor="project-variant"
+            style={{
+              display: "block",
+              marginBottom: 8,
+              fontSize: 14,
+              fontWeight: 600,
+            }}
+          >
+            2. Выберите подтип объекта
+          </label>
+          <select
+            id="project-variant"
+            value={projectVariantId ?? ""}
+            disabled={!selectedEstimateType || !!hierarchyError}
+            onChange={(e) => selectProjectVariant(e.target.value || null)}
+            style={{
+              width: "100%",
+              padding: "11px 12px",
+              border: "1px solid var(--border2)",
+              borderRadius: 8,
+              background: "var(--surface)",
+              fontSize: 14,
+              outline: "none",
+            }}
+          >
+            <option value="">{selectedEstimateType ? "Выберите подтип объекта" : "Сначала выберите тип объекта"}</option>
+            {projectVariants.map((variant) => (
+              <option key={variant.id} value={variant.id}>
+                {variant.number}. {variant.title}
               </option>
             ))}
           </select>
@@ -569,7 +730,7 @@ export default function UploadPage() {
 
         <div>
           <div style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
-            2. Уточните исходные данные
+            3. Уточните исходные данные
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
             Для каждого вопроса выберите один или несколько чекбоксов. После подтверждения появится загрузка файла.
@@ -577,7 +738,7 @@ export default function UploadPage() {
         </div>
       </div>
 
-      {currentClarification && !clarificationsConfirmed && !status && (
+      {currentClarification && selectedProjectVariant && !clarificationsConfirmed && !status && (
         <div style={{ marginBottom: 20, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
           <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
             <div>
@@ -652,7 +813,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {currentClarification && clarificationsConfirmed && !status && (
+      {currentClarification && selectedProjectVariant && clarificationsConfirmed && !status && (
         <div style={{ marginBottom: 20, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,.25)", background: "rgba(34,197,94,.06)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
           <div style={{ fontSize: 12, color: "#166534" }}>
             Уточнения заполнены: {answeredCount} из {questionsCount}. Теперь можно загрузить смету.
@@ -800,7 +961,7 @@ export default function UploadPage() {
         />
       )}
 
-      {mappingPayload && estimateKind && !status && (
+      {mappingPayload && estimateKind && estimateTypeId && projectVariantId && !status && (
         <div style={{ marginTop: 18, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "0 16px" }}>
           <ColumnMapper
             payload={mappingPayload}
@@ -808,6 +969,8 @@ export default function UploadPage() {
             startDate={startDate}
             workers={workers}
             estimateKind={estimateKind}
+            estimateTypeId={estimateTypeId}
+            projectVariantId={projectVariantId}
             complexMode={complexMode}
             clarificationAnswers={buildClarificationPayload() ?? {}}
             onConfirm={(nextJobId) => {
@@ -838,6 +1001,7 @@ export default function UploadPage() {
             {[
               ["Блок", result.estimate_batch_name],
               ["Тип", formatEstimateKind(result.estimate_kind ?? estimateKind)],
+              ["Подтип", result.project_variant_title ?? selectedProjectVariant?.title ?? "—"],
               ["Позиций сметы", result.estimates_count],
               ["Сумма", result.total_price ? `${fmtMoney(result.total_price)} ₽` : "—"],
             ].map(([label, value]) => (

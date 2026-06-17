@@ -1,7 +1,7 @@
-"""Reset prototype work taxonomy to construction_work_dictionary_v5.
+"""Reset prototype work taxonomy to construction_work_dictionary_v6_3_3_draft.
 
 This migration intentionally drops v4/v3 taxonomy compatibility. The prototype
-uses v5 as the only canonical taxonomy and does not support downgrade.
+uses the canonical JSON taxonomy and does not support downgrade.
 """
 from __future__ import annotations
 
@@ -22,8 +22,8 @@ depends_on = None
 
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "app" / "data"
-_V5_FILE = _DATA_DIR / "construction_work_dictionary_v5.json"
-_V5_SOURCE = "construction_work_dictionary_v5"
+_V5_FILE = _DATA_DIR / "construction_work_dictionary_v6_3_3_draft.json"
+_V5_SOURCE = "construction_work_dictionary_v6_3_3_draft"
 _UNKNOWN_CODE = "unknown/needs_review"
 
 _RAW_TAXONOMY_KEYS = (
@@ -93,7 +93,7 @@ def _subtype_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     meta = payload.get("meta") or {}
     schema_version = str(meta.get("schema_version") or "")
     dictionary_name = str(meta.get("dictionary_name") or "")
-    source_version = f"{_V5_SOURCE}@{schema_version}"
+    source_version = str(meta.get("dictionary_version") or f"{_V5_SOURCE}@{schema_version}")
     scoring = payload.get("scoring") or {}
     rows: list[dict[str, Any]] = []
     for macro_id, section in enumerate(payload.get("sections") or [], start=1):
@@ -138,6 +138,7 @@ def _subtype_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
                                 "strong_terms",
                                 "weak_terms",
                                 "action_object_pairs",
+                                "negative_terms",
                             )
                         },
                     },
@@ -261,6 +262,15 @@ def _seed_subtypes(payload: dict[str, Any]) -> None:
 
 def upgrade() -> None:
     payload = _dictionary(_V5_FILE)
+
+    if _table_exists("work_subtypes"):
+        op.alter_column(
+            "work_subtypes",
+            "dictionary_source",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=64),
+            existing_nullable=True,
+        )
 
     if _table_exists("ktp_session_subtypes"):
         op.execute(sa.text("DELETE FROM ktp_session_subtypes"))

@@ -77,6 +77,7 @@ async def start_upload_job(
     estimate_kind:    int,
     complex_mode:     bool,
     clarification_answers: dict | None,
+    hierarchy_selection: dict | None,
     db:               AsyncSession,
 ) -> Job:
     """
@@ -119,6 +120,7 @@ async def start_upload_job(
         estimate_kind = estimate_kind,
         complex_mode  = complex_mode,
         clarification_answers = clarification_answers,
+        hierarchy_selection = hierarchy_selection,
         db         = db,
     )
 
@@ -138,6 +140,7 @@ async def start_upload_job_with_mapping(
     estimate_kind: int,
     complex_mode: bool,
     clarification_answers: dict | None,
+    hierarchy_selection: dict | None,
     db:         AsyncSession,
 ) -> Job:
     """
@@ -157,6 +160,7 @@ async def start_upload_job_with_mapping(
         estimate_kind = estimate_kind,
         complex_mode  = complex_mode,
         clarification_answers = clarification_answers,
+        hierarchy_selection = hierarchy_selection,
         db          = db,
         col_mapping = col_mapping,
         sheet       = sheet,
@@ -599,6 +603,7 @@ async def preview_upload_job(
     complex_mode:     bool,
     build_gantt:      bool,
     clarification_answers: dict | None,
+    hierarchy_selection: dict | None,
     db:               AsyncSession,
 ) -> dict:
     """Parse the upload to a tmp file and return a typed breakdown WITHOUT any DB
@@ -668,6 +673,7 @@ async def preview_upload_job(
         "workers":        workers,
         "complex_mode":   complex_mode,
         "clarification_answers": clarification_answers,
+        "hierarchy_selection": hierarchy_selection,
         "type_breakdown": preview["type_breakdown"],
         "strategy":       meta.get("strategy"),
         "detected_format": meta.get("format"),
@@ -681,6 +687,7 @@ async def preview_upload_job(
         "detected_format": meta.get("format"),
         "strategy":       meta.get("strategy"),
         "confidence":     meta.get("confidence"),
+        "hierarchy_selection": hierarchy_selection,
         "groups":         grouped["groups"],
         "rows":           flat_rows,
         "truncated":      grouped["truncated"],
@@ -713,6 +720,7 @@ async def confirm_upload_job(
         estimate_kind = int(preview["estimate_kind"]),
         complex_mode  = bool(preview.get("complex_mode")),
         clarification_answers = preview.get("clarification_answers"),
+        hierarchy_selection = preview.get("hierarchy_selection"),
         db          = db,
         parser_profile = preview.get("parser_profile", "auto"),
         build_gantt = effective_gantt,
@@ -742,6 +750,7 @@ async def _create_and_run_job(
     estimate_kind: int,
     complex_mode: bool,
     clarification_answers: dict | None,
+    hierarchy_selection: dict | None,
     db:          AsyncSession,
     col_mapping: dict[int, str] | None = None,
     sheet:       str | None = None,
@@ -763,6 +772,7 @@ async def _create_and_run_job(
             "estimate_kind": estimate_kind,
             "complex_mode": complex_mode,
             "clarification_answers": clarification_answers,
+            "hierarchy_selection": hierarchy_selection,
             "col_mapping": col_mapping,   # None = авто
             "sheet":       sheet,
             "parser_profile": parser_profile,
@@ -806,6 +816,11 @@ async def _process_upload(job_id: str) -> None:
             estimate_kind = int(job.input["estimate_kind"])
             complex_mode = bool(job.input.get("complex_mode"))
             clarification_answers = job.input.get("clarification_answers")
+            hierarchy_selection = (
+                job.input.get("hierarchy_selection")
+                if isinstance(job.input.get("hierarchy_selection"), dict)
+                else {}
+            )
             col_mapping = job.input.get("col_mapping")   # None → авто
             sheet       = job.input.get("sheet")
             parser_profile = job.input.get("parser_profile", "auto")
@@ -843,6 +858,13 @@ async def _process_upload(job_id: str) -> None:
                 workers_count=workers,
                 hours_per_day=DEFAULT_HOURS_PER_DAY,
                 source_filename=job.input.get("filename"),
+                estimate_type_id=hierarchy_selection.get("estimate_type_id"),
+                estimate_type_title=hierarchy_selection.get("estimate_type_title"),
+                estimate_type_number=hierarchy_selection.get("estimate_type_number"),
+                project_variant_id=hierarchy_selection.get("project_variant_id"),
+                project_variant_title=hierarchy_selection.get("project_variant_title"),
+                project_variant_number=hierarchy_selection.get("project_variant_number"),
+                taxonomy_dictionary_version=hierarchy_selection.get("taxonomy_dictionary_version"),
                 clarification_answers=clarification_answers,
                 parser_profile=parser_profile,
                 import_meta={
@@ -933,6 +955,11 @@ async def _process_upload(job_id: str) -> None:
                 "estimate_batch_id": batch.id,
                 "estimate_batch_name": batch.name,
                 "estimate_kind": estimate_kind,
+                "estimate_type_id": hierarchy_selection.get("estimate_type_id"),
+                "estimate_type_title": hierarchy_selection.get("estimate_type_title"),
+                "project_variant_id": hierarchy_selection.get("project_variant_id"),
+                "project_variant_title": hierarchy_selection.get("project_variant_title"),
+                "taxonomy_dictionary_version": hierarchy_selection.get("taxonomy_dictionary_version"),
                 "complex_mode": complex_mode,
                 "parser_profile": parser_profile,
                 "build_gantt": build_gantt,

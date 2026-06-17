@@ -24,7 +24,7 @@ class WorkSubtype(Base):
     section_code: Mapped[str | None] = mapped_column(Text)
     section_name: Mapped[str | None] = mapped_column(Text)
     section_scope: Mapped[str | None] = mapped_column(Text)
-    dictionary_source: Mapped[str | None] = mapped_column(String(32))
+    dictionary_source: Mapped[str | None] = mapped_column(String(64))
     dictionary_name: Mapped[str | None] = mapped_column(Text)
     dictionary_schema_version: Mapped[str | None] = mapped_column(String(32))
     dictionary_source_version: Mapped[str | None] = mapped_column(String(64))

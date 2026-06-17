@@ -13,15 +13,19 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.services.work_taxonomy_service import (  # noqa: E402
     PrecedenceEdge,
     SubtypeDef,
+    _score_subtype,
     build_precedence_dependencies,
     build_work_section_palette,
     classify_row_role,
     classify_work,
     classify_subtype,
     dictionary_version,
+    get_project_hierarchy,
     get_work_taxonomy_sections,
     get_work_taxonomy_subtypes,
+    legacy_estimate_kind_for_type,
     should_inherit_parent_context,
+    validate_project_hierarchy_selection,
 )
 
 _DATA = Path(__file__).resolve().parents[1] / "app" / "data" / "work_subtypes.csv"
@@ -29,7 +33,7 @@ _DICTIONARY_JSON = (
     Path(__file__).resolve().parents[1]
     / "app"
     / "data"
-    / "construction_work_dictionary_v5.json"
+    / "construction_work_dictionary_v6_3_3_draft.json"
 )
 
 
@@ -49,13 +53,19 @@ def _load_taxonomy_from_csv() -> list[SubtypeDef]:
 TAXONOMY = _load_taxonomy_from_csv()
 
 
-def _load_json_v5_examples() -> list[tuple[str, dict]]:
+def _load_json_examples() -> list[tuple[str, dict]]:
     with open(_DICTIONARY_JSON, encoding="utf-8") as fh:
         payload = json.load(fh)
+    valid_codes = {
+        f"{section['id']}/{subtype['id']}"
+        for section in payload["sections"]
+        for subtype in section.get("subtypes") or []
+    }
     return [
         (row.get("row") or row.get("text"), row["expected"])
         for row in payload["example_rows"]
         if row.get("row") or row.get("text")
+        if f"{row['expected']['section_id']}/{row['expected']['subtype_id']}" in valid_codes
     ]
 
 
@@ -120,7 +130,7 @@ def test_classify_subtype_prefers_more_specific_keyword():
         ),
     ],
 )
-def test_classify_work_json_v5_examples(name, expected_section, expected_subtype):
+def test_classify_work_json_v6_3_3_examples(name, expected_section, expected_subtype):
     result = classify_work(name)
     assert result.section_code == expected_section
     assert result.subtype_code == expected_subtype
@@ -133,8 +143,8 @@ def test_classify_work_related_sections_from_dictionary_rules():
     assert "foundation" in result.related_sections
 
 
-@pytest.mark.parametrize("name,expected", _load_json_v5_examples())
-def test_classify_work_json_v5_dictionary_examples(name, expected):
+@pytest.mark.parametrize("name,expected", _load_json_examples())
+def test_classify_work_json_v6_3_3_dictionary_examples(name, expected):
     result = classify_work(name)
     expected_subtype = f"{expected['section_id']}/{expected['subtype_id']}"
     assert result.section_code == expected["section_id"]
@@ -155,7 +165,7 @@ def test_classify_work_json_v5_dictionary_examples(name, expected):
         ("Вязка арматуры монолитных колонн и ригелей", "structural_frame"),
     ],
 )
-def test_classify_work_json_v5_conflict_cases(name, expected_section):
+def test_classify_work_json_v6_3_3_conflict_cases(name, expected_section):
     result = classify_work(name)
     assert result.section_code == expected_section
 
@@ -170,17 +180,73 @@ def test_classify_work_json_v5_conflict_cases(name, expected_section):
         ("Укладка крупноформатных плит", "landscape/large_format_stone_paving"),
         ("Облицовка крышки подпорной стенки", "landscape/natural_stone_cladding"),
         ("Формирование корыта разработка грунта", "earthworks/forming_trough"),
-        ("Перемещение вынутого грунта в пределах участка", "earthworks/onsite_soil_movement"),
+        ("Перемещение вынутого грунта в пределах участка", "earthworks/terrain_reshaping"),
     ],
 )
-def test_classify_work_json_v5_landscape_smoke_cases(name, expected_subtype):
+def test_classify_work_json_v6_3_3_landscape_smoke_cases(name, expected_subtype):
     result = classify_work(name)
     assert result.subtype_code == expected_subtype
     assert not result.needs_review
 
 
+def test_score_subtype_negative_term_reduces_score_and_is_audited():
+    weights = {"subtype_strong_term": 5, "negative_term": -6}
+    haystack = "формирование корыта под брусчатку"
+    hay_tokens = haystack.split()
+    subtype = {
+        "id": "forming_trough",
+        "strong_terms": ["формирование корыта"],
+        "negative_terms": ["брусчатка"],
+    }
+
+    score, matched = _score_subtype(subtype, haystack, hay_tokens, weights)
+    score_without_negative, matched_without_negative = _score_subtype(
+        {**subtype, "negative_terms": []},
+        haystack,
+        hay_tokens,
+        weights,
+    )
+
+    assert matched["subtype_strong_terms"] == ["формирование корыта"]
+    assert matched["subtype_negative_terms"] == ["брусчатка"]
+    assert score == -1
+    assert score < score_without_negative
+    assert "subtype_negative_terms" not in matched_without_negative
+
+
+def test_score_subtype_negative_term_does_not_affect_other_subtype():
+    weights = {"subtype_strong_term": 5, "negative_term": -6}
+    haystack = "формирование корыта под брусчатку"
+    hay_tokens = haystack.split()
+
+    penalized_score, penalized_matched = _score_subtype(
+        {
+            "id": "forming_trough",
+            "strong_terms": ["формирование корыта"],
+            "negative_terms": ["брусчатка"],
+        },
+        haystack,
+        hay_tokens,
+        weights,
+    )
+    other_score, other_matched = _score_subtype(
+        {
+            "id": "paving",
+            "strong_terms": ["брусчатка"],
+            "negative_terms": [],
+        },
+        haystack,
+        hay_tokens,
+        weights,
+    )
+
+    assert penalized_matched["subtype_negative_terms"] == ["брусчатка"]
+    assert "subtype_negative_terms" not in other_matched
+    assert penalized_score < other_score
+
+
 @pytest.mark.parametrize("name", ["Транспортные расходы", "Накладные расходы"])
-def test_classify_work_json_v5_overhead_rows_do_not_create_work_subtype(name):
+def test_classify_work_json_v6_3_3_overhead_rows_do_not_create_work_subtype(name):
     result = classify_work(name)
     assert classify_row_role(name) == "overhead"
     assert result.subtype_code == "unknown/needs_review"
@@ -188,14 +254,14 @@ def test_classify_work_json_v5_overhead_rows_do_not_create_work_subtype(name):
     assert not result.needs_review
 
 
-def test_classify_work_json_v5_row_role_policy():
+def test_classify_work_json_v6_3_3_row_role_policy():
     assert classify_row_role("БЛАГОУСТРОЙСТВО", allow_absent_header=True) == "header"
     assert should_inherit_parent_context("material", "Профилированная мембрана") is True
     assert should_inherit_parent_context("overhead", "Транспортные расходы") is False
 
 
 @pytest.mark.asyncio
-async def test_work_taxonomy_helpers_fallback_to_json_v5():
+async def test_work_taxonomy_helpers_fallback_to_json_v6_3_3():
     db = MagicMock()
     db.scalars = AsyncMock(return_value=[])
 
@@ -203,14 +269,44 @@ async def test_work_taxonomy_helpers_fallback_to_json_v5():
     subtypes = await get_work_taxonomy_subtypes(db)
 
     assert len(sections) == 19
-    assert len(subtypes) == 123
-    assert dictionary_version() == "construction_work_dictionary_v5@1.4.0"
+    assert len(subtypes) == 207
+    assert dictionary_version() == "construction_work_dictionary_v6_3_3_draft@1.6.1"
     taxonomy_codes = [s["taxonomy_code"] for s in subtypes]
     assert len(set(taxonomy_codes)) == len(subtypes)
     assert all(code and "." in code for code in taxonomy_codes)
     assert sections[0]["examples"]
     electrical = next(s for s in subtypes if s["work_subtype_code"] == "mep_internal/electrical")
     assert electrical["display_code"] == electrical["legacy_csv_codes"][0] == "7.4"
+
+
+def test_project_hierarchy_exposes_types_and_variants():
+    hierarchy = get_project_hierarchy()
+    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_3_3_draft@1.6.1"
+    assert len(hierarchy["estimate_types"]) == 9
+    assert sum(len(t["project_variants"]) for t in hierarchy["estimate_types"]) == 65
+    residential = next(t for t in hierarchy["estimate_types"] if t["id"] == "residential_construction")
+    assert residential["estimate_kind"] == 2
+    assert any(
+        variant["number"] == "2.6"
+        and variant["title"] == "Дома из пено- или газоблоков"
+        for variant in residential["project_variants"]
+    )
+
+
+def test_project_hierarchy_selection_validates_parent_variant_and_legacy_kind():
+    selection = validate_project_hierarchy_selection(
+        "residential_construction",
+        "residential_construction_doma_iz_peno_ili_gazoblokov",
+    )
+    assert selection["estimate_kind"] == 2
+    assert selection["project_variant_number"] == "2.6"
+    assert legacy_estimate_kind_for_type("landscape_hardscape") == 9
+
+    with pytest.raises(ValueError):
+        validate_project_hierarchy_selection(
+            "site_earthworks",
+            "residential_construction_doma_iz_peno_ili_gazoblokov",
+        )
 
 
 @pytest.mark.asyncio

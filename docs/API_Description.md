@@ -37,8 +37,8 @@ Authorization: Bearer <access_token>
 
 | Токен | Срок действия |
 |---|---|
-| `access_token` | 30 минут |
-| `refresh_token` | 7 дней |
+| `access_token` | 24 часа |
+| `refresh_token` | 30 дней |
 
 По истечении access-токена используйте `POST /auth/refresh`. По истечении refresh-токена пользователь должен пройти повторную аутентификацию.
 

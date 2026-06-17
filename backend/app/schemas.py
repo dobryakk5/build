@@ -232,6 +232,13 @@ class EstimateBatchResponse(BaseModel):
     workers_count: int | None = None
     hours_per_day: float = 8
     source_filename: str | None = None
+    estimate_type_id: str | None = None
+    estimate_type_title: str | None = None
+    estimate_type_number: str | None = None
+    project_variant_id: str | None = None
+    project_variant_title: str | None = None
+    project_variant_number: str | None = None
+    taxonomy_dictionary_version: str | None = None
     clarification_answers: dict | None = None
     estimates_count: int = 0
     gantt_tasks_count: int = 0

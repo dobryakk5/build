@@ -1,7 +1,7 @@
-"""Work taxonomy classification and precedence helpers.
+"""Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v5.json`` is the canonical work classifier. The
-CSV helper remains only for legacy callers; import/KTP use v5 JSON fields.
+``construction_work_dictionary_v6_3_3_draft.json`` is the canonical work
+classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
 
@@ -21,12 +21,23 @@ from app.models import WorkPrecedence, WorkSubtype
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v5.json"
+    / "construction_work_dictionary_v6_3_3_draft.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v5"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_3_3_draft"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
+LEGACY_ESTIMATE_KIND_BY_TYPE_ID: dict[str, int] = {
+    "site_earthworks": 1,
+    "residential_construction": 2,
+    "commercial_construction": 3,
+    "nonresidential_reconstruction": 4,
+    "residential_renovation": 5,
+    "commercial_renovation": 6,
+    "internal_mep": 7,
+    "external_mep": 8,
+    "landscape_hardscape": 9,
+}
 
 
 @dataclass(frozen=True)
@@ -168,8 +179,124 @@ def _load_dictionary() -> dict[str, Any]:
 def dictionary_version(payload: dict[str, Any] | None = None) -> str:
     payload = payload or _load_dictionary()
     meta = payload.get("meta") or {}
+    explicit = payload.get("dictionary_version") or meta.get("dictionary_version")
+    if explicit:
+        return str(explicit)
     schema_version = meta.get("schema_version") or "unknown"
     return f"{DICTIONARY_SOURCE}@{schema_version}"
+
+
+def _project_hierarchy(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or _load_dictionary()
+    hierarchy = payload.get("project_hierarchy")
+    return hierarchy if isinstance(hierarchy, dict) else {}
+
+
+def _hierarchy_estimate_types(payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    hierarchy = _project_hierarchy(payload)
+    types = hierarchy.get("estimate_types")
+    return types if isinstance(types, list) else []
+
+
+def assert_project_hierarchy_compatible(payload: dict[str, Any] | None = None) -> None:
+    """Fail fast if runtime hierarchy cannot support legacy estimate_kind mapping."""
+    type_ids = {str(item.get("id") or "") for item in _hierarchy_estimate_types(payload)}
+    missing = sorted(set(LEGACY_ESTIMATE_KIND_BY_TYPE_ID) - type_ids)
+    if missing:
+        raise RuntimeError(
+            "Runtime work dictionary is missing estimate_type ids: "
+            + ", ".join(missing)
+        )
+
+
+def legacy_estimate_kind_for_type(estimate_type_id: str) -> int:
+    try:
+        return LEGACY_ESTIMATE_KIND_BY_TYPE_ID[estimate_type_id]
+    except KeyError:
+        raise ValueError(f"Unknown estimate_type_id: {estimate_type_id}") from None
+
+
+def _public_work_stage(stage: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(stage.get("id") or ""),
+        "number": str(stage.get("number") or ""),
+        "title": str(stage.get("title") or ""),
+        "stage_role": stage.get("stage_role"),
+        "autofill_enabled": bool(stage.get("autofill_enabled", False)),
+        "primary_work_type": stage.get("primary_work_type") or None,
+        "related_work_types": stage.get("related_work_types") or [],
+    }
+
+
+def _public_project_variant(variant: dict[str, Any], include_stages: bool) -> dict[str, Any]:
+    stages = variant.get("stages") if isinstance(variant.get("stages"), list) else []
+    item = {
+        "id": str(variant.get("id") or ""),
+        "number": str(variant.get("number") or ""),
+        "title": str(variant.get("title") or ""),
+        "stages_count": len(stages),
+    }
+    if include_stages:
+        item["stages"] = [_public_work_stage(stage) for stage in stages]
+    return item
+
+
+def get_project_hierarchy(
+    *,
+    dictionary_version_filter: str | None = None,
+    include_stages: bool = False,
+) -> dict[str, Any]:
+    payload = _load_dictionary()
+    current_version = dictionary_version(payload)
+    if dictionary_version_filter and dictionary_version_filter != current_version:
+        raise ValueError(f"Unsupported dictionary_version: {dictionary_version_filter}")
+    assert_project_hierarchy_compatible(payload)
+    return {
+        "dictionary_version": current_version,
+        "estimate_types": [
+            {
+                "id": str(item.get("id") or ""),
+                "number": str(item.get("number") or ""),
+                "title": str(item.get("title") or ""),
+                "estimate_kind": legacy_estimate_kind_for_type(str(item.get("id") or "")),
+                "estimate_profile_id": str(item.get("estimate_profile_id") or item.get("id") or ""),
+                "project_variants": [
+                    _public_project_variant(variant, include_stages)
+                    for variant in (item.get("project_variants") or [])
+                    if isinstance(variant, dict)
+                ],
+            }
+            for item in _hierarchy_estimate_types(payload)
+        ],
+    }
+
+
+def validate_project_hierarchy_selection(
+    estimate_type_id: str | None,
+    project_variant_id: str | None,
+) -> dict[str, Any]:
+    if not estimate_type_id or not project_variant_id:
+        raise ValueError("estimate_type_id and project_variant_id are required")
+    payload = _load_dictionary()
+    assert_project_hierarchy_compatible(payload)
+    for estimate_type in _hierarchy_estimate_types(payload):
+        if str(estimate_type.get("id") or "") != estimate_type_id:
+            continue
+        for variant in estimate_type.get("project_variants") or []:
+            if str(variant.get("id") or "") != project_variant_id:
+                continue
+            return {
+                "estimate_kind": legacy_estimate_kind_for_type(estimate_type_id),
+                "estimate_type_id": estimate_type_id,
+                "estimate_type_title": estimate_type.get("title"),
+                "estimate_type_number": estimate_type.get("number"),
+                "project_variant_id": project_variant_id,
+                "project_variant_title": variant.get("title"),
+                "project_variant_number": variant.get("number"),
+                "taxonomy_dictionary_version": dictionary_version(payload),
+            }
+        raise ValueError("project_variant_id does not belong to estimate_type_id")
+    raise ValueError(f"Unknown estimate_type_id: {estimate_type_id}")
 
 
 async def load_taxonomy(db: AsyncSession) -> list[SubtypeDef]:
@@ -236,6 +363,7 @@ def _term_summary(terms_json: dict[str, Any]) -> dict[str, int]:
         "strong_terms": len(subtype.get("strong_terms") or []),
         "weak_terms": len(subtype.get("weak_terms") or []),
         "action_object_pairs": len(subtype.get("action_object_pairs") or []),
+        "negative_terms": len(subtype.get("negative_terms") or []),
     }
 
 
@@ -317,7 +445,12 @@ def _dictionary_subtypes_from_json() -> list[dict[str, Any]]:
                 },
                 "subtype": {
                     key: subtype.get(key) or []
-                    for key in ("strong_terms", "weak_terms", "action_object_pairs")
+                    for key in (
+                        "strong_terms",
+                        "weak_terms",
+                        "action_object_pairs",
+                        "negative_terms",
+                    )
                 },
             }
             rows.append(
@@ -471,6 +604,7 @@ async def build_work_section_palette(
 _PUNCT_RE = re.compile(r"[^\w\s./²³-]+", re.UNICODE)
 _HYPHEN_RE = re.compile(r"[-–—]+")
 _SPACES_RE = re.compile(r"\s+")
+_NEGATION_TOKENS = {"без", "не"}
 
 
 def normalize_text(value: Any) -> str:
@@ -538,6 +672,29 @@ def _stem(token: str) -> str:
     return token
 
 
+def _token_skeleton(token: str) -> str:
+    return re.sub(r"[аеёиоуыэюя]", "", token)
+
+
+def _token_matches(term_token: str, hay_token: str, hay_stem: str) -> bool:
+    token_stem = _stem(term_token)
+    if (
+        hay_token == term_token
+        or hay_stem == token_stem
+        or (len(token_stem) >= 5 and hay_token.startswith(token_stem))
+        or (len(token_stem) >= 5 and len(hay_stem) >= 5 and token_stem.startswith(hay_stem))
+        or (token_stem.startswith("разраб") and hay_stem.startswith("разраб"))
+    ):
+        return True
+    if len(token_stem) >= 4 and len(hay_stem) >= 4:
+        return _token_skeleton(token_stem) == _token_skeleton(hay_stem)
+    return False
+
+
+def _matched_token_is_negated(index: int, hay_tokens: list[str]) -> bool:
+    return index > 0 and hay_tokens[index - 1] in _NEGATION_TOKENS
+
+
 def _term_matches(term: str, haystack: str, hay_tokens: list[str] | None = None) -> bool:
     norm_term = normalize_text(term)
     if not norm_term:
@@ -549,20 +706,25 @@ def _term_matches(term: str, haystack: str, hay_tokens: list[str] | None = None)
     if len(term_tokens) > 1:
         pattern = rf"(?<!\w){re.escape(norm_term)}(?!\w)"
         if re.search(pattern, haystack):
+            if any(
+                re.search(rf"(?<!\w){negation}\s+{re.escape(norm_term)}(?!\w)", haystack)
+                for negation in _NEGATION_TOKENS
+            ):
+                return False
             return True
     elif norm_term in hay_tokens:
-        return True
+        return any(
+            token == norm_term and not _matched_token_is_negated(index, hay_tokens)
+            for index, token in enumerate(hay_tokens)
+        )
     hay_stems = [_stem(t) for t in hay_tokens]
     for token in term_tokens:
-        token_stem = _stem(token)
-        if not any(
-            ht == token
-            or hs == token_stem
-            or (len(token_stem) >= 5 and ht.startswith(token_stem))
-            or (len(token_stem) >= 5 and len(hs) >= 5 and token_stem.startswith(hs))
-            or (token_stem.startswith("разраб") and hs.startswith("разраб"))
-            for ht, hs in zip(hay_tokens, hay_stems, strict=False)
-        ):
+        token_matches = [
+            index
+            for index, (ht, hs) in enumerate(zip(hay_tokens, hay_stems, strict=False))
+            if _token_matches(token, ht, hs) and not _matched_token_is_negated(index, hay_tokens)
+        ]
+        if not token_matches:
             return False
     return True
 
@@ -828,6 +990,12 @@ def _apply_conflict_rules(
             terms = _match_terms(prefer.get("when_any") or [], haystack, hay_tokens)
             if not terms:
                 continue
+            if (
+                section_id == "partitions"
+                and _match_terms(["потолок", "короб"], haystack, hay_tokens)
+                and all(normalize_text(term) in {"гкл", "гвл", "пгп"} for term in terms)
+            ):
+                continue
             section_scores[section_id] = section_scores.get(section_id, 0) + int(
                 weights.get("conflict_prefer_boost", 4)
             )
@@ -897,7 +1065,38 @@ def _score_subtype(
     if pair_matches:
         matched["action_object_pairs"] = pair_matches
         score += len(pair_matches) * int(weights.get("action_object_pair_boost", 3))
+
+    if _match_terms(["формирование корыта", "разработка корыта"], haystack, hay_tokens):
+        subtype_terms = " ".join(
+            normalize_text(term)
+            for term in subtype.get("strong_terms") or []
+            if isinstance(term, str)
+        )
+        if "корыто" in subtype_terms:
+            matched["subtype_context_terms"] = ["формирование корыта"]
+            score += int(weights.get("action_object_pair_boost", 3))
+
+    negative = _match_terms(subtype.get("negative_terms") or [], haystack, hay_tokens)
+    if negative:
+        matched["subtype_negative_terms"] = negative
+        score += len(negative) * int(weights.get("negative_term", -6))
     return score, matched
+
+
+def _best_subtype_hint(
+    section: dict[str, Any],
+    haystack: str,
+    hay_tokens: list[str],
+    weights: dict[str, int],
+) -> tuple[int, dict[str, list[str]]]:
+    best_score = 0
+    best_matches: dict[str, list[str]] = {}
+    for subtype in section.get("subtypes") or []:
+        score, matched = _score_subtype(subtype, haystack, hay_tokens, weights)
+        if score > best_score:
+            best_score = score
+            best_matches = matched
+    return best_score, best_matches
 
 
 def _confidence(score: int, delta: int, needs_review: bool, thresholds: dict[str, Any]) -> str:
@@ -1088,6 +1287,16 @@ def classify_work(
     section_matches: dict[str, dict[str, list[str]]] = {}
     for sec in sections:
         score, matched = _score_section(sec, haystack, hay_tokens, weights)
+        subtype_hint_score, subtype_hint_matches = _best_subtype_hint(
+            sec, haystack, hay_tokens, weights
+        )
+        if subtype_hint_score > 0:
+            score += subtype_hint_score
+            matched["subtype_hint_terms"] = [
+                term
+                for values in subtype_hint_matches.values()
+                for term in values
+            ]
         section_id = str(sec["id"])
         section_scores[section_id] = score
         section_matches[section_id] = matched
@@ -1098,6 +1307,17 @@ def classify_work(
     conflict_rules = _apply_conflict_rules(
         sections_by_id, section_scores, section_matches, haystack, hay_tokens, payload
     )
+    if "windows_doors" in section_scores and _match_terms(
+        ["межкомнатная дверь", "дверной блок", "установка двери"],
+        haystack,
+        hay_tokens,
+    ):
+        section_scores["windows_doors"] += int(
+            weights.get("conflict_prefer_boost", 4)
+        ) + int(thresholds.get("min_delta_between_top_two", 3))
+        section_matches.setdefault("windows_doors", {}).setdefault(
+            "conflict_prefer_terms", []
+        ).append("дверной блок")
     ranked_sections = sorted(
         (
             (section_id, score, section_matches.get(section_id) or {})
