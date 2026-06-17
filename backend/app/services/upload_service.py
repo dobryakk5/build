@@ -242,6 +242,13 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
         "classification_candidates": raw.get("classification_candidates"),
         "classification_matched_terms": raw.get("classification_matched_terms"),
         "operator_review_required": raw.get("operator_review_required"),
+        "work_stage_number": raw.get("work_stage_number"),
+        "work_stage_title": raw.get("work_stage_title"),
+        "canonical_stage_id": raw.get("canonical_stage_id"),
+        "stage_option_id": raw.get("stage_option_id"),
+        "stage_option_title": raw.get("stage_option_title"),
+        "stage_confidence": raw.get("stage_confidence"),
+        "stage_match_type": raw.get("stage_match_type"),
         "row_hash":    _row_hash(row.section, row.work_name, row.unit, row.quantity, row.total_price),
     }
 
@@ -368,8 +375,55 @@ def _enrich_work_subtypes_sync(rows: list) -> None:
         raw["context_inherited"] = False
 
 
-async def _enrich_work_subtypes(rows: list, db: AsyncSession) -> None:
+def _enrich_work_stages_sync(rows: list, hierarchy_selection: dict | None) -> None:
+    if not hierarchy_selection:
+        return
+    estimate_type_id = hierarchy_selection.get("estimate_type_id")
+    project_variant_id = hierarchy_selection.get("project_variant_id")
+    if not estimate_type_id or not project_variant_id:
+        return
+
+    from app.services.stage_classifier import StageClassifier
+    from app.services.work_taxonomy_service import (
+        get_project_variant_stages,
+        get_sequential_scoring_policy,
+    )
+
+    stages = get_project_variant_stages(str(estimate_type_id), str(project_variant_id))
+    classifier = StageClassifier(get_sequential_scoring_policy())
+    previous_context: dict | None = None
+    for row in rows:
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        row.raw_data = raw
+        row_role = raw.get("row_role") or "unknown"
+        match = classifier.classify_row_to_stage(
+            " ".join(str(part or "") for part in (row.section, row.work_name)),
+            str(row_role),
+            stages,
+            previous_context,
+        )
+        if not match.stage:
+            continue
+        raw.update(
+            match.as_raw_data(
+                estimate_type_id=hierarchy_selection.get("estimate_type_id"),
+                estimate_type_number=hierarchy_selection.get("estimate_type_number"),
+                project_variant_id=hierarchy_selection.get("project_variant_id"),
+                project_variant_number=hierarchy_selection.get("project_variant_number"),
+                row_role=str(row_role),
+            )
+        )
+        if raw.get("section_id"):
+            raw["work_section_code"] = raw.get("section_id")
+        if raw.get("section_id") and raw.get("subtype_id"):
+            raw["work_subtype_code"] = f"{raw['section_id']}/{raw['subtype_id']}"
+        if not match.needs_review and raw.get("work_stage_number"):
+            previous_context = dict(raw)
+
+
+async def _enrich_work_subtypes(rows: list, db: AsyncSession, hierarchy_selection: dict | None = None) -> None:
     await run_in_threadpool(_enrich_work_subtypes_sync, rows)
+    await run_in_threadpool(_enrich_work_stages_sync, rows, hierarchy_selection)
 
 
 def _apply_operator_edits(rows: list, edits: dict | None) -> list:
@@ -422,6 +476,7 @@ def _parse_upload_rows_for_import(
     sheet: str | None,
     parser_profile: str,
     edits: dict | None,
+    hierarchy_selection: dict | None,
 ) -> tuple[list, list[dict], dict]:
     if col_mapping is not None:
         int_mapping = {int(k): v for k, v in col_mapping.items()}
@@ -455,6 +510,7 @@ def _parse_upload_rows_for_import(
 
     rows = _apply_operator_edits(rows, edits)
     _enrich_work_subtypes_sync(rows)
+    _enrich_work_stages_sync(rows, hierarchy_selection)
     return rows, subtotal_rows, meta
 
 
@@ -839,6 +895,7 @@ async def _process_upload(job_id: str) -> None:
                 sheet,
                 parser_profile,
                 edits,
+                hierarchy_selection,
             )
 
             # ── 2. Парсинг успешен — теперь безопасно заменить старую смету ───
@@ -905,6 +962,31 @@ async def _process_upload(job_id: str) -> None:
                     work_section_name = raw.get("work_section_name"),
                     work_subtype_code = raw.get("work_subtype_code") or raw.get("subtype_code"),
                     work_subtype_name = raw.get("work_subtype_name") or raw.get("subtype_name"),
+                    estimate_type_id = raw.get("estimate_type_id"),
+                    estimate_type_number = raw.get("estimate_type_number"),
+                    project_variant_id = raw.get("project_variant_id"),
+                    project_variant_number = raw.get("project_variant_number"),
+                    canonical_stage_id = raw.get("canonical_stage_id"),
+                    work_stage_number = raw.get("work_stage_number"),
+                    work_stage_title = raw.get("work_stage_title"),
+                    stage_occurrence_index = raw.get("stage_occurrence_index"),
+                    stage_occurrence_label = raw.get("stage_occurrence_label"),
+                    stage_options_mode = raw.get("stage_options_mode"),
+                    stage_option_id = raw.get("stage_option_id"),
+                    stage_option_title = raw.get("stage_option_title"),
+                    section_id = raw.get("section_id"),
+                    subtype_id = raw.get("subtype_id"),
+                    row_role = raw.get("row_role"),
+                    parent_row_id = raw.get("parent_row_id"),
+                    inherited_from_row_id = raw.get("inherited_from_row_id"),
+                    stage_confidence = raw.get("stage_confidence"),
+                    work_type_confidence = raw.get("work_type_confidence"),
+                    autofill_enabled = raw.get("autofill_enabled"),
+                    needs_review = bool(raw.get("needs_review")),
+                    review_reason = raw.get("review_reason"),
+                    stage_match_type = raw.get("stage_match_type"),
+                    stage_match_score_json = raw.get("stage_match_score_json"),
+                    work_type_match_score_json = raw.get("work_type_match_score_json"),
                     classification_score = raw.get("classification_score"),
                     classification_confidence = raw.get("classification_confidence"),
                     classification_needs_review = bool(raw.get("classification_needs_review")),
@@ -915,6 +997,7 @@ async def _process_upload(job_id: str) -> None:
                     operator_review_status = raw.get("operator_review_status"),
                     operator_review_reason = raw.get("operator_review_reason"),
                     dictionary_version = raw.get("dictionary_version"),
+                    prompt_version = raw.get("prompt_version"),
                     manual_override = bool(raw.get("manual_override")),
                 )
                 db.add(est)

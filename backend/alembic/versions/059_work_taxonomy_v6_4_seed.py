@@ -1,8 +1,5 @@
-"""Reset prototype work taxonomy to construction_work_dictionary_v6_4_draft.
+"""Seed work taxonomy rows from construction_work_dictionary_v6_4_draft."""
 
-This migration intentionally drops v4/v3 taxonomy compatibility. The prototype
-uses the canonical JSON taxonomy and does not support downgrade.
-"""
 from __future__ import annotations
 
 import json
@@ -15,49 +12,20 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 
-revision = "056_work_taxonomy_v5_reset"
-down_revision = "055_work_taxonomy_v4"
+revision = "059_work_tax_v6_4_seed"
+down_revision = "058_est_stage_context"
 branch_labels = None
 depends_on = None
 
 
 _DATA_DIR = Path(__file__).resolve().parents[2] / "app" / "data"
-_V5_FILE = _DATA_DIR / "construction_work_dictionary_v6_4_draft.json"
-_V5_SOURCE = "construction_work_dictionary_v6_4"
+_DICTIONARY_FILE = _DATA_DIR / "construction_work_dictionary_v6_4_draft.json"
+_DICTIONARY_SOURCE = "construction_work_dictionary_v6_4"
 _UNKNOWN_CODE = "unknown/needs_review"
 
-_RAW_TAXONOMY_KEYS = (
-    "macro_id",
-    "subtype_code",
-    "subtype_name",
-    "work_section_code",
-    "work_section_name",
-    "work_subtype_code",
-    "work_subtype_name",
-    "classification_score",
-    "classification_confidence",
-    "classification_needs_review",
-    "classification_source",
-    "classification_candidates",
-    "classification_matched_terms",
-    "classification_reason",
-    "classification_related_sections",
-    "operator_review_required",
-    "operator_review_status",
-    "operator_review_reason",
-    "dictionary_version",
-    "manual_override",
-    "manual_changed_by",
-    "manual_changed_at",
-    "parent_context_source",
-    "parent_context_code",
-    "context_inherited",
-    "context_inheritance_reason",
-)
 
-
-def _dictionary(path: Path) -> dict[str, Any]:
-    with open(path, encoding="utf-8") as fh:
+def _dictionary() -> dict[str, Any]:
+    with open(_DICTIONARY_FILE, encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -78,6 +46,7 @@ def _term_keywords(section: dict[str, Any], subtype: dict[str, Any]) -> list[str
             terms.extend(str(part) for part in pair if part)
     if not terms:
         terms.extend(_as_list(section.get("strong_terms")))
+
     seen: set[str] = set()
     result: list[str] = []
     for raw in terms:
@@ -93,7 +62,11 @@ def _subtype_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     meta = payload.get("meta") or {}
     schema_version = str(meta.get("schema_version") or "")
     dictionary_name = str(meta.get("dictionary_name") or "")
-    source_version = str(meta.get("dictionary_version") or f"{_V5_SOURCE}@{schema_version}")
+    source_version = str(
+        meta.get("dictionary_version")
+        or payload.get("dictionary_version")
+        or f"{_DICTIONARY_SOURCE}@{schema_version}"
+    )
     scoring = payload.get("scoring") or {}
     rows: list[dict[str, Any]] = []
     for macro_id, section in enumerate(payload.get("sections") or [], start=1):
@@ -111,7 +84,7 @@ def _subtype_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
                     "section_code": section_id,
                     "section_name": section.get("title"),
                     "section_scope": section.get("scope"),
-                    "dictionary_source": _V5_SOURCE,
+                    "dictionary_source": _DICTIONARY_SOURCE,
                     "dictionary_name": dictionary_name,
                     "dictionary_schema_version": schema_version,
                     "dictionary_source_version": source_version,
@@ -171,36 +144,8 @@ def _subtype_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def _columns(table_name: str) -> set[str]:
-    inspector = sa.inspect(op.get_bind())
-    return {col["name"] for col in inspector.get_columns(table_name)}
-
-
 def _table_exists(table_name: str) -> bool:
     return sa.inspect(op.get_bind()).has_table(table_name)
-
-
-def _reset_columns(table_name: str, values: dict[str, Any]) -> None:
-    if not _table_exists(table_name):
-        return
-    existing = _columns(table_name)
-    patch = {key: value for key, value in values.items() if key in existing}
-    if not patch:
-        return
-    table = sa.table(
-        table_name,
-        *(sa.column(key) for key in patch.keys()),
-    )
-    op.execute(table.update().values(**patch))
-
-
-def _drop_raw_taxonomy_keys(table_name: str) -> None:
-    if not _table_exists(table_name) or "raw_data" not in _columns(table_name):
-        return
-    expression = "raw_data"
-    for key in _RAW_TAXONOMY_KEYS:
-        expression += f" - '{key}'"
-    op.execute(sa.text(f"UPDATE {table_name} SET raw_data = {expression} WHERE raw_data IS NOT NULL"))
 
 
 def _work_subtypes_table() -> sa.Table:
@@ -228,11 +173,17 @@ def _work_subtypes_table() -> sa.Table:
     )
 
 
-def _seed_subtypes(payload: dict[str, Any]) -> None:
-    rows = _subtype_rows(payload)
-    if not rows:
+def upgrade() -> None:
+    if not _table_exists("work_subtypes"):
         return
+
+    rows = _subtype_rows(_dictionary())
     work_subtypes = _work_subtypes_table()
+    codes = [row["code"] for row in rows]
+
+    if _table_exists("work_subtype_aliases"):
+        op.execute(sa.text("DELETE FROM work_subtype_aliases"))
+
     stmt = pg_insert(work_subtypes).values(rows)
     op.execute(
         stmt.on_conflict_do_update(
@@ -258,83 +209,8 @@ def _seed_subtypes(payload: dict[str, Any]) -> None:
             },
         )
     )
-
-
-def upgrade() -> None:
-    payload = _dictionary(_V5_FILE)
-
-    if _table_exists("work_subtypes"):
-        op.alter_column(
-            "work_subtypes",
-            "dictionary_source",
-            existing_type=sa.String(length=32),
-            type_=sa.String(length=64),
-            existing_nullable=True,
-        )
-
-    if _table_exists("ktp_session_subtypes"):
-        op.execute(sa.text("DELETE FROM ktp_session_subtypes"))
-
-    _reset_columns(
-        "estimates",
-        {
-            "work_section_code": None,
-            "work_section_name": None,
-            "work_subtype_code": None,
-            "work_subtype_name": None,
-            "classification_score": None,
-            "classification_confidence": None,
-            "classification_needs_review": False,
-            "classification_source": None,
-            "classification_candidates": None,
-            "classification_matched_terms": None,
-            "operator_review_required": False,
-            "operator_review_status": None,
-            "operator_review_reason": None,
-            "dictionary_version": None,
-            "manual_override": False,
-            "manual_changed_by": None,
-            "manual_changed_at": None,
-        },
-    )
-    _drop_raw_taxonomy_keys("estimates")
-
-    _reset_columns(
-        "ktp_wbs_items",
-        {
-            "work_subtype_code": None,
-            "work_subtype_name": None,
-            "work_section_code": None,
-            "work_section_name": None,
-            "work_type_confidence": None,
-            "work_type_needs_review": False,
-            "work_type_candidates": None,
-            "work_type_source": None,
-            "operator_review_required": False,
-            "manual_override": False,
-            "gpr_confirmed": False,
-        },
-    )
-
-    _reset_columns(
-        "ktp_wbs_groups",
-        {
-            "work_section_code": None,
-            "work_section_name": None,
-            "work_type_confidence": None,
-            "work_type_source": None,
-        },
-    )
-
-    if _table_exists("work_subtype_aliases"):
-        op.execute(sa.text("DELETE FROM work_subtype_aliases"))
-    if _table_exists("work_subtypes"):
-        op.execute(sa.text("DELETE FROM work_subtypes"))
-
-    _seed_subtypes(payload)
+    op.execute(work_subtypes.delete().where(work_subtypes.c.code.not_in(codes)))
 
 
 def downgrade() -> None:
-    raise NotImplementedError(
-        "Downgrade is intentionally not supported for prototype taxonomy reset"
-    )
+    raise NotImplementedError("Downgrade is intentionally not supported for taxonomy v6.4 seed")

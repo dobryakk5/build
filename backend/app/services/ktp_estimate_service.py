@@ -49,7 +49,7 @@ from app.services.work_taxonomy_service import build_work_section_palette
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "estimate-v5"
+PROMPT_VERSION = "estimate-v6.4"
 
 ESTIMATE_KIND_LABELS: dict[int, str] = {
     1: "Земляные грунтовые работы",

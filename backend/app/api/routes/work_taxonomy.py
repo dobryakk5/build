@@ -6,7 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.services.work_taxonomy_service import (
+    get_canonical_stages,
+    get_estimate_types,
     get_project_hierarchy,
+    get_project_variant_stages,
+    get_project_variants,
     get_work_taxonomy_sections,
     get_work_taxonomy_subtypes,
 )
@@ -32,6 +36,35 @@ async def work_taxonomy_project_hierarchy(
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+
+
+@router.get("/estimate-types")
+async def work_taxonomy_estimate_types():
+    return get_estimate_types()
+
+
+@router.get("/estimate-types/{estimate_type_id}/variants")
+async def work_taxonomy_project_variants(estimate_type_id: str):
+    try:
+        return get_project_variants(estimate_type_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/estimate-types/{estimate_type_id}/variants/{project_variant_id}/stages")
+async def work_taxonomy_project_variant_stages(
+    estimate_type_id: str,
+    project_variant_id: str,
+):
+    try:
+        return get_project_variant_stages(estimate_type_id, project_variant_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.get("/canonical-stages")
+async def work_taxonomy_canonical_stages():
+    return get_canonical_stages()
 
 
 @router.get("/subtypes")

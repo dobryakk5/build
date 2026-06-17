@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { workTaxonomy } from "@/lib/api";
-import type { WorkEstimateType, WorkProjectHierarchy, WorkProjectVariant, WorkStage } from "@/lib/types";
+import type { WorkEstimateType, WorkProjectHierarchy, WorkProjectVariant, WorkStage, WorkTypeRef } from "@/lib/types";
 
 const COLORS = {
   border: "#e2e8f0",
@@ -61,26 +61,33 @@ function Chip({ children, title }: { children: ReactNode; title?: string }) {
 }
 
 function formatDictionaryVersion(version: string | null | undefined) {
-  if (!version) return "JSON v6.3.3";
+  if (!version) return "JSON v6.4";
   const match = version.match(/v(\d+(?:_\d+)*)/);
   if (!match) return version;
   return `JSON v${match[1].replaceAll("_", ".")}`;
 }
 
 function stageSearchText(stage: WorkStage) {
+  const workTypeText = (ref: WorkTypeRef | null | undefined) => [ref?.section_id, ref?.subtype_id].filter(Boolean).join(" ");
   return [
     stage.id,
     stage.number,
     stage.title,
     stage.stage_role,
-    stage.section_id,
-    stage.subtype_id,
-    stage.primary_work_type,
-    ...(stage.related_work_types ?? []),
+    stage.canonical_stage_id,
+    stage.occurrence_label,
+    workTypeText(stage.primary_work_type),
+    ...(stage.related_work_types ?? []).map(workTypeText),
+    ...(stage.stage_options ?? []).map((option) => [option.title, option.section_id, option.subtype_id].filter(Boolean).join(" ")),
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+}
+
+function workTypeLabel(ref: WorkTypeRef | null | undefined) {
+  if (!ref?.section_id && !ref?.subtype_id) return null;
+  return `${ref.section_id ?? "?"}/${ref.subtype_id ?? "?"}`;
 }
 
 function optionTitle(number: string, title: string) {
@@ -301,16 +308,26 @@ export default function WorkTaxonomyPanel() {
                   <span style={{ minWidth: 0, fontSize: 14, fontWeight: 650, lineHeight: 1.3 }}>{stage.title}</span>
                 </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                  {stage.section_id ? <Chip>section {stage.section_id}</Chip> : null}
-                  {stage.subtype_id ? <Chip>subtype {stage.subtype_id}</Chip> : null}
-                  {stage.primary_work_type ? <Chip>primary {stage.primary_work_type}</Chip> : null}
+                  {stage.canonical_stage_id ? <Chip>{stage.canonical_stage_id}</Chip> : null}
+                  {stage.occurrence_label ? <Chip>{stage.occurrence_label}</Chip> : null}
+                  {workTypeLabel(stage.primary_work_type) ? <Chip>primary {workTypeLabel(stage.primary_work_type)}</Chip> : null}
+                  {stage.stage_options_mode !== "none" ? <Chip>{stage.stage_options_mode}</Chip> : null}
                   {stage.stage_role ? <Chip>{stage.stage_role}</Chip> : null}
                   {stage.autofill_enabled ? <Chip>autofill</Chip> : null}
                 </div>
                 {stage.related_work_types.length ? (
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                    {stage.related_work_types.map((workType) => (
-                      <Chip key={workType}>related {workType}</Chip>
+                    {stage.related_work_types.map((workType, index) => (
+                      <Chip key={`${workType.section_id}-${workType.subtype_id}-${index}`}>related {workTypeLabel(workType)}</Chip>
+                    ))}
+                  </div>
+                ) : null}
+                {stage.stage_options.length ? (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {stage.stage_options.map((option) => (
+                      <Chip key={option.id ?? option.number ?? option.title}>
+                        option {option.title} {workTypeLabel(option) ? `(${workTypeLabel(option)})` : ""}
+                      </Chip>
                     ))}
                   </div>
                 ) : null}

@@ -921,12 +921,32 @@ export interface WorkStage {
   id: string;
   number: string;
   title: string;
+  canonical_stage_id?: string | null;
   stage_role?: string | null;
+  stage_options_mode: string;
+  stage_options: WorkStageOption[];
+  detail_lines: string[];
+  occurrence_index?: number | null;
+  occurrence_label?: string | null;
   autofill_enabled: boolean;
+  primary_work_type?: WorkTypeRef | null;
+  related_work_types: WorkTypeRef[];
+}
+
+export interface WorkTypeRef {
   section_id?: string | null;
   subtype_id?: string | null;
-  primary_work_type?: string | null;
-  related_work_types: string[];
+  mapping_confidence?: string | null;
+  mapping_source?: string | null;
+  mapping_note?: string | null;
+}
+
+export interface WorkStageOption extends WorkTypeRef {
+  id?: string | null;
+  number?: string | null;
+  title: string;
+  required?: boolean | null;
+  autofill_enabled: boolean;
 }
 
 export interface WorkEstimateType {

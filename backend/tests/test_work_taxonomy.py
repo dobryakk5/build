@@ -21,19 +21,21 @@ from app.services.work_taxonomy_service import (  # noqa: E402
     classify_subtype,
     dictionary_version,
     get_project_hierarchy,
+    get_project_variant_stages,
     get_work_taxonomy_sections,
     get_work_taxonomy_subtypes,
     legacy_estimate_kind_for_type,
     should_inherit_parent_context,
     validate_project_hierarchy_selection,
 )
+from app.services.stage_classifier import StageClassifier  # noqa: E402
 
 _DATA = Path(__file__).resolve().parents[1] / "app" / "data" / "work_subtypes.csv"
 _DICTIONARY_JSON = (
     Path(__file__).resolve().parents[1]
     / "app"
     / "data"
-    / "construction_work_dictionary_v6_3_3_draft.json"
+    / "construction_work_dictionary_v6_4_draft.json"
 )
 
 
@@ -130,7 +132,7 @@ def test_classify_subtype_prefers_more_specific_keyword():
         ),
     ],
 )
-def test_classify_work_json_v6_3_3_examples(name, expected_section, expected_subtype):
+def test_classify_work_json_v6_4_examples(name, expected_section, expected_subtype):
     result = classify_work(name)
     assert result.section_code == expected_section
     assert result.subtype_code == expected_subtype
@@ -144,7 +146,7 @@ def test_classify_work_related_sections_from_dictionary_rules():
 
 
 @pytest.mark.parametrize("name,expected", _load_json_examples())
-def test_classify_work_json_v6_3_3_dictionary_examples(name, expected):
+def test_classify_work_json_v6_4_dictionary_examples(name, expected):
     result = classify_work(name)
     expected_subtype = f"{expected['section_id']}/{expected['subtype_id']}"
     assert result.section_code == expected["section_id"]
@@ -165,7 +167,7 @@ def test_classify_work_json_v6_3_3_dictionary_examples(name, expected):
         ("Вязка арматуры монолитных колонн и ригелей", "structural_frame"),
     ],
 )
-def test_classify_work_json_v6_3_3_conflict_cases(name, expected_section):
+def test_classify_work_json_v6_4_conflict_cases(name, expected_section):
     result = classify_work(name)
     assert result.section_code == expected_section
 
@@ -183,7 +185,7 @@ def test_classify_work_json_v6_3_3_conflict_cases(name, expected_section):
         ("Перемещение вынутого грунта в пределах участка", "earthworks/terrain_reshaping"),
     ],
 )
-def test_classify_work_json_v6_3_3_landscape_smoke_cases(name, expected_subtype):
+def test_classify_work_json_v6_4_landscape_smoke_cases(name, expected_subtype):
     result = classify_work(name)
     assert result.subtype_code == expected_subtype
     assert not result.needs_review
@@ -246,7 +248,7 @@ def test_score_subtype_negative_term_does_not_affect_other_subtype():
 
 
 @pytest.mark.parametrize("name", ["Транспортные расходы", "Накладные расходы"])
-def test_classify_work_json_v6_3_3_overhead_rows_do_not_create_work_subtype(name):
+def test_classify_work_json_v6_4_overhead_rows_do_not_create_work_subtype(name):
     result = classify_work(name)
     assert classify_row_role(name) == "overhead"
     assert result.subtype_code == "unknown/needs_review"
@@ -254,14 +256,14 @@ def test_classify_work_json_v6_3_3_overhead_rows_do_not_create_work_subtype(name
     assert not result.needs_review
 
 
-def test_classify_work_json_v6_3_3_row_role_policy():
+def test_classify_work_json_v6_4_row_role_policy():
     assert classify_row_role("БЛАГОУСТРОЙСТВО", allow_absent_header=True) == "header"
     assert should_inherit_parent_context("material", "Профилированная мембрана") is True
     assert should_inherit_parent_context("overhead", "Транспортные расходы") is False
 
 
 @pytest.mark.asyncio
-async def test_work_taxonomy_helpers_fallback_to_json_v6_3_3():
+async def test_work_taxonomy_helpers_fallback_to_json_v6_4():
     db = MagicMock()
     db.scalars = AsyncMock(return_value=[])
 
@@ -269,8 +271,8 @@ async def test_work_taxonomy_helpers_fallback_to_json_v6_3_3():
     subtypes = await get_work_taxonomy_subtypes(db)
 
     assert len(sections) == 19
-    assert len(subtypes) == 207
-    assert dictionary_version() == "construction_work_dictionary_v6_3_3_draft@1.6.1"
+    assert len(subtypes) == 211
+    assert dictionary_version() == "construction_work_dictionary_v6_4_draft@1.7.0"
     taxonomy_codes = [s["taxonomy_code"] for s in subtypes]
     assert len(set(taxonomy_codes)) == len(subtypes)
     assert all(code and "." in code for code in taxonomy_codes)
@@ -281,9 +283,14 @@ async def test_work_taxonomy_helpers_fallback_to_json_v6_3_3():
 
 def test_project_hierarchy_exposes_types_and_variants():
     hierarchy = get_project_hierarchy()
-    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_3_3_draft@1.6.1"
+    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_4_draft@1.7.0"
     assert len(hierarchy["estimate_types"]) == 9
     assert sum(len(t["project_variants"]) for t in hierarchy["estimate_types"]) == 65
+    assert sum(
+        variant["stages_count"]
+        for t in hierarchy["estimate_types"]
+        for variant in t["project_variants"]
+    ) == 1043
     residential = next(t for t in hierarchy["estimate_types"] if t["id"] == "residential_construction")
     assert residential["estimate_kind"] == 2
     assert any(
@@ -301,6 +308,8 @@ def test_project_hierarchy_selection_validates_parent_variant_and_legacy_kind():
     assert selection["estimate_kind"] == 2
     assert selection["project_variant_number"] == "2.6"
     assert legacy_estimate_kind_for_type("landscape_hardscape") == 9
+    by_number = validate_project_hierarchy_selection("residential_construction", "2.6")
+    assert by_number["project_variant_id"] == "residential_construction_doma_iz_peno_ili_gazoblokov"
 
     with pytest.raises(ValueError):
         validate_project_hierarchy_selection(
@@ -319,6 +328,111 @@ async def test_build_work_section_palette_uses_all_sections_when_primary_empty()
 
     assert len(palette) == 19
     assert all(section["is_primary"] for section in palette)
+
+
+@pytest.mark.parametrize(
+    "row_text,expected_stage,expected_section,expected_subtype,expected_option,expected_occurrence",
+    [
+        (
+            "Кладка стен из газоблока 400 мм на клеевой раствор",
+            "2.6.6",
+            "load_bearing_walls",
+            "block_walls",
+            None,
+            "1 этаж",
+        ),
+        (
+            "Армирование кладки 1 этажа сеткой",
+            "2.6.7",
+            "load_bearing_walls",
+            "arm_belts_lintels",
+            None,
+            "1 этаж",
+        ),
+        (
+            "Кладка стен 2 этажа из газоблока",
+            "2.6.10",
+            "load_bearing_walls",
+            "block_walls",
+            None,
+            "2 этаж",
+        ),
+        (
+            "Устройство утепленной шведской плиты",
+            "2.6.2",
+            "foundation",
+            "slab_foundation",
+            "УШП",
+            None,
+        ),
+        (
+            "Устройство деревянного перекрытия цоколя",
+            "2.6.5",
+            "floor_slabs",
+            "timber_floor",
+            "Деревянный",
+            None,
+        ),
+        (
+            "Монтаж стропильной системы",
+            "2.6.14",
+            "rafters",
+            "rafters_installation",
+            "Стропильная система",
+            None,
+        ),
+        (
+            "Монтаж металлочерепицы",
+            "2.6.14",
+            "roofing",
+            "pitched_roof_covering",
+            "Кровельное покрытие",
+            None,
+        ),
+    ],
+)
+def test_stage_classifier_gas_block_house_regressions(
+    row_text,
+    expected_stage,
+    expected_section,
+    expected_subtype,
+    expected_option,
+    expected_occurrence,
+):
+    stages = get_project_variant_stages("residential_construction", "2.6")
+    match = StageClassifier().classify_row_to_stage(row_text, "work", stages, None)
+
+    assert match.stage is not None
+    assert match.stage["number"] == expected_stage
+    assert match.work_type_ref is not None
+    assert match.work_type_ref["section_id"] == expected_section
+    assert match.work_type_ref["subtype_id"] == expected_subtype
+    if expected_option:
+        assert match.stage_option is not None
+        assert match.stage_option["title"] == expected_option
+    if expected_occurrence:
+        assert match.stage["occurrence_label"] == expected_occurrence
+
+
+def test_stage_classifier_material_inherits_previous_stage():
+    stages = get_project_variant_stages("residential_construction", "2.6")
+    classifier = StageClassifier()
+    work = classifier.classify_row_to_stage("Кладка стен из газоблока", "work", stages, None)
+    context = work.as_raw_data(
+        estimate_type_id="residential_construction",
+        estimate_type_number="2",
+        project_variant_id="residential_construction_doma_iz_peno_ili_gazoblokov",
+        project_variant_number="2.6",
+        row_role="work",
+    )
+
+    material = classifier.classify_row_to_stage("Газоблок D500", "material", stages, context)
+    glue = classifier.classify_row_to_stage("Клей для газоблока", "material", stages, context)
+
+    assert material.stage is not None
+    assert glue.stage is not None
+    assert material.stage["number"] == glue.stage["number"] == "2.6.6"
+    assert material.match_type == glue.match_type == "inherited_context"
 
 
 def test_build_precedence_dependencies_basic_with_lag():

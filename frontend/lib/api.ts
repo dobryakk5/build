@@ -35,6 +35,9 @@ import type {
   WorkTaxonomySection,
   WorkTaxonomySubtype,
   WorkProjectHierarchy,
+  WorkEstimateType,
+  WorkProjectVariant,
+  WorkStage,
   WorkPlanAutoSummary,
   WorkPlanCard,
   WorkPlanCardPatch,
@@ -819,6 +822,14 @@ export const workTaxonomy = {
     const qs = params.toString();
     return request<WorkProjectHierarchy>(`/work-taxonomy/project-hierarchy${qs ? `?${qs}` : ""}`);
   },
+  estimateTypes: () => request<WorkEstimateType[]>("/work-taxonomy/estimate-types"),
+  projectVariants: (estimateTypeId: string) =>
+    request<WorkProjectVariant[]>(`/work-taxonomy/estimate-types/${encodeURIComponent(estimateTypeId)}/variants`),
+  projectVariantStages: (estimateTypeId: string, projectVariantId: string) =>
+    request<WorkStage[]>(
+      `/work-taxonomy/estimate-types/${encodeURIComponent(estimateTypeId)}/variants/${encodeURIComponent(projectVariantId)}/stages`
+    ),
+  canonicalStages: () => request<Record<string, unknown>>("/work-taxonomy/canonical-stages"),
 };
 
 export const workPlan = {

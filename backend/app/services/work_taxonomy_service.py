@@ -1,6 +1,6 @@
 """Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v6_3_3_draft.json`` is the canonical work
+``construction_work_dictionary_v6_4_draft.json`` is the canonical work
 classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
@@ -21,9 +21,10 @@ from app.models import WorkPrecedence, WorkSubtype
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v6_3_3_draft.json"
+    / "construction_work_dictionary_v6_4_draft.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v6_3_3_draft"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_4"
+PROMPT_VERSION = "estimate-v6.4"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
@@ -173,7 +174,117 @@ def clear_cache() -> None:
 @lru_cache(maxsize=1)
 def _load_dictionary() -> dict[str, Any]:
     with open(DICTIONARY_FILE, encoding="utf-8") as fh:
-        return json.load(fh)
+        payload = json.load(fh)
+    validate_dictionary_payload(payload)
+    return payload
+
+
+def validate_dictionary_payload(payload: dict[str, Any]) -> None:
+    required_top_level = (
+        "sections",
+        "project_hierarchy",
+        "project_hierarchy_schema",
+        "mapping_generation_policy",
+        "sequential_scoring_policy",
+    )
+    missing = [key for key in required_top_level if not payload.get(key)]
+    meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+    if not meta.get("dictionary_version") and not payload.get("dictionary_version"):
+        missing.append("meta.dictionary_version")
+    hierarchy = payload.get("project_hierarchy") if isinstance(payload.get("project_hierarchy"), dict) else {}
+    if not hierarchy.get("canonical_stages"):
+        missing.append("project_hierarchy.canonical_stages")
+    if missing:
+        raise RuntimeError("Runtime work dictionary is missing required blocks: " + ", ".join(missing))
+
+    sections_by_id = {
+        str(section.get("id") or "")
+        for section in payload.get("sections") or []
+        if isinstance(section, dict)
+    }
+    subtypes_by_section: set[tuple[str, str]] = set()
+    for section in payload.get("sections") or []:
+        if not isinstance(section, dict):
+            continue
+        section_id = str(section.get("id") or "")
+        for subtype in section.get("subtypes") or []:
+            if isinstance(subtype, dict):
+                subtypes_by_section.add((section_id, str(subtype.get("id") or "")))
+
+    canonical_stages = hierarchy.get("canonical_stages") or {}
+    canonical_stage_ids = (
+        set(canonical_stages)
+        if isinstance(canonical_stages, dict)
+        else {str(item.get("id") or "") for item in canonical_stages if isinstance(item, dict)}
+    )
+    errors: list[str] = []
+    for estimate_type in hierarchy.get("estimate_types") or []:
+        if not isinstance(estimate_type, dict):
+            continue
+        type_number = str(estimate_type.get("number") or "")
+        for variant in estimate_type.get("project_variants") or []:
+            if not isinstance(variant, dict):
+                continue
+            variant_number = str(variant.get("number") or "")
+            if type_number and not variant_number.startswith(type_number + "."):
+                errors.append(f"variant number mismatch: {variant_number}")
+            occurrence_seen: dict[str, set[int]] = {}
+            for stage in variant.get("stages") or []:
+                if not isinstance(stage, dict):
+                    continue
+                for key in (
+                    "number",
+                    "title",
+                    "canonical_stage_id",
+                    "primary_work_type",
+                    "related_work_types",
+                    "stage_role",
+                    "autofill_enabled",
+                    "stage_options",
+                    "stage_options_mode",
+                    "detail_lines",
+                    "occurrence_index",
+                    "occurrence_label",
+                ):
+                    if key not in stage:
+                        errors.append(f"stage {stage.get('number')} missing {key}")
+                stage_number = str(stage.get("number") or "")
+                if variant_number and not stage_number.startswith(variant_number + "."):
+                    errors.append(f"stage number mismatch: {stage_number}")
+                canonical_stage_id = str(stage.get("canonical_stage_id") or "")
+                if canonical_stage_id not in canonical_stage_ids:
+                    errors.append(f"stage {stage_number} has invalid canonical_stage_id {canonical_stage_id}")
+                occurrence_index = stage.get("occurrence_index")
+                if isinstance(occurrence_index, int) and canonical_stage_id:
+                    seen = occurrence_seen.setdefault(canonical_stage_id, set())
+                    if occurrence_index in seen:
+                        errors.append(f"stage {stage_number} duplicate occurrence_index {occurrence_index}")
+                    seen.add(occurrence_index)
+                primary = stage.get("primary_work_type") if isinstance(stage.get("primary_work_type"), dict) else {}
+                if stage.get("autofill_enabled") and not (
+                    primary.get("section_id") and primary.get("subtype_id")
+                ):
+                    errors.append(f"stage {stage_number} autofill_enabled without primary_work_type subtype")
+                for ref in [primary, *(stage.get("related_work_types") or [])]:
+                    if not isinstance(ref, dict):
+                        continue
+                    section_id = ref.get("section_id")
+                    subtype_id = ref.get("subtype_id")
+                    if section_id and section_id not in sections_by_id:
+                        errors.append(f"stage {stage_number} invalid section_id {section_id}")
+                    if section_id and subtype_id and (str(section_id), str(subtype_id)) not in subtypes_by_section:
+                        errors.append(f"stage {stage_number} invalid subtype {section_id}/{subtype_id}")
+                for option in stage.get("stage_options") or []:
+                    if not isinstance(option, dict):
+                        continue
+                    if option.get("autofill_enabled") and not (option.get("section_id") and option.get("subtype_id")):
+                        errors.append(f"stage {stage_number} option {option.get('id')} autofill without subtype")
+                    section_id = option.get("section_id")
+                    subtype_id = option.get("subtype_id")
+                    if section_id and subtype_id and (str(section_id), str(subtype_id)) not in subtypes_by_section:
+                        errors.append(f"stage {stage_number} option {option.get('id')} invalid subtype {section_id}/{subtype_id}")
+    if errors:
+        raise RuntimeError("Runtime work dictionary failed validation gates: " + "; ".join(errors[:20]))
 
 
 def dictionary_version(payload: dict[str, Any] | None = None) -> str:
@@ -221,10 +332,14 @@ def _public_work_stage(stage: dict[str, Any]) -> dict[str, Any]:
         "id": str(stage.get("id") or ""),
         "number": str(stage.get("number") or ""),
         "title": str(stage.get("title") or ""),
+        "canonical_stage_id": stage.get("canonical_stage_id") or None,
         "stage_role": stage.get("stage_role"),
+        "stage_options_mode": stage.get("stage_options_mode") or "none",
+        "stage_options": stage.get("stage_options") or [],
+        "detail_lines": stage.get("detail_lines") or [],
+        "occurrence_index": stage.get("occurrence_index"),
+        "occurrence_label": stage.get("occurrence_label"),
         "autofill_enabled": bool(stage.get("autofill_enabled", False)),
-        "section_id": stage.get("section_id") or None,
-        "subtype_id": stage.get("subtype_id") or None,
         "primary_work_type": stage.get("primary_work_type") or None,
         "related_work_types": stage.get("related_work_types") or [],
     }
@@ -273,6 +388,74 @@ def get_project_hierarchy(
     }
 
 
+def get_estimate_types() -> list[dict[str, Any]]:
+    payload = _load_dictionary()
+    assert_project_hierarchy_compatible(payload)
+    return [
+        {
+            "number": str(item.get("number") or ""),
+            "id": str(item.get("id") or ""),
+            "title": str(item.get("title") or ""),
+            "estimate_kind": legacy_estimate_kind_for_type(str(item.get("id") or "")),
+            "estimate_profile_id": str(item.get("estimate_profile_id") or item.get("id") or ""),
+        }
+        for item in _hierarchy_estimate_types(payload)
+    ]
+
+
+def _find_estimate_type(payload: dict[str, Any], estimate_type_id: str) -> dict[str, Any]:
+    for estimate_type in _hierarchy_estimate_types(payload):
+        if str(estimate_type.get("id") or "") == estimate_type_id or str(estimate_type.get("number") or "") == estimate_type_id:
+            return estimate_type
+    raise ValueError(f"Unknown estimate_type_id: {estimate_type_id}")
+
+
+def _find_project_variant(estimate_type: dict[str, Any], project_variant_id: str) -> dict[str, Any]:
+    for variant in estimate_type.get("project_variants") or []:
+        if str(variant.get("id") or "") == project_variant_id or str(variant.get("number") or "") == project_variant_id:
+            return variant
+    raise ValueError("project_variant_id does not belong to estimate_type_id")
+
+
+def get_project_variants(estimate_type_id: str) -> list[dict[str, Any]]:
+    payload = _load_dictionary()
+    estimate_type = _find_estimate_type(payload, estimate_type_id)
+    return [
+        {
+            "number": str(variant.get("number") or ""),
+            "id": str(variant.get("id") or ""),
+            "title": str(variant.get("title") or ""),
+            "stages_count": len(variant.get("stages") or []),
+        }
+        for variant in estimate_type.get("project_variants") or []
+        if isinstance(variant, dict)
+    ]
+
+
+def get_project_variant_stages(estimate_type_id: str, project_variant_id: str) -> list[dict[str, Any]]:
+    payload = _load_dictionary()
+    estimate_type = _find_estimate_type(payload, estimate_type_id)
+    variant = _find_project_variant(estimate_type, project_variant_id)
+    return [
+        _public_work_stage(stage)
+        for stage in variant.get("stages") or []
+        if isinstance(stage, dict)
+    ]
+
+
+def get_canonical_stages() -> dict[str, Any]:
+    payload = _load_dictionary()
+    hierarchy = _project_hierarchy(payload)
+    canonical_stages = hierarchy.get("canonical_stages")
+    return canonical_stages if isinstance(canonical_stages, dict) else {}
+
+
+def get_sequential_scoring_policy() -> dict[str, Any]:
+    payload = _load_dictionary()
+    policy = payload.get("sequential_scoring_policy")
+    return policy if isinstance(policy, dict) else {}
+
+
 def validate_project_hierarchy_selection(
     estimate_type_id: str | None,
     project_variant_id: str | None,
@@ -281,24 +464,20 @@ def validate_project_hierarchy_selection(
         raise ValueError("estimate_type_id and project_variant_id are required")
     payload = _load_dictionary()
     assert_project_hierarchy_compatible(payload)
-    for estimate_type in _hierarchy_estimate_types(payload):
-        if str(estimate_type.get("id") or "") != estimate_type_id:
-            continue
-        for variant in estimate_type.get("project_variants") or []:
-            if str(variant.get("id") or "") != project_variant_id:
-                continue
-            return {
-                "estimate_kind": legacy_estimate_kind_for_type(estimate_type_id),
-                "estimate_type_id": estimate_type_id,
-                "estimate_type_title": estimate_type.get("title"),
-                "estimate_type_number": estimate_type.get("number"),
-                "project_variant_id": project_variant_id,
-                "project_variant_title": variant.get("title"),
-                "project_variant_number": variant.get("number"),
-                "taxonomy_dictionary_version": dictionary_version(payload),
-            }
-        raise ValueError("project_variant_id does not belong to estimate_type_id")
-    raise ValueError(f"Unknown estimate_type_id: {estimate_type_id}")
+    estimate_type = _find_estimate_type(payload, estimate_type_id)
+    variant = _find_project_variant(estimate_type, project_variant_id)
+    resolved_type_id = str(estimate_type.get("id") or "")
+    resolved_variant_id = str(variant.get("id") or "")
+    return {
+        "estimate_kind": legacy_estimate_kind_for_type(resolved_type_id),
+        "estimate_type_id": resolved_type_id,
+        "estimate_type_title": estimate_type.get("title"),
+        "estimate_type_number": estimate_type.get("number"),
+        "project_variant_id": resolved_variant_id,
+        "project_variant_title": variant.get("title"),
+        "project_variant_number": variant.get("number"),
+        "taxonomy_dictionary_version": dictionary_version(payload),
+    }
 
 
 async def load_taxonomy(db: AsyncSession) -> list[SubtypeDef]:
