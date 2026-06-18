@@ -45,7 +45,12 @@ from app.services.ktp_service import (
 )
 from app.services.ktp_item_fer_service import extract_fer_unit, match_session_items, normalize_unit
 from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
-from app.services.work_taxonomy_service import build_work_section_palette, get_project_variant_stages
+from app.services.work_taxonomy_service import (
+    UNKNOWN_SUBTYPE_CODE,
+    build_work_section_palette,
+    get_project_variant_stages,
+    normalize_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +73,7 @@ ESTIMATE_KIND_LABELS: dict[int, str] = {
 FALLBACK_GROUP_TITLE = "Прочие работы сметы"
 FALLBACK_SECTION_KEY = "sec_fallback_misc"
 FALLBACK_DISPLAY_TITLE = "Прочие позиции сметы"
+STAGE_AWARE_FALLBACK_TITLE = "Нераспределённые работы"
 SECTION_KEY_NORMALIZATION_VERSION = "v1"
 PER_GROUP_GAP_FILL_MAX_ITEMS = 3
 PROJECT_GAP_FILL_MAX_DISTRIBUTED = 10
@@ -729,7 +735,7 @@ async def _process_stage1(job_id: str) -> None:
             if fallback_rows:
                 warnings_out.append(
                     f"{len(fallback_rows)} позиций не попали в канонический этап JSON v6 — "
-                    f"добавлены в «{FALLBACK_DISPLAY_TITLE}»"
+                    f"добавлены в «{STAGE_AWARE_FALLBACK_TITLE}»"
                 )
             review_rows = stage_grouping.get("review_rows") or []
             if review_rows:
@@ -961,6 +967,97 @@ def _estimate_stage_title(est: Estimate) -> str | None:
     return value or None
 
 
+_WEAK_STAGE_TEXT_MATCH_TYPES = {
+    "stage_option_match",
+    "near_stage_title_match",
+    "canonical_title_match",
+}
+
+
+def _terms_have_explicit_phrase(terms: list[str] | None) -> bool:
+    return any(len(normalize_text(term).split()) > 1 for term in terms or [])
+
+
+def _stage_score_weak_partial_reason(stage_score: dict[str, Any]) -> str | None:
+    candidates = stage_score.get("candidate_scores")
+    top = candidates[0] if isinstance(candidates, list) and candidates else None
+    if not isinstance(top, dict):
+        return None
+    if str(top.get("match_type") or "") not in _WEAK_STAGE_TEXT_MATCH_TYPES:
+        return None
+    matched = top.get("matched_terms") if isinstance(top.get("matched_terms"), dict) else {}
+    if (
+        matched.get("primary_work_type")
+        or matched.get("related_work_types")
+        or matched.get("occurrence_label")
+        or matched.get("stage_title_exact")
+    ):
+        return None
+    if _terms_have_explicit_phrase(matched.get("stage_option")):
+        return None
+    if _terms_have_explicit_phrase(matched.get("stage_title")):
+        return None
+    if _terms_have_explicit_phrase(matched.get("canonical_stage")):
+        return None
+    signal_terms = (
+        len(matched.get("stage_option") or [])
+        + len(matched.get("stage_title") or [])
+        + len(matched.get("canonical_stage") or [])
+    )
+    if signal_terms:
+        return "stage_weak_partial_text_match"
+    return None
+
+
+def _estimate_stage_review_reason(est: Estimate, raw: dict[str, Any]) -> str | None:
+    stage_score = getattr(est, "stage_match_score_json", None)
+    if not isinstance(stage_score, dict):
+        stage_score = raw.get("stage_match_score_json") if isinstance(raw.get("stage_match_score_json"), dict) else None
+    if isinstance(stage_score, dict):
+        weak_reason = _stage_score_weak_partial_reason(stage_score)
+        if weak_reason:
+            return weak_reason
+        if not bool(stage_score.get("needs_review")):
+            return None
+        reason = str(stage_score.get("reason") or "").strip()
+        if not reason or reason.startswith("stage_"):
+            return reason or "stage_needs_review"
+        return None
+    if est.needs_review or raw.get("needs_review"):
+        return est.review_reason or raw.get("review_reason") or "stage_needs_review"
+    return None
+
+
+def _estimate_work_type_review_reason(est: Estimate, raw: dict[str, Any]) -> str | None:
+    if bool(getattr(est, "manual_override", False) or raw.get("manual_override")):
+        return None
+    subtype_code = (
+        getattr(est, "work_subtype_code", None)
+        or raw.get("work_subtype_code")
+        or raw.get("subtype_code")
+    )
+    section_id = getattr(est, "section_id", None) or raw.get("section_id") or getattr(est, "work_section_code", None)
+    subtype_id = getattr(est, "subtype_id", None)
+    if not subtype_id and isinstance(subtype_code, str) and "/" in subtype_code:
+        _section, subtype_id = subtype_code.split("/", 1)
+    unresolved_code = not subtype_code or subtype_code == UNKNOWN_SUBTYPE_CODE
+    unresolved_pair = not section_id or not subtype_id
+    needs_review = bool(
+        getattr(est, "classification_needs_review", False)
+        or getattr(est, "operator_review_required", False)
+        or raw.get("classification_needs_review")
+        or raw.get("operator_review_required")
+    )
+    work_type_score = getattr(est, "work_type_match_score_json", None)
+    if not isinstance(work_type_score, dict):
+        work_type_score = raw.get("work_type_match_score_json") if isinstance(raw.get("work_type_match_score_json"), dict) else None
+    if isinstance(work_type_score, dict) and bool(work_type_score.get("needs_review")):
+        needs_review = True
+    if unresolved_code or unresolved_pair or needs_review:
+        return "work_type_unresolved"
+    return None
+
+
 def _build_stage_aware_groups(
     estimates: list[Estimate],
     estimate_to_row_key: dict[str, str],
@@ -1007,6 +1104,25 @@ def _build_stage_aware_groups(
     groups: dict[str, dict[str, Any]] = {}
     fallback_items: list[dict[str, Any]] = []
 
+    for stage in allowed_stages:
+        stage_number = str(stage.get("number") or "").strip()
+        if not stage_number:
+            continue
+        section_key = _stage_section_key(stage_number)
+        groups[section_key] = {
+            "title": _stage_title(stage_number, stage.get("title")),
+            "sort_order": stage_order.get(stage_number, float(10**8)),
+            "wt_code": None,
+            "work_section_code": None,
+            "work_section_name": None,
+            "section_key": section_key,
+            "work_stage_number": stage_number,
+            "work_stage_title": stage.get("title"),
+            "canonical_stage_id": stage.get("canonical_stage_id"),
+            "stage_options_mode": stage.get("stage_options_mode") or "none",
+            "items": [],
+        }
+
     for est in sorted(estimates, key=lambda e: (e.row_order or 0, e.id)):
         row_key = estimate_to_row_key.get(est.id)
         if not row_key:
@@ -1035,33 +1151,48 @@ def _build_stage_aware_groups(
             )
             continue
 
-        if est.needs_review or raw.get("needs_review"):
+        stage_review_reason = _estimate_stage_review_reason(est, raw)
+        if stage_review_reason:
             stage_grouping["review_rows"].append(
                 {
                     "row_key": row_key,
                     "estimate_id": est.id,
                     "work_stage_number": stage_number,
+                    "review_reason": stage_review_reason,
+                }
+            )
+            fallback_items.append(
+                {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
+            )
+            stage_grouping["fallback_rows"].append(
+                {
+                    "row_key": row_key,
+                    "estimate_id": est.id,
+                    "reason": "stage_needs_review",
+                    "work_stage_number": stage_number,
+                    "review_reason": stage_review_reason,
+                }
+            )
+            continue
+
+        work_type_review_reason = _estimate_work_type_review_reason(est, raw)
+        if work_type_review_reason:
+            fallback_items.append(
+                {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
+            )
+            stage_grouping["fallback_rows"].append(
+                {
+                    "row_key": row_key,
+                    "estimate_id": est.id,
+                    "reason": work_type_review_reason,
+                    "work_stage_number": stage_number,
                     "review_reason": est.review_reason or raw.get("review_reason"),
                 }
             )
+            continue
 
         section_key = _stage_section_key(stage_number)
-        bucket = groups.setdefault(
-            section_key,
-            {
-                "title": _stage_title(stage_number, _estimate_stage_title(est) or stage.get("title")),
-                "sort_order": stage_order.get(stage_number, float(10**8)),
-                "wt_code": None,
-                "work_section_code": None,
-                "work_section_name": None,
-                "section_key": section_key,
-                "work_stage_number": stage_number,
-                "work_stage_title": stage.get("title"),
-                "canonical_stage_id": stage.get("canonical_stage_id"),
-                "stage_options_mode": stage.get("stage_options_mode") or "none",
-                "items": [],
-            },
-        )
+        bucket = groups[section_key]
         bucket["items"].append(
             {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
         )
@@ -1070,7 +1201,7 @@ def _build_stage_aware_groups(
     if fallback_items:
         result.append(
             {
-                "title": FALLBACK_DISPLAY_TITLE,
+                "title": STAGE_AWARE_FALLBACK_TITLE,
                 "sort_order": float(10**9),
                 "wt_code": None,
                 "work_section_code": None,

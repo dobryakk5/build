@@ -7,6 +7,7 @@ from app.services.work_taxonomy_service import (
 
 ESTIMATE_TYPE_ID = "residential_construction"
 PROJECT_VARIANT_ID = "residential_construction_doma_iz_peno_ili_gazoblokov"
+BRICK_PROJECT_VARIANT_ID = "residential_construction_kirpichnye_doma"
 
 
 def _classifier() -> tuple[StageClassifier, list[dict]]:
@@ -89,6 +90,54 @@ def test_stage_classifier_maps_selectable_and_grouped_options() -> None:
     assert roof["section_id"] == "roofing"
     assert roof["subtype_id"] == "pitched_roof_covering"
     assert roof["needs_review"] is False
+
+
+def test_stage_classifier_does_not_autofill_roof_insulation_into_foundation_protection() -> None:
+    classifier = StageClassifier(get_sequential_scoring_policy())
+    stages = get_project_variant_stages(ESTIMATE_TYPE_ID, BRICK_PROJECT_VARIANT_ID)
+
+    match = classifier.classify_row_to_stage(
+        "Утепление кровли с подшивкой потолка и устройством пароизоляционного слоя",
+        "work",
+        stages,
+        estimate_profile_id=ESTIMATE_TYPE_ID,
+    )
+    raw = match.as_raw_data(
+        estimate_type_id=ESTIMATE_TYPE_ID,
+        estimate_type_number="2",
+        project_variant_id=BRICK_PROJECT_VARIANT_ID,
+        project_variant_number="2.7",
+        row_role="work",
+    )
+
+    assert raw["work_stage_number"] == "2.7.4"
+    assert raw["needs_review"] is True
+    assert raw["review_reason"] == "stage_weak_partial_text_match"
+    assert raw["stage_match_score_json"]["needs_review"] is True
+
+
+def test_stage_classifier_marks_generic_foundation_stage_as_review() -> None:
+    classifier = StageClassifier(get_sequential_scoring_policy())
+    stages = get_project_variant_stages(ESTIMATE_TYPE_ID, BRICK_PROJECT_VARIANT_ID)
+
+    match = classifier.classify_row_to_stage(
+        "Устройство фундамент",
+        "work",
+        stages,
+        estimate_profile_id=ESTIMATE_TYPE_ID,
+    )
+    raw = match.as_raw_data(
+        estimate_type_id=ESTIMATE_TYPE_ID,
+        estimate_type_number="2",
+        project_variant_id=BRICK_PROJECT_VARIANT_ID,
+        project_variant_number="2.7",
+        row_role="work",
+    )
+
+    assert raw["work_stage_number"] == "2.7.4"
+    assert raw["needs_review"] is True
+    assert raw["review_reason"] == "stage_weak_partial_text_match"
+    assert raw["stage_match_score_json"]["needs_review"] is True
 
 
 def test_stage_classifier_material_inherits_previous_work_stage() -> None:

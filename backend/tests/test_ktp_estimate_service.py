@@ -46,6 +46,9 @@ def make_est(
     e.canonical_stage_id = None
     e.needs_review = False
     e.review_reason = None
+    e.stage_match_score_json = None
+    e.section_id = None
+    e.subtype_id = None
     return e
 
 
@@ -184,9 +187,15 @@ def test_stage_aware_groups_use_json_work_stage_order():
     e1 = make_est("e1", "Монтаж металлочерепицы", row_order=20)
     e1.work_stage_number = "2.6.14"
     e1.work_stage_title = "Кровельные работы"
+    e1.section_id = "roofing"
+    e1.subtype_id = "pitched_roof_covering"
+    e1.work_subtype_code = "roofing/pitched_roof_covering"
     e2 = make_est("e2", "Кладка стен", row_order=10)
     e2.work_stage_number = "2.6.6"
     e2.work_stage_title = "Кладка стен 1 этажа"
+    e2.section_id = "load_bearing_walls"
+    e2.subtype_id = "block_walls"
+    e2.work_subtype_code = "load_bearing_walls/block_walls"
     batch = MagicMock()
     batch.estimate_type_id = "residential_construction"
     batch.project_variant_id = "residential_construction_doma_iz_peno_ili_gazoblokov"
@@ -199,15 +208,20 @@ def test_stage_aware_groups_use_json_work_stage_order():
         diagnostics,
     )
 
-    assert [g["work_stage_number"] for g in groups] == ["2.6.6", "2.6.14"]
-    assert groups[0]["title"].startswith("2.6.6.")
-    assert groups[0]["items"] == [{"name": "Кладка стен", "origin": "from_estimate", "row_key": "R002"}]
-    assert groups[1]["items"] == [{"name": "Монтаж металлочерепицы", "origin": "from_estimate", "row_key": "R001"}]
+    stage_numbers = [g["work_stage_number"] for g in groups]
+    assert "2.6.2" in stage_numbers
+    assert "2.6.3" in stage_numbers
+    assert stage_numbers.index("2.6.6") < stage_numbers.index("2.6.14")
+    by_stage = {g["work_stage_number"]: g for g in groups}
+    assert by_stage["2.6.6"]["title"].startswith("2.6.6.")
+    assert by_stage["2.6.6"]["items"] == [{"name": "Кладка стен", "origin": "from_estimate", "row_key": "R002"}]
+    assert by_stage["2.6.14"]["items"] == [{"name": "Монтаж металлочерепицы", "origin": "from_estimate", "row_key": "R001"}]
+    assert by_stage["2.6.2"]["items"] == []
     assert diagnostics["stage_grouping"]["mode"] == "stage_aware"
 
 
 def test_stage_aware_groups_put_rows_without_stage_to_fallback():
-    from app.services.ktp_estimate_service import FALLBACK_DISPLAY_TITLE, _build_stage_aware_groups
+    from app.services.ktp_estimate_service import STAGE_AWARE_FALLBACK_TITLE, _build_stage_aware_groups
 
     e1 = make_est("e1", "Нераспознанная работа")
     batch = MagicMock()
@@ -217,9 +231,97 @@ def test_stage_aware_groups_put_rows_without_stage_to_fallback():
 
     groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
 
-    assert groups[0]["title"] == FALLBACK_DISPLAY_TITLE
-    assert groups[0]["items"][0]["row_key"] == "R001"
+    assert groups[-1]["title"] == STAGE_AWARE_FALLBACK_TITLE
+    assert groups[-1]["items"][0]["row_key"] == "R001"
     assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "missing_work_stage_number"
+
+
+def test_stage_aware_groups_put_stage_review_rows_to_fallback():
+    from app.services.ktp_estimate_service import STAGE_AWARE_FALLBACK_TITLE, _build_stage_aware_groups
+
+    e1 = make_est("e1", "Утепление кровли", row_order=1)
+    e1.work_stage_number = "2.7.4"
+    e1.work_stage_title = "Гидроизоляция и утепление фундамента/цоколя"
+    e1.section_id = "insulation"
+    e1.subtype_id = "roof_attic_insulation"
+    e1.work_subtype_code = "insulation/roof_attic_insulation"
+    e1.stage_match_score_json = {
+        "needs_review": False,
+        "reason": None,
+        "candidate_scores": [
+            {
+                "match_type": "stage_option_match",
+                "matched_terms": {
+                    "stage_title": ["утепление"],
+                    "stage_option": ["утепление/защита"],
+                    "canonical_stage": ["утепление"],
+                },
+            }
+        ],
+    }
+    e2 = make_est("e2", "Гидроизоляция фундамента", row_order=2)
+    e2.work_stage_number = "2.7.4"
+    e2.work_stage_title = "Гидроизоляция и утепление фундамента/цоколя"
+    e2.needs_review = True
+    e2.review_reason = "work_type_candidates_ambiguous"
+    e2.section_id = "waterproofing"
+    e2.subtype_id = "underground_structure_waterproofing"
+    e2.work_subtype_code = "waterproofing/underground_structure_waterproofing"
+    e2.stage_match_score_json = {
+        "needs_review": False,
+        "reason": None,
+    }
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups(
+        [e1, e2],
+        {"e1": "R001", "e2": "R002"},
+        batch,
+        diagnostics,
+    )
+
+    by_stage = {g["work_stage_number"]: g for g in groups if g.get("work_stage_number")}
+    assert by_stage["2.7.4"]["items"] == [{"name": "Гидроизоляция фундамента", "origin": "from_estimate", "row_key": "R002"}]
+    assert groups[-1]["title"] == STAGE_AWARE_FALLBACK_TITLE
+    assert groups[-1]["items"] == [{"name": "Утепление кровли", "origin": "from_estimate", "row_key": "R001"}]
+    assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "stage_needs_review"
+
+
+def test_stage_aware_groups_put_unresolved_work_type_rows_to_fallback():
+    from app.services.ktp_estimate_service import STAGE_AWARE_FALLBACK_TITLE, _build_stage_aware_groups
+
+    e1 = make_est("e1", "Непонятная работа", row_order=1)
+    e1.work_stage_number = "2.7.2"
+    e1.work_stage_title = "Фундаментные работы"
+    e1.work_subtype_code = "unknown/needs_review"
+    e1.classification_needs_review = True
+    e2 = make_est("e2", "Гидроизоляция фундамента", row_order=2)
+    e2.work_stage_number = "2.7.4"
+    e2.work_stage_title = "Гидроизоляция и утепление фундамента/цоколя"
+    e2.section_id = "waterproofing"
+    e2.subtype_id = "underground_structure_waterproofing"
+    e2.work_subtype_code = "waterproofing/underground_structure_waterproofing"
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups(
+        [e1, e2],
+        {"e1": "R001", "e2": "R002"},
+        batch,
+        diagnostics,
+    )
+
+    by_stage = {g["work_stage_number"]: g for g in groups if g.get("work_stage_number")}
+    assert by_stage["2.7.2"]["items"] == []
+    assert by_stage["2.7.4"]["items"] == [{"name": "Гидроизоляция фундамента", "origin": "from_estimate", "row_key": "R002"}]
+    assert groups[-1]["title"] == STAGE_AWARE_FALLBACK_TITLE
+    assert groups[-1]["items"] == [{"name": "Непонятная работа", "origin": "from_estimate", "row_key": "R001"}]
+    assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "work_type_unresolved"
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { useSearchParams } from "next/navigation";
 
 import { workTaxonomy } from "@/lib/api";
@@ -60,6 +60,70 @@ function Chip({ children, title }: { children: ReactNode; title?: string }) {
   );
 }
 
+function IconButton({
+  children,
+  title,
+  onClick,
+  disabled = false,
+  type = "button",
+}: {
+  children: ReactNode;
+  title: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  type?: "button" | "submit";
+}) {
+  return (
+    <button
+      type={type}
+      title={title}
+      aria-label={title}
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        width: 28,
+        height: 28,
+        flex: "0 0 auto",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: `1px solid ${COLORS.border}`,
+        borderRadius: 6,
+        background: "white",
+        color: disabled ? "#94a3b8" : COLORS.muted,
+        cursor: disabled ? "default" : "pointer",
+        padding: 0,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M9.8 2.7 13.3 6.2M2.5 13.5l3.7-.8 7.1-7.1a1.6 1.6 0 0 0-2.3-2.3L3.9 10.4l-.8 3.7Z" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="m3 8.2 3 3L13 4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function formatDictionaryVersion(version: string | null | undefined) {
   if (!version) return "JSON v6.4";
   const match = version.match(/v(\d+(?:_\d+)*)/);
@@ -103,6 +167,10 @@ export default function WorkTaxonomyPanel() {
   const [search, setSearch] = useState(urlSearch);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [editingStageId, setEditingStageId] = useState<string | null>(null);
+  const [stageTitleDraft, setStageTitleDraft] = useState("");
+  const [savingStageId, setSavingStageId] = useState<string | null>(null);
+  const [stageEditError, setStageEditError] = useState<string | null>(null);
 
   useEffect(() => {
     setSearch(urlSearch);
@@ -164,6 +232,59 @@ export default function WorkTaxonomyPanel() {
   function selectType(type: WorkEstimateType) {
     setSelectedTypeId(type.id);
     setSelectedVariantId(type.project_variants[0]?.id ?? null);
+  }
+
+  function startStageEdit(stage: WorkStage) {
+    setEditingStageId(stage.id);
+    setStageTitleDraft(stage.title);
+    setStageEditError(null);
+  }
+
+  function cancelStageEdit() {
+    setEditingStageId(null);
+    setStageTitleDraft("");
+    setStageEditError(null);
+  }
+
+  function replaceStageTitle(stageId: string, title: string) {
+    setHierarchy((current) => {
+      if (!current) return current;
+      return {
+        ...current,
+        estimate_types: current.estimate_types.map((type) => ({
+          ...type,
+          project_variants: type.project_variants.map((variant) => ({
+            ...variant,
+            stages: variant.stages?.map((stage) => (stage.id === stageId ? { ...stage, title } : stage)),
+          })),
+        })),
+      };
+    });
+  }
+
+  async function saveStageTitle(event: FormEvent<HTMLFormElement>, stage: WorkStage) {
+    event.preventDefault();
+    const nextTitle = stageTitleDraft.trim();
+    if (!nextTitle) {
+      setStageEditError("Название не может быть пустым");
+      return;
+    }
+    if (nextTitle === stage.title) {
+      cancelStageEdit();
+      return;
+    }
+
+    setSavingStageId(stage.id);
+    setStageEditError(null);
+    try {
+      const updated = await workTaxonomy.updateProjectStageTitle(stage.id, nextTitle);
+      replaceStageTitle(stage.id, updated.title);
+      cancelStageEdit();
+    } catch (err) {
+      setStageEditError(err instanceof Error ? err.message : "Не удалось сохранить название");
+    } finally {
+      setSavingStageId(null);
+    }
   }
 
   if (loading) {
@@ -303,10 +424,48 @@ export default function WorkTaxonomyPanel() {
                   gap: 8,
                 }}
               >
-                <div style={{ display: "flex", alignItems: "baseline", gap: 8, minWidth: 0 }}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 8, minWidth: 0 }}>
                   <Code>{stage.number}</Code>
-                  <span style={{ minWidth: 0, fontSize: 14, fontWeight: 650, lineHeight: 1.3 }}>{stage.title}</span>
+                  {editingStageId === stage.id ? (
+                    <form
+                      onSubmit={(event) => saveStageTitle(event, stage)}
+                      style={{ minWidth: 0, flex: 1, display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto", gap: 6 }}
+                    >
+                      <input
+                        value={stageTitleDraft}
+                        onChange={(event) => setStageTitleDraft(event.target.value)}
+                        autoFocus
+                        disabled={savingStageId === stage.id}
+                        style={{
+                          minWidth: 0,
+                          height: 28,
+                          boxSizing: "border-box",
+                          border: `1px solid ${COLORS.border}`,
+                          borderRadius: 6,
+                          padding: "5px 8px",
+                          fontSize: 13,
+                          color: COLORS.text,
+                        }}
+                      />
+                      <IconButton type="submit" title="Сохранить" disabled={savingStageId === stage.id}>
+                        <CheckIcon />
+                      </IconButton>
+                      <IconButton title="Отменить" onClick={cancelStageEdit} disabled={savingStageId === stage.id}>
+                        <CloseIcon />
+                      </IconButton>
+                    </form>
+                  ) : (
+                    <>
+                      <span style={{ minWidth: 0, flex: 1, fontSize: 14, fontWeight: 650, lineHeight: 1.3 }}>{stage.title}</span>
+                      <IconButton title="Редактировать название" onClick={() => startStageEdit(stage)}>
+                        <PencilIcon />
+                      </IconButton>
+                    </>
+                  )}
                 </div>
+                {editingStageId === stage.id && stageEditError ? (
+                  <div style={{ color: "#dc2626", fontSize: 12 }}>{stageEditError}</div>
+                ) : null}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {stage.canonical_stage_id ? <Chip>{stage.canonical_stage_id}</Chip> : null}
                   {stage.occurrence_label ? <Chip>{stage.occurrence_label}</Chip> : null}

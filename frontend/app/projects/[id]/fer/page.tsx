@@ -121,7 +121,11 @@ export default function FerPage() {
   const pathname = usePathname();
   const tableFromUrl = searchParams.get("table");
   const tabFromUrl = searchParams.get("tab");
-  const activeDirectoryTab = tableFromUrl ? "fer" : tabFromUrl === "work-types" || tabFromUrl === "estimate" ? tabFromUrl : "fer";
+  const activeDirectoryTab = tableFromUrl
+    ? "fer"
+    : tabFromUrl === "fer" || tabFromUrl === "work-types" || tabFromUrl === "estimate"
+      ? tabFromUrl
+      : "work-types";
   const [collections, setCollections] = useState<FerCollectionSummary[]>([]);
   const [collectionsLoad, setCollectionsLoad] = useState(true);
   const [browse, setBrowse] = useState<FerBrowseResponse | null>(null);
@@ -695,9 +699,9 @@ function ReferenceTabs({
   basePath: string;
 }) {
   const tabs = [
-    { id: "fer", label: "ФЕР", href: basePath },
-    { id: "work-types", label: "Виды работ", href: `${basePath}?tab=work-types` },
+    { id: "work-types", label: "Виды работ", href: basePath },
     { id: "estimate", label: "Смета", href: `${basePath}?tab=estimate` },
+    { id: "fer", label: "ФЕР", href: `${basePath}?tab=fer`, alignRight: true },
   ];
 
   return (
@@ -722,6 +726,7 @@ function ReferenceTabs({
           style={{
             display: "inline-flex",
             alignItems: "center",
+            marginLeft: tab.alignRight ? "auto" : 0,
             padding: "11px 12px 10px",
             borderBottom: activeTab === tab.id ? "2px solid var(--blue)" : "2px solid transparent",
             color: activeTab === tab.id ? "var(--text)" : "var(--muted)",

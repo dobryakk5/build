@@ -1,7 +1,8 @@
-"""Read-only public API for the canonical JSON work taxonomy."""
+"""Public API for the canonical JSON work taxonomy."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -13,10 +14,15 @@ from app.services.work_taxonomy_service import (
     get_project_variants,
     get_work_taxonomy_sections,
     get_work_taxonomy_subtypes,
+    update_project_stage_title,
 )
 
 
 router = APIRouter(prefix="/work-taxonomy", tags=["work-taxonomy"])
+
+
+class WorkStageTitlePatch(BaseModel):
+    title: str = Field(min_length=1, max_length=240)
 
 
 @router.get("/sections")
@@ -60,6 +66,16 @@ async def work_taxonomy_project_variant_stages(
         return get_project_variant_stages(estimate_type_id, project_variant_id)
     except ValueError as exc:
         raise HTTPException(404, str(exc)) from exc
+
+
+@router.patch("/project-hierarchy/stages/{stage_id}")
+async def work_taxonomy_update_project_stage(stage_id: str, patch: WorkStageTitlePatch):
+    try:
+        return update_project_stage_title(stage_id, patch.title)
+    except KeyError as exc:
+        raise HTTPException(404, f"Unknown stage_id: {stage_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.get("/canonical-stages")

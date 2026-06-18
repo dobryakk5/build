@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -441,6 +442,48 @@ def get_project_variant_stages(estimate_type_id: str, project_variant_id: str) -
         for stage in variant.get("stages") or []
         if isinstance(stage, dict)
     ]
+
+
+def _write_dictionary(payload: dict[str, Any]) -> None:
+    tmp_path = DICTIONARY_FILE.with_suffix(DICTIONARY_FILE.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, ensure_ascii=False, indent=2)
+        fh.write("\n")
+    tmp_path.replace(DICTIONARY_FILE)
+
+
+def update_project_stage_title(stage_id: str, title: str) -> dict[str, Any]:
+    new_title = title.strip()
+    if not new_title:
+        raise ValueError("Stage title cannot be empty")
+    if len(new_title) > 240:
+        raise ValueError("Stage title is too long")
+
+    payload = deepcopy(_load_dictionary())
+    matched_stage: dict[str, Any] | None = None
+    matched_count = 0
+    for estimate_type in _hierarchy_estimate_types(payload):
+        for variant in estimate_type.get("project_variants") or []:
+            if not isinstance(variant, dict):
+                continue
+            for stage in variant.get("stages") or []:
+                if not isinstance(stage, dict):
+                    continue
+                if str(stage.get("id") or "") == stage_id:
+                    matched_stage = stage
+                    matched_count += 1
+
+    if matched_count == 0:
+        raise KeyError(stage_id)
+    if matched_count > 1:
+        raise ValueError(f"Stage id is not unique: {stage_id}")
+
+    assert matched_stage is not None
+    matched_stage["title"] = new_title
+    validate_dictionary_payload(payload)
+    _write_dictionary(payload)
+    clear_cache()
+    return _public_work_stage(matched_stage)
 
 
 def suggest_project_hierarchy_variants(

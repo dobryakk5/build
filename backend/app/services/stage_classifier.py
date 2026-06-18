@@ -565,6 +565,10 @@ class StageClassifier:
         if stage_role in ALWAYS_REVIEW_STAGE_ROLES:
             needs_review = True
             reason = f"stage_role_{stage_role}_requires_review"
+        weak_reason = self._weak_stage_signal_reason(best)
+        if weak_reason:
+            needs_review = True
+            reason = reason or weak_reason
 
         confidence = "low" if needs_review else "high" if best.score >= 14 else "medium"
         occurrence_label = self._resolve_occurrence_label(best.stage, text, previous_context)
@@ -600,7 +604,7 @@ class StageClassifier:
             None,
             reason or (work_type.reason if work_type.needs_review else None),
             occurrence_label=occurrence_label,
-            score_breakdown=self._stage_score_json(scored, best, second_score, delta, reason, bool(needs_review or work_type.needs_review)),
+            score_breakdown=self._stage_score_json(scored, best, second_score, delta, reason, needs_review),
             work_type_match=work_type,
             normalized_row_role=normalized_role,
         )
@@ -829,6 +833,34 @@ class StageClassifier:
             normalized_row_role=row_role,
         )
 
+    def _weak_stage_signal_reason(self, match: StageMatch) -> str | None:
+        matched = match.matched_terms or {}
+        if (
+            matched.get("primary_work_type")
+            or matched.get("related_work_types")
+            or matched.get("occurrence_label")
+            or matched.get("stage_title_exact")
+        ):
+            return None
+        if _has_explicit_phrase(matched.get("stage_option") or []):
+            return None
+        if _has_explicit_phrase(matched.get("stage_title") or []):
+            return None
+        if _has_explicit_phrase(matched.get("canonical_stage") or []):
+            return None
+        signal_terms = (
+            len(matched.get("stage_option") or [])
+            + len(matched.get("stage_title") or [])
+            + len(matched.get("canonical_stage") or [])
+        )
+        if signal_terms and match.match_type in {
+            StageMatchType.STAGE_OPTION_MATCH.value,
+            StageMatchType.NEAR_STAGE_TITLE_MATCH.value,
+            StageMatchType.CANONICAL_TITLE_MATCH.value,
+        }:
+            return "stage_weak_partial_text_match"
+        return None
+
     def _stage_score_json(
         self,
         scored: list[StageMatch],
@@ -981,6 +1013,10 @@ def _important_terms(value: Any) -> list[str]:
     if normalized:
         terms.append(normalized)
     return terms
+
+
+def _has_explicit_phrase(terms: list[str]) -> bool:
+    return any(len(normalize_text(term).split()) > 1 for term in terms)
 
 
 def _work_type_code(ref: dict[str, Any]) -> str:

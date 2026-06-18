@@ -841,6 +841,11 @@ export const workTaxonomy = {
     request<WorkStage[]>(
       `/work-taxonomy/estimate-types/${encodeURIComponent(estimateTypeId)}/variants/${encodeURIComponent(projectVariantId)}/stages`
     ),
+  updateProjectStageTitle: (stageId: string, title: string) =>
+    request<WorkStage>(`/work-taxonomy/project-hierarchy/stages/${encodeURIComponent(stageId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
   canonicalStages: () => request<Record<string, unknown>>("/work-taxonomy/canonical-stages"),
 };
 

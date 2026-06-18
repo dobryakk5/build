@@ -217,6 +217,57 @@ export default function KtpEstimateWizardPage() {
     [],
   );
 
+  const addItemOptimistic = useCallback(
+    async (groupId: string, name: string) => {
+      const tempId = `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const tempItem: KtpWbsItem = {
+        id: tempId,
+        group_id: groupId,
+        name,
+        sort_order: Date.now(),
+        origin: "manual",
+        review_status: "accepted",
+        work_type_needs_review: false,
+        work_type_candidates: [],
+        operator_review_required: false,
+        manual_override: false,
+        gpr_confirmed: false,
+        gpr_blocker: false,
+      };
+      setWbs((prev) =>
+        prev
+          ? {
+              ...prev,
+              groups: prev.groups.map((group) =>
+                group.id === groupId ? { ...group, items: [...group.items, tempItem] } : group,
+              ),
+            }
+          : prev,
+      );
+      setBusy(true);
+      try {
+        setWbs(await ktpEstimate.createItem(projectId, groupId, { name }));
+        setError(null);
+      } catch (e: any) {
+        setWbs((prev) =>
+          prev
+            ? {
+                ...prev,
+                groups: prev.groups.map((group) => ({
+                  ...group,
+                  items: group.items.filter((item) => item.id !== tempId),
+                })),
+              }
+            : prev,
+        );
+        setError(e.message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [projectId],
+  );
+
   const stage1Processing = status === "stage1_processing" || status === "stage1_pending";
   const gprProcessing = status === "gpr_processing";
   const actualStepIndex =
@@ -365,6 +416,7 @@ export default function KtpEstimateWizardPage() {
           run={run}
           projectId={projectId}
           sessionId={sessionId}
+          addItemOptimistic={addItemOptimistic}
           revisiting={revisitingCompletedStep}
           onReturn={() => setViewStep(null)}
           onApprove={async () => {
@@ -662,6 +714,7 @@ function Stage1({
   run,
   projectId,
   sessionId,
+  addItemOptimistic,
   revisiting,
   onReturn,
   onApprove,
@@ -671,6 +724,7 @@ function Stage1({
   run: (fn: () => Promise<KtpWbs>) => Promise<void>;
   projectId: string;
   sessionId: string;
+  addItemOptimistic: (groupId: string, name: string) => Promise<void>;
   revisiting?: boolean;
   onReturn?: () => void;
   onApprove: () => void;
@@ -723,6 +777,7 @@ function Stage1({
           busy={busy}
           run={run}
           projectId={projectId}
+          addItemOptimistic={addItemOptimistic}
         />
       ))}
 
@@ -757,12 +812,14 @@ function Stage1Group({
   busy,
   run,
   projectId,
+  addItemOptimistic,
 }: {
   group: KtpWbsGroup;
   groupOptions: { id: string; title: string }[];
   busy: boolean;
   run: (fn: () => Promise<KtpWbs>) => Promise<void>;
   projectId: string;
+  addItemOptimistic: (groupId: string, name: string) => Promise<void>;
 }) {
   const [title, setTitle] = useState(group.title);
   const [newItem, setNewItem] = useState("");
@@ -890,13 +947,12 @@ function Stage1Group({
         <button
           style={btn()}
           disabled={busy || !newItem.trim()}
-          onClick={() =>
-            run(async () => {
-              const r = await ktpEstimate.createItem(projectId, group.id, { name: newItem.trim() });
-              setNewItem("");
-              return r;
-            })
-          }
+          onClick={() => {
+            const name = newItem.trim();
+            if (!name) return;
+            setNewItem("");
+            void addItemOptimistic(group.id, name);
+          }}
         >
           + Работа
         </button>
