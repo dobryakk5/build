@@ -90,7 +90,7 @@ export default function NwDictionaryPage() {
   const router = useRouter();
   const pathname = usePathname();
   const { user, loading: userLoading } = useUser();
-  const embedded = pathname.startsWith("/projects/") && pathname.includes("/fer");
+  const embedded = pathname.startsWith("/projects/") && pathname.includes("/types");
 
   const [workTypes, setWorkTypes] = useState<NwWorkType[]>([]);
   const [dicts, setDicts] = useState<NwDictionaries | null>(null);

@@ -133,7 +133,7 @@ export default function ProjectLayout({ children }: { children: ReactNode }) {
     { id: "gantt", label: "📊 ГПР", matchPath: `/projects/${id}/gantt`, href: withBatch(`/projects/${id}/gantt`) },
     { id: "estimate", label: "📋 Смета", matchPath: `/projects/${id}/estimate`, href: withBatch(`/projects/${id}/estimate`) },
     { id: "journal", label: "🗒 Журнал", matchPath: `/projects/${id}/journal`, href: `/projects/${id}/journal` },
-    { id: "references", label: "🧾 Справочники", matchPath: `/projects/${id}/fer`, href: `/projects/${id}/fer` },
+    { id: "references", label: "🧾 Справочники", matchPath: `/projects/${id}/types`, href: `/projects/${id}/types` },
     { id: "upload", label: "⬆ Загрузка", matchPath: `/projects/${id}/upload`, href: uploadHref },
     ...(canManage ? [{ id: "settings", label: "⚙ Настройки", matchPath: `/projects/${id}/settings`, href: `/projects/${id}/settings` }] : []),
   ];

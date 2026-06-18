@@ -1685,7 +1685,7 @@ function StageProductivity({
     if (sectionCode) params.set("section", sectionCode);
     const query = row.work_subtype_name || row.subtype_name;
     if (query && !code.startsWith("__unknown__") && code !== "unknown/needs_review") params.set("q", query);
-    return `/projects/${projectId}/fer?${params.toString()}`;
+    return `/projects/${projectId}/types?${params.toString()}`;
   }
 
   const cols = "minmax(220px, 1fr) 150px 150px 110px 130px";

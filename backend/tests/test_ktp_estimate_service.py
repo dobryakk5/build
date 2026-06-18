@@ -324,6 +324,50 @@ def test_stage_aware_groups_put_unresolved_work_type_rows_to_fallback():
     assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "work_type_unresolved"
 
 
+def test_stage_aware_groups_accept_work_subtype_code_without_split_ids():
+    from app.services.ktp_estimate_service import _build_stage_aware_groups
+
+    e1 = make_est("e1", "Укладка гильзы под ввод коммуникаций", row_order=1)
+    e1.work_stage_number = "2.7.5"
+    e1.work_stage_title = "Устройство перекрытий цоколя"
+    e1.work_subtype_code = "floor_slabs/timber_floor"
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
+
+    by_stage = {g["work_stage_number"]: g for g in groups if g.get("work_stage_number")}
+    assert by_stage["2.7.5"]["items"] == [
+        {"name": "Укладка гильзы под ввод коммуникаций", "origin": "from_estimate", "row_key": "R001"}
+    ]
+    assert not diagnostics["stage_grouping"]["fallback_rows"]
+
+
+def test_stage_aware_groups_keeps_known_work_type_even_if_review_flagged():
+    from app.services.ktp_estimate_service import _build_stage_aware_groups
+
+    e1 = make_est("e1", "Утепление фундамента", row_order=1)
+    e1.work_stage_number = "2.7.4"
+    e1.work_stage_title = "Гидроизоляция и утепление фундамента/цоколя"
+    e1.work_subtype_code = "foundation/foundation_protection_insulation"
+    e1.classification_needs_review = True
+    e1.operator_review_required = True
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
+
+    by_stage = {g["work_stage_number"]: g for g in groups if g.get("work_stage_number")}
+    assert by_stage["2.7.4"]["items"] == [
+        {"name": "Утепление фундамента", "origin": "from_estimate", "row_key": "R001"}
+    ]
+    assert not diagnostics["stage_grouping"]["fallback_rows"]
+
+
 @pytest.mark.asyncio
 async def test_run_stage1_preserve_estimate_structure_uses_estimate_sections():
     import app.services.ktp_estimate_service as svc

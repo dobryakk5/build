@@ -1039,21 +1039,11 @@ def _estimate_work_type_review_reason(est: Estimate, raw: dict[str, Any]) -> str
     section_id = getattr(est, "section_id", None) or raw.get("section_id") or getattr(est, "work_section_code", None)
     subtype_id = getattr(est, "subtype_id", None)
     if not subtype_id and isinstance(subtype_code, str) and "/" in subtype_code:
-        _section, subtype_id = subtype_code.split("/", 1)
+        section_from_code, subtype_id = subtype_code.split("/", 1)
+        section_id = section_id or section_from_code
     unresolved_code = not subtype_code or subtype_code == UNKNOWN_SUBTYPE_CODE
     unresolved_pair = not section_id or not subtype_id
-    needs_review = bool(
-        getattr(est, "classification_needs_review", False)
-        or getattr(est, "operator_review_required", False)
-        or raw.get("classification_needs_review")
-        or raw.get("operator_review_required")
-    )
-    work_type_score = getattr(est, "work_type_match_score_json", None)
-    if not isinstance(work_type_score, dict):
-        work_type_score = raw.get("work_type_match_score_json") if isinstance(raw.get("work_type_match_score_json"), dict) else None
-    if isinstance(work_type_score, dict) and bool(work_type_score.get("needs_review")):
-        needs_review = True
-    if unresolved_code or unresolved_pair or needs_review:
+    if unresolved_code or unresolved_pair:
         return "work_type_unresolved"
     return None
 

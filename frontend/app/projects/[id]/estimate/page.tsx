@@ -1577,7 +1577,7 @@ export default function EstimatePage() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
-  const embeddedInReferences = pathname.endsWith("/fer");
+  const embeddedInReferences = pathname.endsWith("/types");
   const batchFromUrl = searchParams.get("batch");
 
   const [rows, setRows] = useState<EstimateRow[]>([]);
@@ -1718,11 +1718,11 @@ export default function EstimatePage() {
     setPopup(null);
     setGroupCandidatesModal(null);
     setGroupManualModal(null);
-    router.replace(embeddedInReferences ? `/projects/${id}/fer?tab=estimate&batch=${batchId}` : `/projects/${id}/estimate?batch=${batchId}`);
+    router.replace(embeddedInReferences ? `/projects/${id}/types?tab=estimate&batch=${batchId}` : `/projects/${id}/estimate?batch=${batchId}`);
   };
 
   const openFerReference = (tableId: number) => {
-    router.push(`/projects/${id}/fer?table=${tableId}`);
+    router.push(`/projects/${id}/types?table=${tableId}`);
   };
 
   const activeBatch = batches.find((batch) => batch.id === activeBatchId) ?? null;
