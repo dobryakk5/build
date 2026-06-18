@@ -74,6 +74,7 @@ FALLBACK_GROUP_TITLE = "Прочие работы сметы"
 FALLBACK_SECTION_KEY = "sec_fallback_misc"
 FALLBACK_DISPLAY_TITLE = "Прочие позиции сметы"
 STAGE_AWARE_FALLBACK_TITLE = "Нераспределённые работы"
+STAGE_GROUPING_AUTO_ACCEPT_MIN_SCORE = 10
 SECTION_KEY_NORMALIZATION_VERSION = "v1"
 PER_GROUP_GAP_FILL_MAX_ITEMS = 3
 PROJECT_GAP_FILL_MAX_DISTRIBUTED = 10
@@ -1009,17 +1010,55 @@ def _stage_score_weak_partial_reason(stage_score: dict[str, Any]) -> str | None:
     return None
 
 
+def _stage_score_high_confidence_partial(stage_score: dict[str, Any]) -> bool:
+    winner = stage_score.get("winner") if isinstance(stage_score.get("winner"), dict) else {}
+    try:
+        winner_score = int(winner.get("score") or 0)
+    except (TypeError, ValueError):
+        winner_score = 0
+    candidates = stage_score.get("candidate_scores")
+    top = candidates[0] if isinstance(candidates, list) and candidates else None
+    if not isinstance(top, dict):
+        return False
+    matched = top.get("matched_terms") if isinstance(top.get("matched_terms"), dict) else {}
+    unique_terms = {
+        normalize_text(term)
+        for key in ("stage_option", "stage_title", "canonical_stage")
+        for term in (matched.get(key) or [])
+        if normalize_text(term)
+    }
+    return winner_score >= 14 and len(unique_terms) >= 2
+
+
+def _stage_score_has_primary_winner(stage_score: dict[str, Any]) -> bool:
+    winner = stage_score.get("winner") if isinstance(stage_score.get("winner"), dict) else {}
+    try:
+        winner_score = int(winner.get("score") or 0)
+    except (TypeError, ValueError):
+        winner_score = 0
+    candidates = stage_score.get("candidate_scores")
+    top = candidates[0] if isinstance(candidates, list) and candidates else None
+    if not isinstance(top, dict):
+        return False
+    matched = top.get("matched_terms") if isinstance(top.get("matched_terms"), dict) else {}
+    return winner_score >= STAGE_GROUPING_AUTO_ACCEPT_MIN_SCORE and bool(matched.get("primary_work_type"))
+
+
 def _estimate_stage_review_reason(est: Estimate, raw: dict[str, Any]) -> str | None:
     stage_score = getattr(est, "stage_match_score_json", None)
     if not isinstance(stage_score, dict):
         stage_score = raw.get("stage_match_score_json") if isinstance(raw.get("stage_match_score_json"), dict) else None
     if isinstance(stage_score, dict):
         weak_reason = _stage_score_weak_partial_reason(stage_score)
-        if weak_reason:
+        if weak_reason and not _stage_score_high_confidence_partial(stage_score):
             return weak_reason
         if not bool(stage_score.get("needs_review")):
             return None
         reason = str(stage_score.get("reason") or "").strip()
+        if reason == "stage_weak_partial_text_match" and _stage_score_high_confidence_partial(stage_score):
+            return None
+        if reason == "stage_candidates_ambiguous" and _stage_score_has_primary_winner(stage_score):
+            return None
         if not reason or reason.startswith("stage_"):
             return reason or "stage_needs_review"
         return None

@@ -140,6 +140,24 @@ def test_stage_classifier_marks_generic_foundation_stage_as_review() -> None:
     assert raw["stage_match_score_json"]["needs_review"] is True
 
 
+def test_stage_classifier_accepts_primary_work_type_despite_close_second_stage() -> None:
+    classifier = StageClassifier(get_sequential_scoring_policy())
+    stages = get_project_variant_stages(ESTIMATE_TYPE_ID, BRICK_PROJECT_VARIANT_ID)
+
+    raw = _raw(
+        classifier.classify_row_to_stage(
+            "Монтаж перемычек",
+            "work",
+            stages,
+            estimate_profile_id=ESTIMATE_TYPE_ID,
+        )
+    )
+
+    assert raw["work_stage_number"] == "2.7.8"
+    assert raw["needs_review"] is False
+    assert raw["review_reason"] is None
+
+
 def test_stage_classifier_material_inherits_previous_work_stage() -> None:
     classifier, stages = _classifier()
     work_match = classifier.classify_row_to_stage(

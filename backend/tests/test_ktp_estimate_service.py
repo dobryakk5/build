@@ -368,6 +368,76 @@ def test_stage_aware_groups_keeps_known_work_type_even_if_review_flagged():
     assert not diagnostics["stage_grouping"]["fallback_rows"]
 
 
+def test_stage_aware_groups_keeps_high_confidence_partial_stage_match():
+    from app.services.ktp_estimate_service import _build_stage_aware_groups
+
+    e1 = make_est("e1", "Кирпичная кладка вентканалов", row_order=1)
+    e1.work_stage_number = "2.7.6"
+    e1.work_stage_title = "Кладка наружных и внутренних несущих стен из кирпича 1 этаж"
+    e1.work_subtype_code = "load_bearing_walls/vent_shafts_masonry"
+    e1.stage_match_score_json = {
+        "needs_review": True,
+        "reason": "stage_weak_partial_text_match",
+        "winner": {"score": 18},
+        "candidate_scores": [
+            {
+                "match_type": "near_stage_title_match",
+                "matched_terms": {
+                    "stage_title": ["кладка", "стен", "кирпича"],
+                    "canonical_stage": ["кладка", "стен", "кирпича"],
+                },
+            }
+        ],
+    }
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
+
+    by_stage = {g["work_stage_number"]: g for g in groups if g.get("work_stage_number")}
+    assert by_stage["2.7.6"]["items"] == [
+        {"name": "Кирпичная кладка вентканалов", "origin": "from_estimate", "row_key": "R001"}
+    ]
+    assert not diagnostics["stage_grouping"]["fallback_rows"]
+
+
+def test_stage_aware_groups_keeps_ambiguous_primary_work_type_winner():
+    from app.services.ktp_estimate_service import _build_stage_aware_groups
+
+    e1 = make_est("e1", "Монтаж перемычек", row_order=1)
+    e1.work_stage_number = "2.7.8"
+    e1.work_stage_title = "Устройство перемычек над проемами кладки 1 этажа"
+    e1.work_subtype_code = "load_bearing_walls/arm_belts_lintels"
+    e1.stage_match_score_json = {
+        "needs_review": True,
+        "reason": "stage_candidates_ambiguous",
+        "winner": {"score": 12},
+        "candidate_scores": [
+            {
+                "match_type": "near_stage_title_match",
+                "matched_terms": {
+                    "stage_title": ["перемычек"],
+                    "primary_work_type": ["load_bearing_walls/arm_belts_lintels"],
+                },
+            }
+        ],
+    }
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
+
+    by_stage = {g["work_stage_number"]: g for g in groups if g.get("work_stage_number")}
+    assert by_stage["2.7.8"]["items"] == [
+        {"name": "Монтаж перемычек", "origin": "from_estimate", "row_key": "R001"}
+    ]
+    assert not diagnostics["stage_grouping"]["fallback_rows"]
+
+
 @pytest.mark.asyncio
 async def test_run_stage1_preserve_estimate_structure_uses_estimate_sections():
     import app.services.ktp_estimate_service as svc

@@ -569,6 +569,13 @@ class StageClassifier:
         if weak_reason:
             needs_review = True
             reason = reason or weak_reason
+        if (
+            reason == "stage_candidates_ambiguous"
+            and best.matched_terms.get("primary_work_type")
+            and best.score >= self.thresholds["stage_auto_accept_min_score"]
+        ):
+            needs_review = False
+            reason = None
 
         confidence = "low" if needs_review else "high" if best.score >= 14 else "medium"
         occurrence_label = self._resolve_occurrence_label(best.stage, text, previous_context)
