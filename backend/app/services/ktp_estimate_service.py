@@ -444,6 +444,7 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
             .order_by(KtpWbsGroup.sort_order, KtpWbsGroup.created_at)
         )
     )
+    await _attach_stage_review_metadata(db, groups)
     group_ids = [g.id for g in groups]
     deps = (
         list(
@@ -475,6 +476,36 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
         "group_dependencies": deps,
         "session_subtypes": subtypes,
     }
+
+
+async def _attach_stage_review_metadata(db: AsyncSession, groups: list[KtpWbsGroup]) -> None:
+    estimate_ids = [
+        item.estimate_id
+        for group in groups
+        for item in group.items
+        if item.estimate_id
+    ]
+    if not estimate_ids:
+        return
+    estimates = {
+        est.id: est
+        for est in await db.scalars(select(Estimate).where(Estimate.id.in_(estimate_ids)))
+    }
+    for group in groups:
+        for item in group.items:
+            est = estimates.get(item.estimate_id)
+            if not est:
+                setattr(item, "_stage_needs_review", False)
+                setattr(item, "_stage_review_reason", None)
+                setattr(item, "_stage_confidence_percent", None)
+                continue
+            raw = est.raw_data if isinstance(est.raw_data, dict) else {}
+            needs_review, reason, percent = _estimate_stage_review_info(est, raw)
+            setattr(item, "_stage_needs_review", needs_review)
+            setattr(item, "_stage_review_reason", reason)
+            setattr(item, "_stage_confidence_percent", percent)
+            if needs_review and not item.manual_override:
+                item.operator_review_required = True
 
 
 def _job_reference_time(job: Job) -> datetime | None:
@@ -1044,27 +1075,47 @@ def _stage_score_has_primary_winner(stage_score: dict[str, Any]) -> bool:
     return winner_score >= STAGE_GROUPING_AUTO_ACCEPT_MIN_SCORE and bool(matched.get("primary_work_type"))
 
 
-def _estimate_stage_review_reason(est: Estimate, raw: dict[str, Any]) -> str | None:
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _stage_confidence_percent(stage_score: dict[str, Any] | None) -> int | None:
+    if not isinstance(stage_score, dict):
+        return None
+    winner = stage_score.get("winner") if isinstance(stage_score.get("winner"), dict) else {}
+    try:
+        score = float(winner.get("score"))
+        delta = float(stage_score.get("delta_top_1_top_2"))
+    except (TypeError, ValueError):
+        return None
+    score_part = _clamp(score / 14.0, 0.0, 1.0)
+    delta_part = _clamp(delta / 3.0, 0.0, 1.0)
+    return round(100 * min(score_part, delta_part))
+
+
+def _estimate_stage_review_info(est: Estimate, raw: dict[str, Any]) -> tuple[bool, str | None, int | None]:
+    if bool(getattr(est, "manual_override", False) or raw.get("manual_override")):
+        return False, None, None
     stage_score = getattr(est, "stage_match_score_json", None)
     if not isinstance(stage_score, dict):
         stage_score = raw.get("stage_match_score_json") if isinstance(raw.get("stage_match_score_json"), dict) else None
+    percent = _stage_confidence_percent(stage_score)
     if isinstance(stage_score, dict):
         weak_reason = _stage_score_weak_partial_reason(stage_score)
-        if weak_reason and not _stage_score_high_confidence_partial(stage_score):
-            return weak_reason
-        if not bool(stage_score.get("needs_review")):
-            return None
+        if weak_reason:
+            return True, weak_reason, percent
         reason = str(stage_score.get("reason") or "").strip()
-        if reason == "stage_weak_partial_text_match" and _stage_score_high_confidence_partial(stage_score):
-            return None
-        if reason == "stage_candidates_ambiguous" and _stage_score_has_primary_winner(stage_score):
-            return None
-        if not reason or reason.startswith("stage_"):
-            return reason or "stage_needs_review"
-        return None
+        if bool(stage_score.get("needs_review")):
+            return True, reason or "stage_needs_review", percent
+        return False, None, percent
     if est.needs_review or raw.get("needs_review"):
-        return est.review_reason or raw.get("review_reason") or "stage_needs_review"
-    return None
+        return True, est.review_reason or raw.get("review_reason") or "stage_needs_review", percent
+    return False, None, percent
+
+
+def _estimate_stage_review_reason(est: Estimate, raw: dict[str, Any]) -> str | None:
+    needs_review, reason, _percent = _estimate_stage_review_info(est, raw)
+    return reason if needs_review else None
 
 
 def _estimate_work_type_review_reason(est: Estimate, raw: dict[str, Any]) -> str | None:
@@ -1190,35 +1241,18 @@ def _build_stage_aware_groups(
                     "review_reason": stage_review_reason,
                 }
             )
-            fallback_items.append(
-                {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
-            )
-            stage_grouping["fallback_rows"].append(
-                {
-                    "row_key": row_key,
-                    "estimate_id": est.id,
-                    "reason": "stage_needs_review",
-                    "work_stage_number": stage_number,
-                    "review_reason": stage_review_reason,
-                }
-            )
-            continue
 
         work_type_review_reason = _estimate_work_type_review_reason(est, raw)
         if work_type_review_reason:
-            fallback_items.append(
-                {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
-            )
-            stage_grouping["fallback_rows"].append(
+            stage_grouping["review_rows"].append(
                 {
                     "row_key": row_key,
                     "estimate_id": est.id,
-                    "reason": work_type_review_reason,
                     "work_stage_number": stage_number,
                     "review_reason": est.review_reason or raw.get("review_reason"),
+                    "work_type_review_reason": work_type_review_reason,
                 }
             )
-            continue
 
         section_key = _stage_section_key(stage_number)
         bucket = groups[section_key]
@@ -2385,21 +2419,25 @@ def _materialize_wbs(
     def _work_type_fields(name: str, estimate: Estimate | None) -> dict[str, Any]:
         raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
         if estimate is not None:
+            stage_needs_review, _stage_reason, _stage_percent = _estimate_stage_review_info(estimate, raw)
+            work_type_needs_review = bool(
+                estimate.classification_needs_review
+                or raw.get("classification_needs_review")
+            )
             return {
                 "work_section_code": estimate.work_section_code or raw.get("work_section_code"),
                 "work_section_name": estimate.work_section_name or raw.get("work_section_name"),
                 "work_subtype_code": estimate.work_subtype_code or raw.get("work_subtype_code") or raw.get("subtype_code"),
                 "work_subtype_name": estimate.work_subtype_name or raw.get("work_subtype_name") or raw.get("subtype_name"),
                 "work_type_confidence": estimate.classification_confidence or raw.get("classification_confidence"),
-                "work_type_needs_review": bool(
-                    estimate.classification_needs_review
-                    or raw.get("classification_needs_review")
-                ),
+                "work_type_needs_review": work_type_needs_review,
                 "work_type_candidates": estimate.classification_candidates or raw.get("classification_candidates"),
                 "work_type_source": estimate.classification_source or raw.get("classification_source"),
                 "operator_review_required": bool(
-                    estimate.operator_review_required
+                    stage_needs_review
+                    or estimate.operator_review_required
                     or raw.get("operator_review_required")
+                    or work_type_needs_review
                 ),
                 "manual_override": bool(estimate.manual_override or raw.get("manual_override")),
             }
@@ -2675,6 +2713,52 @@ async def _reset_item_work_type(
         flag_modified(estimate, "raw_data")
 
 
+async def _confirm_item_review(
+    db: AsyncSession,
+    item: KtpWbsItem,
+) -> None:
+    item.operator_review_required = False
+    item.work_type_needs_review = False
+    item.work_type_confidence = item.work_type_confidence or "manual"
+    item.manual_override = True
+    item.gpr_confirmed = False
+
+    if item.estimate_id:
+        estimate = await db.get(Estimate, item.estimate_id)
+        if estimate:
+            estimate.needs_review = False
+            estimate.review_reason = None
+            estimate.classification_needs_review = False
+            estimate.operator_review_required = False
+            estimate.operator_review_status = "confirmed"
+            estimate.operator_review_reason = None
+            estimate.stage_match_type = "manual_operator_override"
+            estimate.stage_confidence = "high"
+            estimate.manual_override = True
+            estimate.manual_changed_at = _now()
+            raw = estimate.raw_data if isinstance(estimate.raw_data, dict) else {}
+            raw.update(
+                {
+                    "needs_review": False,
+                    "review_reason": None,
+                    "classification_needs_review": False,
+                    "operator_review_required": False,
+                    "operator_review_status": "confirmed",
+                    "operator_review_reason": None,
+                    "stage_match_type": "manual_operator_override",
+                    "stage_confidence": "high",
+                    "manual_override": True,
+                    "stage_match_score_json": {
+                        "manual_override": True,
+                        "source": "manual_operator_override",
+                        "previous": raw.get("stage_match_score_json"),
+                    },
+                }
+            )
+            estimate.raw_data = raw
+            flag_modified(estimate, "raw_data")
+
+
 async def _rebuild_subtypes_if_needed(
     db: AsyncSession,
     session_id: str,
@@ -2694,6 +2778,9 @@ async def update_item(
     if "group_id" in patch and patch["group_id"]:
         target = await _get_group(db, project_id, str(patch["group_id"]))
         item.group_id = target.id
+        if item.operator_review_required or item.work_type_needs_review:
+            await _confirm_item_review(db, item)
+            work_type_changed = True
     if "review_status" in patch and patch["review_status"] in {
         "pending",
         "accepted",
@@ -2714,6 +2801,9 @@ async def update_item(
         work_type_changed = True
     elif "work_subtype_code" in patch and patch["work_subtype_code"]:
         await _apply_manual_work_subtype(db, item, str(patch["work_subtype_code"]))
+        work_type_changed = True
+    elif patch.get("manual_override") is True:
+        await _confirm_item_review(db, item)
         work_type_changed = True
     if work_type_changed:
         await _rebuild_subtypes_if_needed(db, item.session_id)
@@ -2864,6 +2954,40 @@ async def approve_stage1(
         raise ValueError(
             "Не все добавленные ИИ работы проверены — примите или отклоните их"
         )
+    review_pending = await db.scalar(
+        select(KtpWbsItem.id)
+        .where(KtpWbsItem.session_id == session_id)
+        .where(KtpWbsItem.review_status != "rejected")
+        .where(KtpWbsItem.manual_override.is_(False))
+        .where(
+            (KtpWbsItem.operator_review_required.is_(True))
+            | (KtpWbsItem.work_type_needs_review.is_(True))
+        )
+        .limit(1)
+    )
+    if review_pending:
+        raise ValueError(
+            "Есть строки структуры, требующие проверки — подтвердите их или исправьте тип работ"
+        )
+    estimate_review_rows = await db.execute(
+        select(KtpWbsItem, Estimate)
+        .join(Estimate, KtpWbsItem.estimate_id == Estimate.id)
+        .where(KtpWbsItem.session_id == session_id)
+        .where(KtpWbsItem.review_status != "rejected")
+        .where(KtpWbsItem.manual_override.is_(False))
+    )
+    for item, estimate in estimate_review_rows:
+        raw = estimate.raw_data if isinstance(estimate.raw_data, dict) else {}
+        stage_needs_review, _stage_reason, _stage_percent = _estimate_stage_review_info(estimate, raw)
+        work_type_needs_review = bool(
+            estimate.classification_needs_review
+            or raw.get("classification_needs_review")
+        )
+        if stage_needs_review or work_type_needs_review:
+            item.operator_review_required = True
+            raise ValueError(
+                "Есть строки структуры, требующие проверки — подтвердите их или исправьте тип работ"
+            )
     session.status = "stage2_review"
     session.updated_at = _now()
     await db.commit()

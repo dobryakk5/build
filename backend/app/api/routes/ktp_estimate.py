@@ -82,6 +82,9 @@ class ItemOut(BaseModel):
     work_type_needs_review: bool = False
     work_type_candidates: list[dict] = Field(default_factory=list)
     work_type_source: str | None = None
+    stage_needs_review: bool = False
+    stage_review_reason: str | None = None
+    stage_confidence_percent: int | None = None
     operator_review_required: bool = False
     manual_override: bool = False
     gpr_confirmed: bool = False
@@ -132,6 +135,9 @@ class ItemOut(BaseModel):
             work_type_needs_review=bool(it.work_type_needs_review),
             work_type_candidates=it.work_type_candidates or [],
             work_type_source=it.work_type_source,
+            stage_needs_review=bool(getattr(it, "_stage_needs_review", False)),
+            stage_review_reason=getattr(it, "_stage_review_reason", None),
+            stage_confidence_percent=getattr(it, "_stage_confidence_percent", None),
             operator_review_required=bool(it.operator_review_required),
             manual_override=bool(it.manual_override),
             gpr_confirmed=bool(it.gpr_confirmed),

@@ -1,5 +1,6 @@
 import csv
 import json
+from copy import deepcopy
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from app.services.work_taxonomy_service import (  # noqa: E402
     get_work_taxonomy_subtypes,
     legacy_estimate_kind_for_type,
     should_inherit_parent_context,
+    validate_dictionary_payload,
     validate_project_hierarchy_selection,
 )
 from app.services.stage_classifier import StageClassifier  # noqa: E402
@@ -258,8 +260,19 @@ def test_classify_work_json_v6_4_overhead_rows_do_not_create_work_subtype(name):
 
 def test_classify_work_json_v6_4_row_role_policy():
     assert classify_row_role("БЛАГОУСТРОЙСТВО", allow_absent_header=True) == "header"
+    assert classify_row_role("Услуги геодезиста", section="Начальные работы") != "work"
     assert should_inherit_parent_context("material", "Профилированная мембрана") is True
     assert should_inherit_parent_context("overhead", "Транспортные расходы") is False
+
+
+def test_upload_row_role_uses_explicit_item_type_before_heuristics():
+    from app.services.upload_service import _row_role_from_item_type
+
+    assert _row_role_from_item_type("work", "Накладные расходы") == "work"
+    assert _row_role_from_item_type("material", "Монтаж перегородок") == "material"
+    assert _row_role_from_item_type("mechanism", "Экскаватор") == "mechanism"
+    assert _row_role_from_item_type("overhead", "Транспортные расходы") == "overhead"
+    assert _row_role_from_item_type("overhead", "Доставка материалов") == "logistics"
 
 
 @pytest.mark.asyncio
@@ -271,8 +284,8 @@ async def test_work_taxonomy_helpers_fallback_to_json_v6_4():
     subtypes = await get_work_taxonomy_subtypes(db)
 
     assert len(sections) == 19
-    assert len(subtypes) == 211
-    assert dictionary_version() == "construction_work_dictionary_v6_4_draft@1.7.0"
+    assert len(subtypes) == 218
+    assert dictionary_version() == "construction_work_dictionary_v6_4_2_type2_7_patch@1.7.2"
     taxonomy_codes = [s["taxonomy_code"] for s in subtypes]
     assert len(set(taxonomy_codes)) == len(subtypes)
     assert all(code and "." in code for code in taxonomy_codes)
@@ -283,7 +296,7 @@ async def test_work_taxonomy_helpers_fallback_to_json_v6_4():
 
 def test_project_hierarchy_exposes_types_and_variants():
     hierarchy = get_project_hierarchy()
-    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_4_draft@1.7.0"
+    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_4_2_type2_7_patch@1.7.2"
     assert len(hierarchy["estimate_types"]) == 9
     assert sum(len(t["project_variants"]) for t in hierarchy["estimate_types"]) == 65
     assert sum(
@@ -298,6 +311,23 @@ def test_project_hierarchy_exposes_types_and_variants():
         and variant["title"] == "Дома из пено- или газоблоков"
         for variant in residential["project_variants"]
     )
+
+
+def test_dictionary_validator_rejects_grouped_all_without_stage_options():
+    with open(_DICTIONARY_JSON, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    broken = deepcopy(payload)
+
+    for estimate_type in broken["project_hierarchy"]["estimate_types"]:
+        for variant in estimate_type.get("project_variants") or []:
+            for stage in variant.get("stages") or []:
+                if stage.get("stage_options_mode") == "grouped_all":
+                    stage["stage_options"] = []
+                    with pytest.raises(RuntimeError, match="grouped_all without stage_options"):
+                        validate_dictionary_payload(broken)
+                    return
+
+    pytest.fail("No grouped_all stage found in dictionary fixture")
 
 
 def test_project_hierarchy_selection_validates_parent_variant_and_legacy_kind():
@@ -401,12 +431,18 @@ def test_stage_classifier_gas_block_house_regressions(
 ):
     stages = get_project_variant_stages("residential_construction", "2.6")
     match = StageClassifier().classify_row_to_stage(row_text, "work", stages, None)
+    raw = match.as_raw_data(
+        estimate_type_id="residential_construction",
+        estimate_type_number="2",
+        project_variant_id="residential_construction_doma_iz_peno_ili_gazoblokov",
+        project_variant_number="2.6",
+        row_role="work",
+    )
 
     assert match.stage is not None
     assert match.stage["number"] == expected_stage
-    assert match.work_type_ref is not None
-    assert match.work_type_ref["section_id"] == expected_section
-    assert match.work_type_ref["subtype_id"] == expected_subtype
+    assert raw["section_id"] == expected_section
+    assert raw["subtype_id"] == expected_subtype
     if expected_option:
         assert match.stage_option is not None
         assert match.stage_option["title"] == expected_option
@@ -432,7 +468,7 @@ def test_stage_classifier_material_inherits_previous_stage():
     assert material.stage is not None
     assert glue.stage is not None
     assert material.stage["number"] == glue.stage["number"] == "2.6.6"
-    assert material.match_type == glue.match_type == "inherited_context"
+    assert material.match_type == glue.match_type == "material_inherit"
 
 
 def test_build_precedence_dependencies_basic_with_lag():

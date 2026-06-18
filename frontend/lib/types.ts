@@ -859,6 +859,9 @@ export interface KtpWbsItem {
   work_type_needs_review: boolean;
   work_type_candidates: Array<Record<string, unknown>>;
   work_type_source?: string | null;
+  stage_needs_review: boolean;
+  stage_review_reason?: string | null;
+  stage_confidence_percent?: number | null;
   operator_review_required: boolean;
   manual_override: boolean;
   gpr_confirmed: boolean;

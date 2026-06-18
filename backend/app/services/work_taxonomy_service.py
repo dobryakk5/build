@@ -266,6 +266,11 @@ def validate_dictionary_payload(payload: dict[str, Any]) -> None:
                     primary.get("section_id") and primary.get("subtype_id")
                 ):
                     errors.append(f"stage {stage_number} autofill_enabled without primary_work_type subtype")
+                stage_options = stage.get("stage_options") or []
+                if stage.get("stage_options_mode") == "grouped_all" and not stage_options:
+                    errors.append(
+                        f"stage {stage_number} has stage_options_mode=grouped_all without stage_options"
+                    )
                 for ref in [primary, *(stage.get("related_work_types") or [])]:
                     if not isinstance(ref, dict):
                         continue
@@ -1075,6 +1080,9 @@ def classify_row_role(
     text = " ".join(str(part) for part in (section, name, unit) if part)
     haystack = normalize_text(text)
     hay_tokens = haystack.split()
+    work_text = " ".join(str(part) for part in (name, unit) if part)
+    work_haystack = normalize_text(work_text)
+    work_hay_tokens = work_haystack.split()
     name_text = normalize_text(name or "")
     if not name_text:
         return "unknown"
@@ -1108,7 +1116,9 @@ def classify_row_role(
         ("labor", "labor_markers"),
         ("material", "material_markers"),
     ):
-        if _match_terms(rules.get(marker_key) or [], haystack, hay_tokens):
+        role_haystack = work_haystack if role == "work" else haystack
+        role_hay_tokens = work_hay_tokens if role == "work" else hay_tokens
+        if _match_terms(rules.get(marker_key) or [], role_haystack, role_hay_tokens):
             return role
 
     if (

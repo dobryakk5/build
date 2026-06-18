@@ -229,6 +229,9 @@ export default function KtpEstimateWizardPage() {
         review_status: "accepted",
         work_type_needs_review: false,
         work_type_candidates: [],
+        stage_needs_review: false,
+        stage_review_reason: null,
+        stage_confidence_percent: null,
         operator_review_required: false,
         manual_override: false,
         gpr_confirmed: false,
@@ -736,6 +739,17 @@ function Stage1({
       .map((item) => ({ group: g, item })),
   );
   const pendingAi = pendingAiItems.length;
+  const pendingReview = wbs.groups.reduce(
+    (sum, group) =>
+      sum +
+      group.items.filter(
+        (item) =>
+          item.review_status !== "rejected" &&
+          !item.manual_override &&
+          (item.stage_needs_review || item.operator_review_required || item.work_type_needs_review),
+      ).length,
+    0,
+  );
   const groupOptions = wbs.groups.map((g) => ({ id: g.id, title: g.title }));
 
   return (
@@ -751,9 +765,15 @@ function Stage1({
           ) : (
             <button
               style={btn("primary")}
-              disabled={busy || pendingAi > 0}
+              disabled={busy || pendingAi > 0 || pendingReview > 0}
               onClick={onApprove}
-              title={pendingAi > 0 ? `Проверьте ${pendingAi} добавленных ИИ работ` : ""}
+              title={
+                pendingAi > 0
+                  ? `Проверьте ${pendingAi} добавленных ИИ работ`
+                  : pendingReview > 0
+                  ? `Подтвердите ${pendingReview} строк с низкой уверенностью`
+                  : ""
+              }
             >
               Утвердить структуру →
             </button>
@@ -767,6 +787,11 @@ function Stage1({
           run={run}
           projectId={projectId}
         />
+      )}
+      {pendingReview > 0 && (
+        <div style={{ ...feedbackStyle, marginBottom: 14 }}>
+          Требуют проверки строки структуры: {pendingReview}. Подтвердите выбранный этап кнопкой «Проверено» или перенесите строку в другую группу.
+        </div>
       )}
 
       {wbs.groups.map((g) => (
@@ -859,6 +884,8 @@ function Stage1Group({
         const badge = ORIGIN_BADGE[it.origin];
         const rejected = it.review_status === "rejected";
         const pendingAi = it.origin === "ai_added" && it.review_status === "pending";
+        const needsReview = it.stage_needs_review || it.operator_review_required || it.work_type_needs_review;
+        const reviewReason = it.stage_review_reason || (it.work_type_needs_review ? "Нужно проверить тип работ" : null);
         return (
           <div
             key={it.id}
@@ -874,6 +901,25 @@ function Stage1Group({
             }}
           >
             <span style={{ flex: 1, fontSize: 13 }}>{it.name}</span>
+            {needsReview && (
+              <span
+                title={reviewReason || "Требуется проверка"}
+                style={{
+                  minWidth: 34,
+                  textAlign: "center",
+                  fontSize: 10,
+                  fontWeight: 700,
+                  color: "#92400e",
+                  background: "rgba(245,158,11,.14)",
+                  border: "1px solid rgba(245,158,11,.28)",
+                  borderRadius: 999,
+                  padding: "2px 6px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {it.stage_confidence_percent != null ? `${it.stage_confidence_percent}%` : "?"}
+              </span>
+            )}
             <span style={{ fontSize: 10, fontWeight: 600, color: badge.color, whiteSpace: "nowrap" }}>
               {badge.label}
             </span>
@@ -911,6 +957,16 @@ function Stage1Group({
                   ✕
                 </button>
               </>
+            )}
+            {needsReview && !it.manual_override && (
+              <button
+                style={{ ...btn(), padding: "4px 9px", color: "#92400e" }}
+                disabled={busy}
+                onClick={() => run(() => ktpEstimate.updateItem(projectId, it.id, { manual_override: true }))}
+                title="Подтвердить выбранный этап и тип"
+              >
+                Проверено
+              </button>
             )}
             <select
               value={group.id}

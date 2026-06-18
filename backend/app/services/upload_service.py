@@ -179,6 +179,21 @@ MAX_PREVIEW_GROUP_ROWS = 2000
 _NO_SECTION = "Без раздела"
 
 
+def _row_role_from_item_type(item_type: str | None, name: str | None = None) -> str | None:
+    if item_type == "work":
+        return "work"
+    if item_type == "material":
+        return "material"
+    if item_type == "mechanism":
+        return "mechanism"
+    if item_type == "overhead":
+        text = re.sub(r"\s+", " ", str(name or "").strip().casefold())
+        if any(term in text for term in ("доставка", "вывоз", "разгрузка", "погрузка")):
+            return "logistics"
+        return "overhead"
+    return None
+
+
 class PreviewChangedError(Exception):
     """Правки оператора не легли на текущий re-parse (строка под index изменилась)."""
 
@@ -310,7 +325,8 @@ def _enrich_work_subtypes_sync(rows: list) -> None:
         if isinstance(raw.get("classification_confidence"), (int, float)):
             raw.setdefault("item_type_confidence", raw.get("classification_confidence"))
         row.raw_data = raw
-        row_role = classify_row_role(
+        item_type = resolve_item_type(row)
+        row_role = _row_role_from_item_type(item_type, row.work_name) or classify_row_role(
             row.work_name or "",
             row.section,
             row.unit,
@@ -342,7 +358,7 @@ def _enrich_work_subtypes_sync(rows: list) -> None:
                 }
             )
             continue
-        if resolve_item_type(row) == "work":
+        if item_type == "work":
             result = classify_work(row.work_name or "", row.section, row_role=row_role)
             inherited = False
             if (

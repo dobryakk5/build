@@ -236,8 +236,17 @@ def test_stage_aware_groups_put_rows_without_stage_to_fallback():
     assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "missing_work_stage_number"
 
 
-def test_stage_aware_groups_put_stage_review_rows_to_fallback():
-    from app.services.ktp_estimate_service import STAGE_AWARE_FALLBACK_TITLE, _build_stage_aware_groups
+def test_stage_confidence_percent_uses_score_and_delta_caps():
+    from app.services.ktp_estimate_service import _stage_confidence_percent
+
+    assert _stage_confidence_percent({"winner": {"score": 7}, "delta_top_1_top_2": 3}) == 50
+    assert _stage_confidence_percent({"winner": {"score": 14}, "delta_top_1_top_2": 1.5}) == 50
+    assert _stage_confidence_percent({"winner": {"score": 20}, "delta_top_1_top_2": 9}) == 100
+    assert _stage_confidence_percent({}) is None
+
+
+def test_stage_aware_groups_keep_stage_review_rows_in_valid_stage():
+    from app.services.ktp_estimate_service import _build_stage_aware_groups
 
     e1 = make_est("e1", "Утепление кровли", row_order=1)
     e1.work_stage_number = "2.7.4"
@@ -284,14 +293,17 @@ def test_stage_aware_groups_put_stage_review_rows_to_fallback():
     )
 
     by_stage = {g["work_stage_number"]: g for g in groups if g.get("work_stage_number")}
-    assert by_stage["2.7.4"]["items"] == [{"name": "Гидроизоляция фундамента", "origin": "from_estimate", "row_key": "R002"}]
-    assert groups[-1]["title"] == STAGE_AWARE_FALLBACK_TITLE
-    assert groups[-1]["items"] == [{"name": "Утепление кровли", "origin": "from_estimate", "row_key": "R001"}]
-    assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "stage_needs_review"
+    assert by_stage["2.7.4"]["items"] == [
+        {"name": "Утепление кровли", "origin": "from_estimate", "row_key": "R001"},
+        {"name": "Гидроизоляция фундамента", "origin": "from_estimate", "row_key": "R002"},
+    ]
+    assert not diagnostics["stage_grouping"]["fallback_rows"]
+    assert diagnostics["stage_grouping"]["review_rows"][0]["row_key"] == "R001"
+    assert diagnostics["stage_grouping"]["review_rows"][0]["review_reason"] == "stage_weak_partial_text_match"
 
 
-def test_stage_aware_groups_put_unresolved_work_type_rows_to_fallback():
-    from app.services.ktp_estimate_service import STAGE_AWARE_FALLBACK_TITLE, _build_stage_aware_groups
+def test_stage_aware_groups_keep_unresolved_work_type_rows_in_valid_stage():
+    from app.services.ktp_estimate_service import _build_stage_aware_groups
 
     e1 = make_est("e1", "Непонятная работа", row_order=1)
     e1.work_stage_number = "2.7.2"
@@ -317,11 +329,29 @@ def test_stage_aware_groups_put_unresolved_work_type_rows_to_fallback():
     )
 
     by_stage = {g["work_stage_number"]: g for g in groups if g.get("work_stage_number")}
-    assert by_stage["2.7.2"]["items"] == []
+    assert by_stage["2.7.2"]["items"] == [{"name": "Непонятная работа", "origin": "from_estimate", "row_key": "R001"}]
     assert by_stage["2.7.4"]["items"] == [{"name": "Гидроизоляция фундамента", "origin": "from_estimate", "row_key": "R002"}]
+    assert not diagnostics["stage_grouping"]["fallback_rows"]
+    assert diagnostics["stage_grouping"]["review_rows"][0]["row_key"] == "R001"
+    assert diagnostics["stage_grouping"]["review_rows"][0]["work_type_review_reason"] == "work_type_unresolved"
+
+
+def test_stage_aware_groups_put_invalid_stage_to_fallback():
+    from app.services.ktp_estimate_service import STAGE_AWARE_FALLBACK_TITLE, _build_stage_aware_groups
+
+    e1 = make_est("e1", "Работа с чужим этапом", row_order=1)
+    e1.work_stage_number = "9.9.9"
+    e1.work_subtype_code = "foundation/foundation_works"
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
+
     assert groups[-1]["title"] == STAGE_AWARE_FALLBACK_TITLE
-    assert groups[-1]["items"] == [{"name": "Непонятная работа", "origin": "from_estimate", "row_key": "R001"}]
-    assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "work_type_unresolved"
+    assert groups[-1]["items"] == [{"name": "Работа с чужим этапом", "origin": "from_estimate", "row_key": "R001"}]
+    assert diagnostics["stage_grouping"]["invalid_stage_rows"][0]["work_stage_number"] == "9.9.9"
 
 
 def test_stage_aware_groups_accept_work_subtype_code_without_split_ids():
