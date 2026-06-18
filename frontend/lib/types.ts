@@ -99,6 +99,24 @@ export interface PreviewRow {
   classification_candidates?: Array<Record<string, unknown>> | null;
   classification_matched_terms?: Record<string, string[]> | null;
   operator_review_required?: boolean | null;
+  work_stage_number?: string | null;
+  work_stage_title?: string | null;
+  canonical_stage_id?: string | null;
+  stage_occurrence_index?: number | null;
+  stage_occurrence_label?: string | null;
+  stage_options_mode?: string | null;
+  stage_option_id?: string | null;
+  stage_option_title?: string | null;
+  stage_confidence?: string | null;
+  stage_match_type?: string | null;
+  stage_match_score_json?: Record<string, unknown> | null;
+  work_type_match_score_json?: Record<string, unknown> | null;
+  row_role?: string | null;
+  section_id?: string | null;
+  subtype_id?: string | null;
+  needs_review?: boolean | null;
+  review_reason?: string | null;
+  work_type_confidence?: string | null;
   row_hash?: string | null;
   materials?: PreviewRow[];
 }
@@ -118,9 +136,26 @@ export interface PreviewAddedRow {
   total_price?: number | null;
 }
 
+export interface PreviewStageOverride {
+  index: number;
+  row_hash: string;
+  work_stage_number?: string | null;
+  work_stage_title?: string | null;
+  canonical_stage_id?: string | null;
+  stage_occurrence_index?: number | null;
+  stage_occurrence_label?: string | null;
+  stage_options_mode?: string | null;
+  stage_option_id?: string | null;
+  stage_option_title?: string | null;
+  section_id?: string | null;
+  subtype_id?: string | null;
+  row_role?: string | null;
+}
+
 export interface PreviewEdits {
   type_overrides: PreviewTypeOverride[];
   added_rows: PreviewAddedRow[];
+  stage_overrides: PreviewStageOverride[];
 }
 
 export interface PreviewGroup {
@@ -152,6 +187,21 @@ export interface PreviewResult {
   rows: PreviewRow[];
   ignored_subtotal_rows_count: number;
   groups: PreviewGroup[];
+  stage_groups?: Array<{
+    work_stage_number?: string | null;
+    work_stage_title?: string | null;
+    canonical_stage_id?: string | null;
+    stage_options_mode?: string | null;
+    rows_count: number;
+    needs_review_count: number;
+    total: number;
+    rows: PreviewRow[];
+  }>;
+  hierarchy_suggestions?: {
+    estimate_types: Array<Record<string, unknown>>;
+    project_variants: Array<Record<string, unknown>>;
+  } | null;
+  stage_review_count?: number;
   truncated: boolean;
   no_section_count: number;
   warnings?: string[];
@@ -201,6 +251,31 @@ export interface EstimateRow {
   work_section_name?: string | null;
   work_subtype_code?: string | null;
   work_subtype_name?: string | null;
+  estimate_type_id?: string | null;
+  estimate_type_number?: string | null;
+  project_variant_id?: string | null;
+  project_variant_number?: string | null;
+  canonical_stage_id?: string | null;
+  work_stage_number?: string | null;
+  work_stage_title?: string | null;
+  stage_occurrence_index?: number | null;
+  stage_occurrence_label?: string | null;
+  stage_options_mode?: string | null;
+  stage_option_id?: string | null;
+  stage_option_title?: string | null;
+  section_id?: string | null;
+  subtype_id?: string | null;
+  row_role?: string | null;
+  parent_row_id?: string | null;
+  inherited_from_row_id?: string | null;
+  stage_confidence?: string | null;
+  work_type_confidence?: string | null;
+  autofill_enabled?: boolean | null;
+  needs_review?: boolean;
+  review_reason?: string | null;
+  stage_match_type?: string | null;
+  stage_match_score_json?: Record<string, unknown> | null;
+  work_type_match_score_json?: Record<string, unknown> | null;
   classification_score?: number | null;
   classification_confidence?: string | null;
   classification_needs_review?: boolean;
@@ -745,6 +820,8 @@ export interface KtpEstimateSession {
   error_message?: string | null;
   stage1_job_id?: string | null;
   gpr_job_id?: string | null;
+  stage1_grouping_mode?: string | null;
+  preserve_estimate_structure?: boolean;
 }
 
 export interface KtpWbsItem {

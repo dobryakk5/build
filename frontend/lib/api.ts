@@ -602,10 +602,22 @@ export const ktp = {
 };
 
 export const ktpEstimate = {
-  startSession: (projectId: string, batchId: string, force = false) =>
+  startSession: (
+    projectId: string,
+    batchId: string,
+    force = false,
+    preserveEstimateStructure = false,
+  ) =>
     request<{ job_id: string | null; session_id: string; status: string }>(
       `/projects/${projectId}/ktp-estimate/sessions`,
-      { method: "POST", body: JSON.stringify({ estimate_batch_id: batchId, force }) },
+      {
+        method: "POST",
+        body: JSON.stringify({
+          estimate_batch_id: batchId,
+          force,
+          preserve_estimate_structure: preserveEstimateStructure,
+        }),
+      },
     ),
   getSession: (projectId: string, batchId: string) =>
     request<KtpEstimateSession | null>(

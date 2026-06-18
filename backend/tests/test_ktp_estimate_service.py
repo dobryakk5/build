@@ -41,6 +41,11 @@ def make_est(
     e.classification_source = None
     e.operator_review_required = False
     e.manual_override = False
+    e.work_stage_number = None
+    e.work_stage_title = None
+    e.canonical_stage_id = None
+    e.needs_review = False
+    e.review_reason = None
     return e
 
 
@@ -171,6 +176,84 @@ def test_materialize_wbs_ai_added_is_pending():
     assert added.ai_reason == "обязательный этап"
     # все позиции сметы покрыты — лишних предупреждений нет
     assert not any("не распределены" in w for w in warnings)
+
+
+def test_stage_aware_groups_use_json_work_stage_order():
+    from app.services.ktp_estimate_service import _build_stage_aware_groups
+
+    e1 = make_est("e1", "Монтаж металлочерепицы", row_order=20)
+    e1.work_stage_number = "2.6.14"
+    e1.work_stage_title = "Кровельные работы"
+    e2 = make_est("e2", "Кладка стен", row_order=10)
+    e2.work_stage_number = "2.6.6"
+    e2.work_stage_title = "Кладка стен 1 этажа"
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_doma_iz_peno_ili_gazoblokov"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups(
+        [e1, e2],
+        {"e1": "R001", "e2": "R002"},
+        batch,
+        diagnostics,
+    )
+
+    assert [g["work_stage_number"] for g in groups] == ["2.6.6", "2.6.14"]
+    assert groups[0]["title"].startswith("2.6.6.")
+    assert groups[0]["items"] == [{"name": "Кладка стен", "origin": "from_estimate", "row_key": "R002"}]
+    assert groups[1]["items"] == [{"name": "Монтаж металлочерепицы", "origin": "from_estimate", "row_key": "R001"}]
+    assert diagnostics["stage_grouping"]["mode"] == "stage_aware"
+
+
+def test_stage_aware_groups_put_rows_without_stage_to_fallback():
+    from app.services.ktp_estimate_service import FALLBACK_DISPLAY_TITLE, _build_stage_aware_groups
+
+    e1 = make_est("e1", "Нераспознанная работа")
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_doma_iz_peno_ili_gazoblokov"
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
+
+    assert groups[0]["title"] == FALLBACK_DISPLAY_TITLE
+    assert groups[0]["items"][0]["row_key"] == "R001"
+    assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "missing_work_stage_number"
+
+
+@pytest.mark.asyncio
+async def test_run_stage1_preserve_estimate_structure_uses_estimate_sections():
+    import app.services.ktp_estimate_service as svc
+
+    e1 = make_est("e1", "Кладка стен", section="Раздел сметы", row_order=1)
+    diagnostics = _make_diag()
+
+    async def fake_clean_pass(python_groups, *_args, **_kwargs):
+        for group in python_groups.values():
+            group["cleaned_title"] = group["display_title"]
+            group["cleaned_items"] = [
+                {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
+                for row_key, est in group["rows"]
+            ]
+
+    with (
+        patch.object(svc, "_run_section_clean_pass", AsyncMock(side_effect=fake_clean_pass)),
+        patch.object(svc, "_run_per_group_gap_fill", AsyncMock()),
+        patch.object(svc, "_run_project_gap_fill", AsyncMock()),
+    ):
+        groups = await svc._run_stage1_ai(
+            [e1],
+            {"R001": e1},
+            [],
+            "Жилое здание",
+            None,
+            diagnostics=diagnostics,
+            preserve_estimate_structure=True,
+        )
+
+    assert groups[0]["title"] == "Раздел сметы"
+    assert groups[0]["items"][0]["row_key"] == "R001"
 
 
 # ── промпт ───────────────────────────────────────────────────────────────────

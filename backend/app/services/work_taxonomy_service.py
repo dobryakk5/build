@@ -443,6 +443,93 @@ def get_project_variant_stages(estimate_type_id: str, project_variant_id: str) -
     ]
 
 
+def suggest_project_hierarchy_variants(
+    texts: list[str],
+    *,
+    estimate_type_id: str | None = None,
+    limit: int = 3,
+) -> dict[str, Any]:
+    """Suggest top project hierarchy nodes without running stage-aware matching.
+
+    This is intentionally broad and cheap: it scores only titles/detail lines from
+    the selected scope, so import still requires the user to choose a variant
+    before stage-aware classification is allowed.
+    """
+    payload = _load_dictionary()
+    haystack = normalize_text(" ".join(texts[:100]))
+    hay_tokens = haystack.split()
+    estimate_types = _hierarchy_estimate_types(payload)
+    type_scores: list[tuple[int, dict[str, Any], list[str]]] = []
+    variant_scores: list[tuple[int, dict[str, Any], dict[str, Any], list[str]]] = []
+
+    for estimate_type in estimate_types:
+        type_terms = [estimate_type.get("title"), estimate_type.get("number"), estimate_type.get("id")]
+        type_matches = _match_terms([str(term) for term in type_terms if term], haystack, hay_tokens)
+        type_score = len(type_matches) * 3
+        for variant in estimate_type.get("project_variants") or []:
+            if not isinstance(variant, dict):
+                continue
+            variant_terms: list[str] = [
+                str(variant.get("title") or ""),
+                str(variant.get("number") or ""),
+                str(variant.get("id") or ""),
+            ]
+            for stage in variant.get("stages") or []:
+                if not isinstance(stage, dict):
+                    continue
+                variant_terms.append(str(stage.get("title") or ""))
+                variant_terms.extend(str(line) for line in (stage.get("detail_lines") or [])[:3])
+                for option in stage.get("stage_options") or []:
+                    if isinstance(option, dict):
+                        variant_terms.append(str(option.get("title") or ""))
+            matches = _match_terms([term for term in variant_terms if term], haystack, hay_tokens)
+            score = type_score + len(matches)
+            variant_scores.append((score, estimate_type, variant, matches[:10]))
+            if matches:
+                type_score += min(len(matches), 5)
+        type_scores.append((type_score, estimate_type, type_matches[:10]))
+
+    type_scores.sort(key=lambda item: item[0], reverse=True)
+    if estimate_type_id:
+        try:
+            selected_type = _find_estimate_type(payload, estimate_type_id)
+        except ValueError:
+            selected_type = None
+        if selected_type:
+            variant_scores = [
+                item for item in variant_scores
+                if str(item[1].get("id") or "") == str(selected_type.get("id") or "")
+            ]
+    variant_scores.sort(key=lambda item: item[0], reverse=True)
+    return {
+        "estimate_types": [
+            {
+                "id": str(item.get("id") or ""),
+                "number": str(item.get("number") or ""),
+                "title": str(item.get("title") or ""),
+                "estimate_kind": legacy_estimate_kind_for_type(str(item.get("id") or "")),
+                "score": score,
+                "matched_terms": matches,
+            }
+            for score, item, matches in type_scores[:limit]
+        ],
+        "project_variants": [
+            {
+                "estimate_type_id": str(estimate_type.get("id") or ""),
+                "estimate_type_number": str(estimate_type.get("number") or ""),
+                "estimate_type_title": str(estimate_type.get("title") or ""),
+                "id": str(variant.get("id") or ""),
+                "number": str(variant.get("number") or ""),
+                "title": str(variant.get("title") or ""),
+                "stages_count": len(variant.get("stages") or []),
+                "score": score,
+                "matched_terms": matches,
+            }
+            for score, estimate_type, variant, matches in variant_scores[:limit]
+        ],
+    }
+
+
 def get_canonical_stages() -> dict[str, Any]:
     payload = _load_dictionary()
     hierarchy = _project_hierarchy(payload)

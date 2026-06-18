@@ -42,7 +42,11 @@ from app.services.upload_service import (
     start_upload_job_with_mapping,
 )
 from app.services.parser_factory import VALID_PARSER_PROFILES, UI_PROFILES, PROFILE_AUTO
-from app.services.work_taxonomy_service import validate_project_hierarchy_selection
+from app.services.work_taxonomy_service import (
+    get_estimate_types,
+    suggest_project_hierarchy_variants,
+    validate_project_hierarchy_selection,
+)
 from app.services.preview_session import (
     PreviewStorageUnavailable,
     get_preview_session,
@@ -189,6 +193,22 @@ def _resolve_upload_hierarchy_selection(
     if estimate_kind is None:
         raise HTTPException(400, "Выберите тип сметы и вариант объекта")
     return estimate_kind, None
+
+
+def _resolve_preview_hierarchy_selection(
+    estimate_type_id: str | None,
+    project_variant_id: str | None,
+    estimate_kind: int | None,
+) -> tuple[int, dict | None]:
+    if estimate_type_id and project_variant_id:
+        return _resolve_upload_hierarchy_selection(estimate_type_id, project_variant_id, estimate_kind)
+    if estimate_kind is not None:
+        return estimate_kind, None
+    if estimate_type_id:
+        for item in get_estimate_types():
+            if item.get("id") == estimate_type_id or item.get("number") == estimate_type_id:
+                return int(item["estimate_kind"]), None
+    raise HTTPException(400, "Выберите тип сметы")
 
 
 def _estimate_item_type(estimate: Estimate) -> str:
@@ -352,7 +372,7 @@ async def preview_estimate(
     if parser_profile not in VALID_PARSER_PROFILES:
         raise HTTPException(400, f"Неизвестный профиль импорта: {parser_profile}")
 
-    resolved_estimate_kind, hierarchy_selection = _resolve_upload_hierarchy_selection(
+    resolved_estimate_kind, hierarchy_selection = _resolve_preview_hierarchy_selection(
         estimate_type_id,
         project_variant_id,
         estimate_kind,
@@ -371,6 +391,8 @@ async def preview_estimate(
             build_gantt      = build_gantt,
             clarification_answers = _parse_clarification_answers(clarification_answers),
             hierarchy_selection = hierarchy_selection,
+            hierarchy_suggestions = suggest_project_hierarchy_variants,
+            suggestion_estimate_type_id = estimate_type_id,
             db               = db,
         )
     except PreviewStorageUnavailable:
@@ -392,9 +414,26 @@ class PreviewAddedRow(BaseModel):
     total_price: float | None = None
 
 
+class PreviewStageOverride(BaseModel):
+    index: int
+    row_hash: str
+    work_stage_number: str | None = None
+    work_stage_title: str | None = None
+    canonical_stage_id: str | None = None
+    stage_occurrence_index: int | None = None
+    stage_occurrence_label: str | None = None
+    stage_options_mode: str | None = None
+    stage_option_id: str | None = None
+    stage_option_title: str | None = None
+    section_id: str | None = None
+    subtype_id: str | None = None
+    row_role: str | None = None
+
+
 class PreviewEdits(BaseModel):
     type_overrides: list[PreviewTypeOverride] = Field(default_factory=list)
     added_rows:     list[PreviewAddedRow] = Field(default_factory=list)
+    stage_overrides: list[PreviewStageOverride] = Field(default_factory=list)
 
 
 class ConfirmImportRequest(BaseModel):

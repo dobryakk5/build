@@ -19,6 +19,8 @@ import type {
   WorkEstimateType,
   WorkProjectHierarchy,
   WorkProjectVariant,
+  WorkStage,
+  WorkTaxonomySubtype,
 } from "@/lib/types";
 
 const ITEM_TYPE_LABELS: Record<EstimateItemType, string> = {
@@ -106,6 +108,7 @@ export default function UploadPage() {
   const [workers, setWorkers] = useState(3);
   const [estimateKind, setEstimateKind] = useState<EstimateKind | null>(null);
   const [hierarchy, setHierarchy] = useState<WorkProjectHierarchy | null>(null);
+  const [taxonomySubtypes, setTaxonomySubtypes] = useState<WorkTaxonomySubtype[]>([]);
   const [hierarchyLoading, setHierarchyLoading] = useState(true);
   const [hierarchyError, setHierarchyError] = useState<string | null>(null);
   const [estimateTypeId, setEstimateTypeId] = useState<string | null>(null);
@@ -115,6 +118,7 @@ export default function UploadPage() {
   const [clarificationsConfirmed, setClarificationsConfirmed] = useState(false);
   const [complexMode, setComplexMode] = useState(false);
   const [buildGantt, setBuildGantt] = useState(true);
+  const [preserveEstimateStructure, setPreserveEstimateStructure] = useState(false);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -165,7 +169,7 @@ export default function UploadPage() {
   const answeredCount = Object.values(clarificationAnswers).filter((answers) => answers.length > 0).length;
   const questionsCount = currentClarification?.sections.reduce((sum, section) => sum + section.questions.length, 0) ?? 0;
   const allClarificationsAnswered = questionsCount > 0 && answeredCount === questionsCount;
-  const canUpload = estimateKind !== null && !!estimateTypeId && !!projectVariantId && clarificationsConfirmed;
+  const canUpload = estimateKind !== null && !!estimateTypeId && clarificationsConfirmed;
   const wasAllClarificationsAnsweredRef = useRef(false);
   const clarificationStartedRef = useRef(false);
   const trackedJobTerminalStatusRef = useRef<string | null>(null);
@@ -185,7 +189,7 @@ export default function UploadPage() {
     setHierarchyLoading(true);
     setHierarchyError(null);
     workTaxonomy
-      .projectHierarchy()
+      .projectHierarchy({ include_stages: true })
       .then((data) => {
         if (cancelled) return;
         setHierarchy(data);
@@ -203,9 +207,24 @@ export default function UploadPage() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    workTaxonomy
+      .subtypes()
+      .then((data) => {
+        if (!cancelled) setTaxonomySubtypes(data);
+      })
+      .catch(() => {
+        if (!cancelled) setTaxonomySubtypes([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     const wasAllAnswered = wasAllClarificationsAnsweredRef.current;
 
-    if (selectedProjectVariant && allClarificationsAnswered && !wasAllAnswered && !clarificationsConfirmed && !status && !fromKtpFlow) {
+    if (selectedEstimateType && allClarificationsAnswered && !wasAllAnswered && !clarificationsConfirmed && !status && !fromKtpFlow) {
       setClarificationsConfirmed(true);
       trackActivity("CLARIFICATIONS_COMPLETED", {
         projectId: id,
@@ -220,7 +239,7 @@ export default function UploadPage() {
     }
 
     wasAllClarificationsAnsweredRef.current = allClarificationsAnswered;
-  }, [allClarificationsAnswered, answeredCount, clarificationsConfirmed, estimateKind, fromKtpFlow, id, questionsCount, selectedProjectVariant, status]);
+  }, [allClarificationsAnswered, answeredCount, clarificationsConfirmed, estimateKind, fromKtpFlow, id, questionsCount, selectedEstimateType, status]);
 
   useEffect(() => {
     if (!batchIdFromQuery || restoredBatchRef.current === batchIdFromQuery) return;
@@ -331,7 +350,7 @@ export default function UploadPage() {
   }, [canUpload, complexMode, estimateKind, estimateTypeId, id, projectVariantId]);
 
   async function handleUpload() {
-    if (!file || !estimateKind || !estimateTypeId || !projectVariantId) return;
+    if (!file || !estimateKind || !estimateTypeId) return;
 
     setUploading(true);
     autoStartedKtpBatchRef.current = null;
@@ -544,12 +563,12 @@ export default function UploadPage() {
   const handleKtpEstimate = useCallback(async (batchId: string) => {
     setKtpLoading("estimate");
     try {
-      const { job_id, session_id } = await ktpEstimate.startSession(id, batchId);
+      const { job_id, session_id } = await ktpEstimate.startSession(id, batchId, false, preserveEstimateStructure);
       trackActivity("KTP_ESTIMATE_SESSION_STARTED", {
         projectId: id,
         entityType: "ktp_estimate_session",
         entityId: session_id,
-        metadata: { estimate_batch_id: batchId, job_id },
+        metadata: { estimate_batch_id: batchId, job_id, preserve_estimate_structure: preserveEstimateStructure },
       });
       const suffix = job_id ? `?job=${job_id}` : "";
       router.replace(`/projects/${id}/ktp-estimate/${session_id}${suffix}`);
@@ -557,7 +576,7 @@ export default function UploadPage() {
       alert(e.message);
       setKtpLoading(null);
     }
-  }, [id, router]);
+  }, [id, preserveEstimateStructure, router]);
 
   useEffect(() => {
     const batchId = result?.estimate_batch_id;
@@ -738,7 +757,7 @@ export default function UploadPage() {
         </div>
       </div>
 
-      {currentClarification && selectedProjectVariant && !clarificationsConfirmed && !status && (
+      {currentClarification && selectedEstimateType && !clarificationsConfirmed && !status && (
         <div style={{ marginBottom: 20, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
           <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
             <div>
@@ -813,7 +832,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {currentClarification && selectedProjectVariant && clarificationsConfirmed && !status && (
+      {currentClarification && selectedEstimateType && clarificationsConfirmed && !status && (
         <div style={{ marginBottom: 20, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,.25)", background: "rgba(34,197,94,.06)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
           <div style={{ fontSize: 12, color: "#166534" }}>
             Уточнения заполнены: {answeredCount} из {questionsCount}. Теперь можно загрузить смету.
@@ -956,6 +975,10 @@ export default function UploadPage() {
           preview={preview}
           confirming={confirming}
           complexMode={complexMode}
+          preserveEstimateStructure={preserveEstimateStructure}
+          onPreserveEstimateStructureChange={setPreserveEstimateStructure}
+          stages={selectedProjectVariant?.stages ?? []}
+          subtypes={taxonomySubtypes}
           onConfirm={handleConfirmImport}
           onCancel={() => { setPreview(null); }}
         />
@@ -1082,6 +1105,21 @@ const ITEM_TYPE_COLORS: Record<EstimateItemType, string> = {
 };
 
 const EDITABLE_TYPES: EstimateItemType[] = ["work", "material", "mechanism", "overhead", "unknown"];
+const EDITABLE_ROW_ROLES = ["work", "material", "mechanism", "labor", "logistics", "overhead", "header", "total", "placeholder", "unknown"];
+
+type StageOverrideDraft = {
+  work_stage_number?: string | null;
+  work_stage_title?: string | null;
+  canonical_stage_id?: string | null;
+  stage_occurrence_index?: number | null;
+  stage_occurrence_label?: string | null;
+  stage_options_mode?: string | null;
+  stage_option_id?: string | null;
+  stage_option_title?: string | null;
+  section_id?: string | null;
+  subtype_id?: string | null;
+  row_role?: string | null;
+};
 
 function emptyAddedRow(): PreviewAddedRow {
   return { section: "", name: "", item_type: "work", unit: "", quantity: null, total_price: null };
@@ -1091,19 +1129,38 @@ function EditablePreviewPanel({
   preview,
   confirming,
   complexMode,
+  preserveEstimateStructure,
+  onPreserveEstimateStructureChange,
+  stages,
+  subtypes,
   onConfirm,
   onCancel,
 }: {
   preview: PreviewResult;
   confirming: boolean;
   complexMode: boolean;
+  preserveEstimateStructure: boolean;
+  onPreserveEstimateStructureChange: (value: boolean) => void;
+  stages: WorkStage[];
+  subtypes: WorkTaxonomySubtype[];
   onConfirm: (edits: PreviewEdits) => void;
   onCancel: () => void;
 }) {
   const baseRows = preview.rows ?? [];
   // index → новый тип (только если отличается от исходного)
   const [overrides, setOverrides] = useState<Record<number, EstimateItemType>>({});
+  const [stageOverrides, setStageOverrides] = useState<Record<number, StageOverrideDraft>>({});
   const [addedRows, setAddedRows] = useState<PreviewAddedRow[]>([]);
+  const subtypeOptions = useMemo(() => subtypes.map((subtype) => {
+    const code = subtype.work_subtype_code || "";
+    const parts = code.split("/");
+    return {
+      code,
+      section_id: subtype.section_code || parts[0] || "",
+      subtype_id: parts[1] || code,
+      label: `${code} · ${subtype.work_subtype_name}`,
+    };
+  }).filter((item) => item.section_id && item.subtype_id), [subtypes]);
 
   const effType = useCallback(
     (r: PreviewRow): EstimateItemType =>
@@ -1131,6 +1188,75 @@ function EditablePreviewPanel({
     });
   }
 
+  function effStage(r: PreviewRow): StageOverrideDraft {
+    return r.index != null && stageOverrides[r.index] ? { ...r, ...stageOverrides[r.index] } : r;
+  }
+
+  function patchStage(r: PreviewRow, patch: StageOverrideDraft) {
+    if (r.index == null) return;
+    setStageOverrides((prev) => {
+      const current = prev[r.index!] ?? {};
+      const nextDraft = { ...current, ...patch };
+      const next = { ...prev };
+      const changed = Object.entries(nextDraft).some(([key, value]) => {
+        const original = (r as unknown as Record<string, unknown>)[key];
+        return (value ?? null) !== (original ?? null);
+      });
+      if (!changed) delete next[r.index!];
+      else next[r.index!] = nextDraft;
+      return next;
+    });
+  }
+
+  function selectStage(r: PreviewRow, stageNumber: string) {
+    const stage = stages.find((item) => item.number === stageNumber);
+    if (!stage) {
+      patchStage(r, {
+        work_stage_number: null,
+        work_stage_title: null,
+        canonical_stage_id: null,
+        stage_occurrence_index: null,
+        stage_occurrence_label: null,
+        stage_options_mode: null,
+        stage_option_id: null,
+        stage_option_title: null,
+      });
+      return;
+    }
+    patchStage(r, {
+      work_stage_number: stage.number,
+      work_stage_title: stage.title,
+      canonical_stage_id: stage.canonical_stage_id ?? null,
+      stage_occurrence_index: stage.occurrence_index ?? null,
+      stage_occurrence_label: stage.occurrence_label ?? null,
+      stage_options_mode: stage.stage_options_mode,
+      stage_option_id: null,
+      stage_option_title: null,
+    });
+  }
+
+  function selectStageOption(r: PreviewRow, optionId: string) {
+    const current = effStage(r);
+    const stage = stages.find((item) => item.number === current.work_stage_number);
+    const option = stage?.stage_options.find((item) => String(item.id || item.number || "") === optionId);
+    if (!option) {
+      patchStage(r, { stage_option_id: null, stage_option_title: null });
+      return;
+    }
+    patchStage(r, {
+      stage_option_id: String(option.id || option.number || ""),
+      stage_option_title: option.title,
+      section_id: option.section_id ?? current.section_id ?? null,
+      subtype_id: option.subtype_id ?? current.subtype_id ?? null,
+    });
+  }
+
+  function selectSubtype(r: PreviewRow, code: string) {
+    const option = subtypeOptions.find((item) => item.code === code);
+    if (!option) return;
+    patchStage(r, { section_id: option.section_id, subtype_id: option.subtype_id });
+  }
+
   function updateAdded(i: number, patch: Partial<PreviewAddedRow>) {
     setAddedRows((prev) => prev.map((row, j) => (j === i ? { ...row, ...patch } : row)));
   }
@@ -1152,10 +1278,16 @@ function EditablePreviewPanel({
         quantity: a.quantity,
         total_price: a.total_price,
       }));
-    return { type_overrides, added_rows };
+    const stage_overrides = Object.entries(stageOverrides)
+      .map(([idx, draft]) => {
+        const row = baseRows.find((r) => r.index === Number(idx));
+        return { index: Number(idx), row_hash: row?.row_hash ?? "", ...draft };
+      })
+      .filter((o) => o.row_hash);
+    return { type_overrides, added_rows, stage_overrides };
   }
 
-  const changedCount = Object.keys(overrides).length + addedRows.filter((a) => a.name.trim()).length;
+  const changedCount = Object.keys(overrides).length + Object.keys(stageOverrides).length + addedRows.filter((a) => a.name.trim()).length;
   const numFromInput = (v: string): number | null => {
     const s = v.trim().replace(",", ".");
     if (s === "") return null;
@@ -1205,13 +1337,34 @@ function EditablePreviewPanel({
           Показаны не все строки (смета большая) — редактирование доступно для первых {baseRows.length}. Суммы посчитаны по всей смете.
         </div>
       )}
+      {!!preview.hierarchy_suggestions?.project_variants?.length && !stages.length && (
+        <div style={{ fontSize: 12, background: "rgba(59,130,246,.06)", color: "var(--blue-dark)", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
+          Подтип объекта не выбран, этапы пока не распределяются. Возможные варианты:{" "}
+          {preview.hierarchy_suggestions.project_variants.map((variant) => String(variant.title ?? variant.id)).join("; ")}.
+        </div>
+      )}
+      {(preview.stage_review_count ?? 0) > 0 && (
+        <div style={{ fontSize: 12, background: "rgba(245,158,11,.1)", color: "#92400e", borderRadius: 6, padding: "8px 10px", marginBottom: 10 }}>
+          Требуют проверки этапа или подтипа: {preview.stage_review_count}.
+        </div>
+      )}
+      {!!preview.stage_groups?.length && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+          {preview.stage_groups.slice(0, 12).map((group) => (
+            <span key={group.work_stage_number ?? "unmatched"} style={{ fontSize: 11, border: "1px solid var(--border)", borderRadius: 999, padding: "4px 8px", color: group.needs_review_count ? "#92400e" : "var(--muted)", background: group.needs_review_count ? "rgba(245,158,11,.08)" : "var(--surface)" }}>
+              {group.work_stage_number ?? "—"} {group.work_stage_title} · {group.rows_count}
+              {group.needs_review_count ? ` · review ${group.needs_review_count}` : ""}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* Полная редактируемая таблица */}
       <div style={{ overflowX: "auto", border: "1px solid var(--border)", borderRadius: 6, marginTop: 8 }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ background: "rgba(148,163,184,.08)" }}>
-              {["Тип", "Подтип", "Раздел", "Наименование", "Ед.", "Кол-во", "Сумма"].map((h) => (
+              {["Тип", "Роль", "Этап", "Опция", "Section/Subtype", "Раздел", "Наименование", "Ед.", "Кол-во", "Сумма"].map((h) => (
                 <th key={h} style={{ textAlign: "left", padding: "6px 8px", fontWeight: 600, color: "var(--muted)" }}>{h}</th>
               ))}
             </tr>
@@ -1219,7 +1372,11 @@ function EditablePreviewPanel({
           <tbody>
             {baseRows.map((r) => {
               const t = effType(r);
-              const changed = r.index != null && overrides[r.index] != null;
+              const stage = effStage(r);
+              const stageChanged = r.index != null && stageOverrides[r.index] != null;
+              const changed = r.index != null && (overrides[r.index] != null || stageChanged);
+              const currentStage = stages.find((item) => item.number === stage.work_stage_number);
+              const subtypeCode = stage.section_id && stage.subtype_id ? `${stage.section_id}/${stage.subtype_id}` : "";
               return (
                 <Fragment key={r.index ?? r.name}>
                   <tr style={{ borderTop: "1px solid var(--border)", background: changed ? "rgba(59,130,246,.06)" : undefined }}>
@@ -1234,8 +1391,50 @@ function EditablePreviewPanel({
                         ))}
                       </select>
                     </td>
-                    <td style={{ padding: "6px 8px", color: "var(--muted)" }}>
-                      {t === "work" && r.subtype_code ? `${r.subtype_code} · ${r.subtype_name ?? ""}` : "—"}
+                    <td style={{ padding: "4px 8px" }}>
+                      <select
+                        value={stage.row_role ?? "unknown"}
+                        onChange={(e) => patchStage(r, { row_role: e.target.value })}
+                        style={{ fontSize: 12, width: 110, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4, background: "var(--surface)" }}
+                      >
+                        {EDITABLE_ROW_ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
+                      </select>
+                    </td>
+                    <td style={{ padding: "4px 8px", minWidth: 220 }}>
+                      <select
+                        value={stage.work_stage_number ?? ""}
+                        onChange={(e) => selectStage(r, e.target.value)}
+                        style={{ fontSize: 12, width: 260, padding: "3px 6px", border: `1px solid ${r.needs_review ? "rgba(245,158,11,.7)" : "var(--border2)"}`, borderRadius: 4, background: "var(--surface)" }}
+                      >
+                        <option value="">Не распределено</option>
+                        {stages.map((opt) => (
+                          <option key={opt.number} value={opt.number}>{opt.number}. {opt.title}</option>
+                        ))}
+                      </select>
+                      {r.review_reason && <div style={{ fontSize: 10, color: "#92400e", marginTop: 2 }}>{r.review_reason}</div>}
+                    </td>
+                    <td style={{ padding: "4px 8px" }}>
+                      <select
+                        value={stage.stage_option_id ?? ""}
+                        disabled={!currentStage?.stage_options?.length}
+                        onChange={(e) => selectStageOption(r, e.target.value)}
+                        style={{ fontSize: 12, width: 160, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4, background: "var(--surface)" }}
+                      >
+                        <option value="">—</option>
+                        {(currentStage?.stage_options ?? []).map((option) => {
+                          const idValue = String(option.id || option.number || "");
+                          return <option key={idValue || option.title} value={idValue}>{option.title}</option>;
+                        })}
+                      </select>
+                    </td>
+                    <td style={{ padding: "4px 8px", minWidth: 190 }}>
+                      <input
+                        value={subtypeCode}
+                        list="work-subtype-options"
+                        onChange={(e) => selectSubtype(r, e.target.value)}
+                        placeholder="section/subtype"
+                        style={{ width: 190, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4, background: "var(--surface)" }}
+                      />
                     </td>
                     <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.section ?? "—"}</td>
                     <td style={{ padding: "6px 8px" }}>{r.name}</td>
@@ -1246,6 +1445,9 @@ function EditablePreviewPanel({
                   {(r.materials ?? []).map((m, j) => (
                     <tr key={`m${r.index}-${j}`} style={{ borderTop: "1px dashed var(--border)", background: "rgba(22,163,74,.04)" }}>
                       <td style={{ padding: "4px 8px", color: ITEM_TYPE_COLORS.material, fontSize: 11 }}>└ материал</td>
+                      <td style={{ padding: "4px 8px" }} />
+                      <td style={{ padding: "4px 8px" }} />
+                      <td style={{ padding: "4px 8px" }} />
                       <td style={{ padding: "4px 8px" }} />
                       <td style={{ padding: "4px 8px" }} />
                       <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.name}</td>
@@ -1273,6 +1475,9 @@ function EditablePreviewPanel({
                   </select>
                 </td>
                 <td style={{ padding: "6px 8px", color: "var(--muted)" }}>авто</td>
+                <td style={{ padding: "6px 8px", color: "var(--muted)" }}>—</td>
+                <td style={{ padding: "6px 8px", color: "var(--muted)" }}>—</td>
+                <td style={{ padding: "6px 8px", color: "var(--muted)" }}>—</td>
                 <td style={{ padding: "4px 8px" }}>
                   <input value={a.section ?? ""} onChange={(e) => updateAdded(i, { section: e.target.value })} placeholder="раздел"
                     style={{ width: 90, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4 }} />
@@ -1300,6 +1505,11 @@ function EditablePreviewPanel({
             ))}
           </tbody>
         </table>
+        <datalist id="work-subtype-options">
+          {subtypeOptions.map((option) => (
+            <option key={option.code} value={option.code}>{option.label}</option>
+          ))}
+        </datalist>
       </div>
 
       <button
@@ -1309,6 +1519,22 @@ function EditablePreviewPanel({
       >
         ➕ Добавить строку
       </button>
+
+      <label style={{ marginTop: 12, display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: "var(--text)", cursor: confirming ? "default" : "pointer" }}>
+        <input
+          type="checkbox"
+          checked={preserveEstimateStructure}
+          disabled={confirming}
+          onChange={(e) => onPreserveEstimateStructureChange(e.target.checked)}
+          style={{ marginTop: 2 }}
+        />
+        <span>
+          <b>Оставить структуру сметы</b>
+          <span style={{ display: "block", color: "var(--muted)", marginTop: 2 }}>
+            Если выключено, шаг «Структура работ» будет сгруппирован по этапам JSON v6.
+          </span>
+        </span>
+      </label>
 
       <div style={{ marginTop: 14, display: "flex", gap: 10, alignItems: "center" }}>
         <button

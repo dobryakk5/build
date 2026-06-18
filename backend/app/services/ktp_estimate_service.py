@@ -45,11 +45,13 @@ from app.services.ktp_service import (
 )
 from app.services.ktp_item_fer_service import extract_fer_unit, match_session_items, normalize_unit
 from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
-from app.services.work_taxonomy_service import build_work_section_palette
+from app.services.work_taxonomy_service import build_work_section_palette, get_project_variant_stages
 
 logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "estimate-v6.4"
+GROUPING_MODE_STAGE_AWARE = "stage_aware"
+GROUPING_MODE_ESTIMATE_STRUCTURE = "estimate_structure"
 
 ESTIMATE_KIND_LABELS: dict[int, str] = {
     1: "Земляные грунтовые работы",
@@ -555,6 +557,7 @@ async def start_stage1_job(
     estimate_batch_id: str,
     user_id: str,
     force: bool = False,
+    preserve_estimate_structure: bool = False,
 ) -> tuple[Job | None, KtpEstimateSession]:
     """Запускает этап 1. Возвращает (job | None, session).
 
@@ -577,6 +580,14 @@ async def start_stage1_job(
         project_id=project_id,
         estimate_batch_id=estimate_batch_id,
         status="stage1_pending",
+        stage1_raw_json={
+            "grouping_mode": (
+                GROUPING_MODE_ESTIMATE_STRUCTURE
+                if preserve_estimate_structure
+                else GROUPING_MODE_STAGE_AWARE
+            ),
+            "preserve_estimate_structure": bool(preserve_estimate_structure),
+        },
     )
     db.add(session)
     try:
@@ -595,7 +606,15 @@ async def start_stage1_job(
         status="pending",
         project_id=project_id,
         created_by=user_id,
-        input={"session_id": session.id},
+        input={
+            "session_id": session.id,
+            "preserve_estimate_structure": bool(preserve_estimate_structure),
+            "grouping_mode": (
+                GROUPING_MODE_ESTIMATE_STRUCTURE
+                if preserve_estimate_structure
+                else GROUPING_MODE_STAGE_AWARE
+            ),
+        },
     )
     db.add(job)
     # Сначала INSERT Job, чтобы FK ktp_estimate_sessions.stage1_job_id
@@ -633,14 +652,29 @@ async def _process_stage1(job_id: str) -> None:
             await db.commit()
 
         try:
+            preserve_estimate_structure = bool(job.input.get("preserve_estimate_structure"))
+            grouping_mode = (
+                GROUPING_MODE_ESTIMATE_STRUCTURE
+                if preserve_estimate_structure
+                else GROUPING_MODE_STAGE_AWARE
+            )
             batch = await db.get(EstimateBatch, session.estimate_batch_id)
+            if not batch:
+                raise ValueError("Блок сметы не найден")
             estimates = await _load_work_estimates(
                 db, session.project_id, session.estimate_batch_id
             )
             if not estimates:
                 raise ValueError("В блоке сметы нет строк работ для построения КТП")
 
-            await _progress(f"Загружено {len(estimates)} позиций сметы, запускаем ИИ…")
+            await _progress(
+                f"Загружено {len(estimates)} позиций сметы, "
+                + (
+                    "строим структуру по разделам сметы…"
+                    if preserve_estimate_structure
+                    else "строим структуру по этапам JSON v6…"
+                )
+            )
 
             # row_key -> estimate
             row_keys: dict[str, Estimate] = {
@@ -661,6 +695,8 @@ async def _process_stage1(job_id: str) -> None:
                 batch.clarification_answers,
                 _progress,
                 diagnostics,
+                batch=batch,
+                preserve_estimate_structure=preserve_estimate_structure,
             )
 
             await _progress("Сохраняем структуру работ…")
@@ -686,9 +722,28 @@ async def _process_stage1(job_id: str) -> None:
                     f"ИИ вернул {len(invalid_section_codes)} неизвестных кодов секций JSON v6; "
                     "для этих групп секция оставлена пустой"
                 )
+            stage_grouping = diagnostics.get("stage_grouping") or {}
+            fallback_rows = (stage_grouping.get("fallback_rows") or []) + (
+                stage_grouping.get("invalid_stage_rows") or []
+            )
+            if fallback_rows:
+                warnings_out.append(
+                    f"{len(fallback_rows)} позиций не попали в канонический этап JSON v6 — "
+                    f"добавлены в «{FALLBACK_DISPLAY_TITLE}»"
+                )
+            review_rows = stage_grouping.get("review_rows") or []
+            if review_rows:
+                warnings_out.append(
+                    f"{len(review_rows)} позиций имеют stage/subtype needs_review — проверьте их на шаге структуры"
+                )
 
             session.stage1_raw_json = {
+                "grouping_mode": grouping_mode,
+                "preserve_estimate_structure": preserve_estimate_structure,
+                "estimate_type_id": batch.estimate_type_id,
+                "project_variant_id": batch.project_variant_id,
                 "groups": raw_groups,
+                "stage_grouping": diagnostics.get("stage_grouping") or {},
                 "chunk_errors": chunk_errors,
                 "raw_samples": diagnostics.get("raw_samples") or [],
                 "coverage": diagnostics.get("coverage") or [],
@@ -733,6 +788,9 @@ async def _run_stage1_ai(
     clarification_answers: dict | None,
     on_progress: Callable[[str], Awaitable[None]] | None = None,
     diagnostics: dict[str, Any] | None = None,
+    *,
+    batch: EstimateBatch | None = None,
+    preserve_estimate_structure: bool = False,
 ) -> list[dict[str, Any]]:
     """Возвращает канонический список групп {title, work_section_code, items:[…]}.
 
@@ -754,6 +812,13 @@ async def _run_stage1_ai(
     diagnostics.setdefault("gap_fill_duplicates", [])
 
     estimate_to_row_key = {est.id: row_key for row_key, est in row_keys.items()}
+
+    if not preserve_estimate_structure:
+        if batch is None:
+            raise ValueError("Блок сметы не передан для stage-aware группировки")
+        if on_progress:
+            await on_progress("Группируем работы по каноническим этапам JSON v6…")
+        return _build_stage_aware_groups(estimates, estimate_to_row_key, batch, diagnostics)
 
     python_groups = _build_python_groups(estimates, estimate_to_row_key, diagnostics)
     ungrouped_rows = python_groups.pop("__ungrouped__", None)
@@ -867,6 +932,161 @@ def _build_python_groups(
         }
 
     return groups
+
+
+def _stage_section_key(stage_number: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9]+", "_", str(stage_number)).strip("_").lower()
+    return f"stage_{normalized or hashlib.sha1(str(stage_number).encode('utf-8')).hexdigest()[:8]}"
+
+
+def _stage_title(stage_number: str | None, stage_title: str | None) -> str:
+    number = str(stage_number or "").strip()
+    title = str(stage_title or "").strip()
+    if number and title:
+        return f"{number}. {title}"
+    return title or number or FALLBACK_DISPLAY_TITLE
+
+
+def _estimate_stage_number(est: Estimate) -> str | None:
+    raw = est.raw_data if isinstance(est.raw_data, dict) else {}
+    value = est.work_stage_number or raw.get("work_stage_number")
+    value = str(value).strip() if value is not None else ""
+    return value or None
+
+
+def _estimate_stage_title(est: Estimate) -> str | None:
+    raw = est.raw_data if isinstance(est.raw_data, dict) else {}
+    value = est.work_stage_title or raw.get("work_stage_title")
+    value = str(value).strip() if value is not None else ""
+    return value or None
+
+
+def _build_stage_aware_groups(
+    estimates: list[Estimate],
+    estimate_to_row_key: dict[str, str],
+    batch: EstimateBatch,
+    diagnostics: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build WBS groups from JSON v6 work_stage instead of estimate sections."""
+    if not batch.estimate_type_id or not batch.project_variant_id:
+        raise ValueError(
+            "Для новой структуры работ нужен выбранный тип сметы и вариант объекта. "
+            "Выберите тип/подтип на шаге загрузки или включите «Оставить структуру сметы»."
+        )
+    try:
+        allowed_stages = get_project_variant_stages(
+            str(batch.estimate_type_id),
+            str(batch.project_variant_id),
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "Выбранный тип сметы/вариант объекта не найден в справочнике JSON v6"
+        ) from exc
+
+    stage_by_number = {
+        str(stage.get("number") or ""): stage
+        for stage in allowed_stages
+        if stage.get("number")
+    }
+    stage_order = {
+        str(stage.get("number") or ""): (index + 1) * 1000.0
+        for index, stage in enumerate(allowed_stages)
+        if stage.get("number")
+    }
+    stage_grouping = diagnostics.setdefault(
+        "stage_grouping",
+        {
+            "mode": GROUPING_MODE_STAGE_AWARE,
+            "estimate_type_id": batch.estimate_type_id,
+            "project_variant_id": batch.project_variant_id,
+            "fallback_rows": [],
+            "invalid_stage_rows": [],
+            "review_rows": [],
+        },
+    )
+    groups: dict[str, dict[str, Any]] = {}
+    fallback_items: list[dict[str, Any]] = []
+
+    for est in sorted(estimates, key=lambda e: (e.row_order or 0, e.id)):
+        row_key = estimate_to_row_key.get(est.id)
+        if not row_key:
+            continue
+        raw = est.raw_data if isinstance(est.raw_data, dict) else {}
+        stage_number = _estimate_stage_number(est)
+        stage = stage_by_number.get(stage_number or "")
+        if not stage_number:
+            fallback_items.append(
+                {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
+            )
+            stage_grouping["fallback_rows"].append(
+                {"row_key": row_key, "estimate_id": est.id, "reason": "missing_work_stage_number"}
+            )
+            continue
+        if not stage:
+            fallback_items.append(
+                {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
+            )
+            stage_grouping["invalid_stage_rows"].append(
+                {
+                    "row_key": row_key,
+                    "estimate_id": est.id,
+                    "work_stage_number": stage_number,
+                }
+            )
+            continue
+
+        if est.needs_review or raw.get("needs_review"):
+            stage_grouping["review_rows"].append(
+                {
+                    "row_key": row_key,
+                    "estimate_id": est.id,
+                    "work_stage_number": stage_number,
+                    "review_reason": est.review_reason or raw.get("review_reason"),
+                }
+            )
+
+        section_key = _stage_section_key(stage_number)
+        bucket = groups.setdefault(
+            section_key,
+            {
+                "title": _stage_title(stage_number, _estimate_stage_title(est) or stage.get("title")),
+                "sort_order": stage_order.get(stage_number, float(10**8)),
+                "wt_code": None,
+                "work_section_code": None,
+                "work_section_name": None,
+                "section_key": section_key,
+                "work_stage_number": stage_number,
+                "work_stage_title": stage.get("title"),
+                "canonical_stage_id": stage.get("canonical_stage_id"),
+                "stage_options_mode": stage.get("stage_options_mode") or "none",
+                "items": [],
+            },
+        )
+        bucket["items"].append(
+            {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
+        )
+
+    result = sorted(groups.values(), key=lambda item: (float(item["sort_order"]), item["section_key"]))
+    if fallback_items:
+        result.append(
+            {
+                "title": FALLBACK_DISPLAY_TITLE,
+                "sort_order": float(10**9),
+                "wt_code": None,
+                "work_section_code": None,
+                "work_section_name": None,
+                "section_key": FALLBACK_SECTION_KEY,
+                "items": fallback_items,
+            }
+        )
+        diagnostics["coverage"].append(
+            {
+                "kind": "stage_aware_fallback",
+                "missing": [item["row_key"] for item in fallback_items],
+                "unknown": [],
+            }
+        )
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────

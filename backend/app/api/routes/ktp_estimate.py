@@ -28,9 +28,12 @@ class SessionOut(BaseModel):
     error_message: str | None = None
     stage1_job_id: str | None = None
     gpr_job_id: str | None = None
+    stage1_grouping_mode: str | None = None
+    preserve_estimate_structure: bool = False
 
     @classmethod
     def of(cls, s: KtpEstimateSession) -> "SessionOut":
+        raw = s.stage1_raw_json if isinstance(s.stage1_raw_json, dict) else {}
         return cls(
             id=s.id,
             project_id=s.project_id,
@@ -39,6 +42,8 @@ class SessionOut(BaseModel):
             error_message=s.error_message,
             stage1_job_id=s.stage1_job_id,
             gpr_job_id=s.gpr_job_id,
+            stage1_grouping_mode=raw.get("grouping_mode"),
+            preserve_estimate_structure=bool(raw.get("preserve_estimate_structure")),
         )
 
 
@@ -254,6 +259,7 @@ class CardOut(BaseModel):
 class StartSessionRequest(BaseModel):
     estimate_batch_id: str
     force: bool = False
+    preserve_estimate_structure: bool = False
 
 
 class StartSessionResponse(BaseModel):
@@ -351,6 +357,7 @@ async def start_session(
             estimate_batch_id=body.estimate_batch_id,
             user_id=member.user_id,
             force=body.force,
+            preserve_estimate_structure=body.preserve_estimate_structure,
         )
     except ValueError as exc:
         raise _value_error(exc)

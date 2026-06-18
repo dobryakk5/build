@@ -245,10 +245,21 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
         "work_stage_number": raw.get("work_stage_number"),
         "work_stage_title": raw.get("work_stage_title"),
         "canonical_stage_id": raw.get("canonical_stage_id"),
+        "stage_occurrence_index": raw.get("stage_occurrence_index"),
+        "stage_occurrence_label": raw.get("stage_occurrence_label"),
+        "stage_options_mode": raw.get("stage_options_mode"),
         "stage_option_id": raw.get("stage_option_id"),
         "stage_option_title": raw.get("stage_option_title"),
         "stage_confidence": raw.get("stage_confidence"),
         "stage_match_type": raw.get("stage_match_type"),
+        "stage_match_score_json": raw.get("stage_match_score_json"),
+        "work_type_match_score_json": raw.get("work_type_match_score_json"),
+        "row_role": raw.get("row_role"),
+        "section_id": raw.get("section_id"),
+        "subtype_id": raw.get("subtype_id"),
+        "needs_review": raw.get("needs_review"),
+        "review_reason": raw.get("review_reason"),
+        "work_type_confidence": raw.get("work_type_confidence"),
         "row_hash":    _row_hash(row.section, row.work_name, row.unit, row.quantity, row.total_price),
     }
 
@@ -391,18 +402,27 @@ def _enrich_work_stages_sync(rows: list, hierarchy_selection: dict | None) -> No
 
     stages = get_project_variant_stages(str(estimate_type_id), str(project_variant_id))
     classifier = StageClassifier(get_sequential_scoring_policy())
+    estimate_profile_id = hierarchy_selection.get("estimate_profile_id") or hierarchy_selection.get("estimate_type_id")
     previous_context: dict | None = None
-    for row in rows:
+    for index, row in enumerate(rows):
         raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
         row.raw_data = raw
+        raw["row_order"] = index
         row_role = raw.get("row_role") or "unknown"
         match = classifier.classify_row_to_stage(
             " ".join(str(part or "") for part in (row.section, row.work_name)),
             str(row_role),
             stages,
             previous_context,
+            estimate_profile_id=str(estimate_profile_id) if estimate_profile_id else None,
+            row_order=index,
         )
         if not match.stage:
+            raw.setdefault("row_role", str(row_role))
+            raw.setdefault("needs_review", match.needs_review)
+            raw.setdefault("review_reason", match.review_reason)
+            raw.setdefault("stage_match_type", match.match_type)
+            raw.setdefault("stage_match_score_json", match.score_breakdown)
             continue
         raw.update(
             match.as_raw_data(
@@ -417,7 +437,11 @@ def _enrich_work_stages_sync(rows: list, hierarchy_selection: dict | None) -> No
             raw["work_section_code"] = raw.get("section_id")
         if raw.get("section_id") and raw.get("subtype_id"):
             raw["work_subtype_code"] = f"{raw['section_id']}/{raw['subtype_id']}"
-        if not match.needs_review and raw.get("work_stage_number"):
+        if (
+            not match.needs_review
+            and raw.get("work_stage_number")
+            and raw.get("row_role") in {"work", "header"}
+        ):
             previous_context = dict(raw)
 
 
@@ -470,6 +494,71 @@ def _apply_operator_edits(rows: list, edits: dict | None) -> list:
     return rows
 
 
+def _apply_stage_operator_overrides(rows: list, edits: dict | None) -> None:
+    if not edits:
+        return
+    for override in edits.get("stage_overrides") or []:
+        index = override.get("index")
+        if not isinstance(index, int) or index < 0 or index >= len(rows):
+            raise PreviewChangedError("PREVIEW_EXPIRED_OR_CHANGED: строка stage override вне диапазона")
+        row = rows[index]
+        expected = override.get("row_hash")
+        actual = _row_hash(row.section, row.work_name, row.unit, row.quantity, row.total_price)
+        if expected and expected != actual:
+            raise PreviewChangedError("PREVIEW_EXPIRED_OR_CHANGED: строка изменилась")
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        row.raw_data = raw
+
+        def set_clean(key: str, value):
+            if value is None:
+                raw.pop(key, None)
+            else:
+                raw[key] = value
+
+        for key in (
+            "work_stage_number",
+            "work_stage_title",
+            "canonical_stage_id",
+            "stage_occurrence_index",
+            "stage_occurrence_label",
+            "stage_options_mode",
+            "stage_option_id",
+            "stage_option_title",
+            "section_id",
+            "subtype_id",
+            "row_role",
+        ):
+            if key in override:
+                set_clean(key, override.get(key))
+
+        section_id = raw.get("section_id")
+        subtype_id = raw.get("subtype_id")
+        if section_id:
+            raw["work_section_code"] = section_id
+        if section_id and subtype_id:
+            raw["work_subtype_code"] = f"{section_id}/{subtype_id}"
+        else:
+            raw.pop("work_subtype_code", None)
+        raw["manual_override"] = True
+        raw["needs_review"] = False
+        raw["review_reason"] = None
+        raw["stage_match_type"] = "manual_operator_override"
+        raw["stage_confidence"] = "high"
+        raw["work_type_confidence"] = "high" if section_id and subtype_id else "low"
+        raw["stage_match_score_json"] = {
+            "manual_override": True,
+            "operator_fields": sorted(override.keys()),
+        }
+        raw["work_type_match_score_json"] = {
+            "manual_override": True,
+            "winner": {
+                "section_id": section_id,
+                "subtype_id": subtype_id,
+                "source": "manual_operator_override",
+            },
+        }
+
+
 def _parse_upload_rows_for_import(
     tmp_path: str,
     col_mapping: dict | None,
@@ -511,6 +600,7 @@ def _parse_upload_rows_for_import(
     rows = _apply_operator_edits(rows, edits)
     _enrich_work_subtypes_sync(rows)
     _enrich_work_stages_sync(rows, hierarchy_selection)
+    _apply_stage_operator_overrides(rows, edits)
     return rows, subtotal_rows, meta
 
 
@@ -588,6 +678,35 @@ def _build_preview_groups(rows: list) -> dict:
     }
 
 
+def _build_stage_preview_groups(rows: list) -> list[dict]:
+    groups: dict[str, dict] = {}
+    order: list[str] = []
+    for index, row in enumerate(rows[:MAX_PREVIEW_GROUP_ROWS]):
+        raw = getattr(row, "raw_data", None) or {}
+        stage_number = raw.get("work_stage_number") or "unmatched"
+        if stage_number not in groups:
+            title = raw.get("work_stage_title") or ("Не распределено" if stage_number == "unmatched" else "")
+            groups[stage_number] = {
+                "work_stage_number": None if stage_number == "unmatched" else stage_number,
+                "work_stage_title": title,
+                "canonical_stage_id": raw.get("canonical_stage_id"),
+                "stage_options_mode": raw.get("stage_options_mode") or "none",
+                "rows_count": 0,
+                "needs_review_count": 0,
+                "total": 0.0,
+                "rows": [],
+            }
+            order.append(stage_number)
+        group = groups[stage_number]
+        entry = _row_preview_dict(row, index=index)
+        group["rows_count"] += 1
+        group["total"] = round(float(group["total"]) + float(row.total_price or 0), 2)
+        if entry.get("needs_review") or entry.get("operator_review_required"):
+            group["needs_review_count"] += 1
+        group["rows"].append(entry)
+    return [groups[key] for key in order]
+
+
 def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
     breakdown = {t: {"count": 0, "total": 0.0} for t in _ITEM_TYPE_ORDER}
     unknown_rows: list[dict] = []
@@ -633,7 +752,17 @@ def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
         "sample_rows": [_row_preview_dict(r) for r in rows[:20]],
         "ignored_subtotal_rows_count": len(subtotal_rows),
         "declared_totals": meta.get("declared_totals"),
+        "stage_review_count": sum(1 for row in rows if (getattr(row, "raw_data", None) or {}).get("needs_review")),
     }
+
+
+def _sample_texts_for_suggestions(rows: list, limit: int = 80) -> list[str]:
+    texts: list[str] = []
+    for row in rows[:limit]:
+        text_value = " ".join(str(part or "") for part in (row.section, row.work_name)).strip()
+        if text_value:
+            texts.append(text_value)
+    return texts
 
 
 def _declared_total_from_meta(meta: dict) -> float | None:
@@ -661,6 +790,8 @@ async def preview_upload_job(
     clarification_answers: dict | None,
     hierarchy_selection: dict | None,
     db:               AsyncSession,
+    hierarchy_suggestions = None,
+    suggestion_estimate_type_id: str | None = None,
 ) -> dict:
     """Parse the upload to a tmp file and return a typed breakdown WITHOUT any DB
     writes. Stores a Redis preview session and returns its preview_id."""
@@ -704,12 +835,19 @@ async def preview_upload_job(
         raise HTTPException(422, "Не удалось распознать строки сметы в выбранном формате.")
 
     rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
-    # Keep preview synchronous and cheap: subtype classification can take tens
-    # of seconds on large estimates and is performed in the background import
-    # job after confirmation.
+    await run_in_threadpool(_enrich_work_subtypes_sync, rows)
+    await run_in_threadpool(_enrich_work_stages_sync, rows, hierarchy_selection)
     preview = _compute_preview(rows, subtotal_rows, meta)
     grouped = _build_preview_groups(rows)
+    stage_groups = _build_stage_preview_groups(rows)
     flat_rows = [_row_preview_dict(r, index=i) for i, r in enumerate(rows[:MAX_PREVIEW_GROUP_ROWS])]
+    suggestions = None
+    if not hierarchy_selection and hierarchy_suggestions:
+        suggestions = hierarchy_suggestions(
+            _sample_texts_for_suggestions(rows),
+            estimate_type_id=suggestion_estimate_type_id,
+            limit=3,
+        )
 
     warnings: list[str] = []
     if preview["difference_reason"]:
@@ -744,7 +882,9 @@ async def preview_upload_job(
         "strategy":       meta.get("strategy"),
         "confidence":     meta.get("confidence"),
         "hierarchy_selection": hierarchy_selection,
+        "hierarchy_suggestions": suggestions,
         "groups":         grouped["groups"],
+        "stage_groups":   stage_groups,
         "rows":           flat_rows,
         "truncated":      grouped["truncated"],
         "no_section_count": grouped["no_section_count"],
@@ -1004,6 +1144,24 @@ async def _process_upload(job_id: str) -> None:
                 estimates.append(est)
 
             await db.flush()
+            row_id_by_order = {int(est.row_order): est.id for est in estimates if est.row_order is not None}
+            for est in estimates:
+                raw = est.raw_data if isinstance(est.raw_data, dict) else {}
+                parent_order = raw.get("parent_row_order")
+                inherited_order = raw.get("inherited_from_row_order")
+                if parent_order is not None:
+                    try:
+                        est.parent_row_id = row_id_by_order.get(int(parent_order))
+                        raw["parent_row_id"] = est.parent_row_id
+                    except (TypeError, ValueError):
+                        pass
+                if inherited_order is not None:
+                    try:
+                        est.inherited_from_row_id = row_id_by_order.get(int(inherited_order))
+                        raw["inherited_from_row_id"] = est.inherited_from_row_id
+                    except (TypeError, ValueError):
+                        pass
+                est.raw_data = raw
 
             # Гант строится отдельным действием со страницы сметы.
 

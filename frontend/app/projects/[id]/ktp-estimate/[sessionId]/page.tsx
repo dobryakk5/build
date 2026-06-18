@@ -239,12 +239,22 @@ export default function KtpEstimateWizardPage() {
     if (!batchId) return;
     setBusy(true);
     try {
-      const started = await ktpEstimate.startSession(projectId, batchId, true);
+      const started = await ktpEstimate.startSession(
+        projectId,
+        batchId,
+        true,
+        Boolean(session?.preserve_estimate_structure),
+      );
       trackActivity("KTP_ESTIMATE_SESSION_RESTARTED", {
         projectId,
         entityType: "ktp_estimate_session",
         entityId: started.session_id,
-        metadata: { estimate_batch_id: batchId, previous_session_id: sessionId, job_id: started.job_id },
+        metadata: {
+          estimate_batch_id: batchId,
+          previous_session_id: sessionId,
+          job_id: started.job_id,
+          preserve_estimate_structure: Boolean(session?.preserve_estimate_structure),
+        },
       });
       const suffix = started.job_id ? `?job=${started.job_id}` : "";
       router.replace(`/projects/${projectId}/ktp-estimate/${started.session_id}${suffix}`);
@@ -253,7 +263,7 @@ export default function KtpEstimateWizardPage() {
     } finally {
       setBusy(false);
     }
-  }, [batchId, projectId, router, sessionId]);
+  }, [batchId, projectId, router, session?.preserve_estimate_structure, sessionId]);
 
   const openUploadStep = useCallback(() => {
     router.push(
