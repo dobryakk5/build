@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 from datetime import date
+import time
 
 import pytest
 
@@ -15,6 +16,7 @@ from app.services.upload_service import (
 from app.services.excel_parser import ParsedRow
 
 SEWERA_PDF = Path.home() / "Downloads" / "Ильинские сады 02.04.2026.pdf"
+MOSMONTAG_FITNESS_XLSX = Path.home() / "Downloads" / "МосМонтаж3 фитнес.xlsx"
 
 
 def _row(name, item_type, section, total=100.0, order=0, materials=None):
@@ -69,8 +71,11 @@ async def test_preview_upload_skips_expensive_subtype_enrichment(monkeypatch, tm
         async def read(self):
             return b"xlsx"
 
-    async def fail_enrich(*args, **kwargs):
+    def fail_enrich(*args, **kwargs):
         raise AssertionError("preview must not run full subtype enrichment")
+
+    def fail_stage_enrich(*args, **kwargs):
+        raise AssertionError("preview must not run stage enrichment")
 
     async def fake_save(payload):
         assert payload["tmp_path"].endswith(".xlsx")
@@ -90,7 +95,8 @@ async def test_preview_upload_skips_expensive_subtype_enrichment(monkeypatch, tm
         ], {"format": parser_factory.FORMAT_EXCEL, "strategy": "row", "parser_profile": "auto"}
 
     monkeypatch.setattr(upload_service, "_save_tmp", lambda data, suffix: str(tmp_path / f"preview{suffix}"))
-    monkeypatch.setattr(upload_service, "_enrich_work_subtypes", fail_enrich)
+    monkeypatch.setattr(upload_service, "_enrich_work_subtypes_sync", fail_enrich)
+    monkeypatch.setattr(upload_service, "_enrich_work_stages_sync", fail_stage_enrich)
     monkeypatch.setattr(parser_factory, "parse_estimate", fake_parse)
     monkeypatch.setattr(preview_session, "save_preview_session", fake_save)
 
@@ -111,6 +117,8 @@ async def test_preview_upload_skips_expensive_subtype_enrichment(monkeypatch, tm
 
     assert result["preview_id"] == "preview-id"
     assert result["rows"][0]["subtype_code"] is None
+    assert "stage_groups" not in result
+    assert result["type_breakdown"]["work"]["count"] == 1
 
 
 @pytest.mark.skipif(not SEWERA_PDF.exists(), reason="Sewera sample PDF not present")
@@ -130,3 +138,46 @@ def test_sewera_groups_have_works_and_materials_together():
     )
     all_rows_total = sum(float(r.total_price or 0) for r in rows)
     assert round(grand, 2) == round(all_rows_total, 2)
+
+
+@pytest.mark.skipif(not MOSMONTAG_FITNESS_XLSX.exists(), reason="MosMontag sample Excel not present")
+@pytest.mark.asyncio
+async def test_preview_upload_mosmontag_fitness_returns_resource_type_preview(monkeypatch):
+    from app.services import preview_session, upload_service
+
+    class LocalUpload:
+        filename = MOSMONTAG_FITNESS_XLSX.name
+
+        async def read(self):
+            return MOSMONTAG_FITNESS_XLSX.read_bytes()
+
+    async def fake_save(payload):
+        assert payload["type_breakdown"]["work"]["count"] > 100
+        return "preview-mosmontag"
+
+    monkeypatch.setattr(preview_session, "save_preview_session", fake_save)
+
+    started = time.perf_counter()
+    result = await upload_service.preview_upload_job(
+        file=LocalUpload(),
+        project_id="project-id",
+        user_id="user-id",
+        parser_profile="auto",
+        start_date=date(2026, 6, 17),
+        workers=1,
+        estimate_kind=2,
+        complex_mode=False,
+        build_gantt=True,
+        clarification_answers=None,
+        hierarchy_selection={
+            "estimate_type_id": "residential_construction",
+            "project_variant_id": "residential_construction_kirpichnye_doma",
+        },
+        db=None,
+    )
+
+    assert result["preview_id"] == "preview-mosmontag"
+    assert result["type_breakdown"]["work"]["count"] > 100
+    assert result["rows"][0]["subtype_code"] is None
+    assert "stage_groups" not in result
+    assert time.perf_counter() - started < 30

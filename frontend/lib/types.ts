@@ -155,7 +155,7 @@ export interface PreviewStageOverride {
 export interface PreviewEdits {
   type_overrides: PreviewTypeOverride[];
   added_rows: PreviewAddedRow[];
-  stage_overrides: PreviewStageOverride[];
+  stage_overrides?: PreviewStageOverride[];
 }
 
 export interface PreviewGroup {

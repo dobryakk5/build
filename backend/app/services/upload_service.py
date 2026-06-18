@@ -835,11 +835,8 @@ async def preview_upload_job(
         raise HTTPException(422, "Не удалось распознать строки сметы в выбранном формате.")
 
     rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
-    await run_in_threadpool(_enrich_work_subtypes_sync, rows)
-    await run_in_threadpool(_enrich_work_stages_sync, rows, hierarchy_selection)
     preview = _compute_preview(rows, subtotal_rows, meta)
     grouped = _build_preview_groups(rows)
-    stage_groups = _build_stage_preview_groups(rows)
     flat_rows = [_row_preview_dict(r, index=i) for i, r in enumerate(rows[:MAX_PREVIEW_GROUP_ROWS])]
     suggestions = None
     if not hierarchy_selection and hierarchy_suggestions:
@@ -884,7 +881,6 @@ async def preview_upload_job(
         "hierarchy_selection": hierarchy_selection,
         "hierarchy_suggestions": suggestions,
         "groups":         grouped["groups"],
-        "stage_groups":   stage_groups,
         "rows":           flat_rows,
         "truncated":      grouped["truncated"],
         "no_section_count": grouped["no_section_count"],
