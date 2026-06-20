@@ -158,6 +158,60 @@ def test_shared_primary_work_type_without_explicit_signal_requires_review() -> N
     )
 
 
+def test_generic_rebar_word_does_not_select_stair_stage_for_plastering() -> None:
+    taxonomy, stage_module = _load_services()
+    estimate_type = "commercial_construction"
+    project_variant = "commercial_construction_ofisnoe_pomeschenie"
+    text = "Армирование штукатурного слоя стеклотканевой сеткой"
+    row_text = f"6. Потолки {text}"
+    stages = taxonomy.get_project_variant_stages(estimate_type, project_variant)
+    classifier = stage_module.StageClassifier(taxonomy.get_sequential_scoring_policy())
+    global_result = taxonomy.classify_work_cascade(
+        text,
+        "6. Потолки",
+        row_role="work",
+        variant_scope=taxonomy.get_variant_scope(estimate_type, project_variant),
+        estimate_type_scope=taxonomy.get_estimate_type_scope(estimate_type),
+    )
+
+    match = classifier.classify_row_to_stage(
+        row_text,
+        "work",
+        stages,
+        global_result=global_result,
+    )
+
+    assert global_result.subtype_code == "interior_finishing/plastering"
+    assert match.stage is not None
+    assert match.stage["number"] == "3.1.9"
+
+
+def test_roller_blinds_do_not_select_roll_roofing_stage() -> None:
+    taxonomy, stage_module = _load_services()
+    estimate_type = "commercial_construction"
+    project_variant = "commercial_construction_ofisnoe_pomeschenie"
+    text = "Монтаж жалюзи, рулонных штор и светофильтров"
+    stages = taxonomy.get_project_variant_stages(estimate_type, project_variant)
+    classifier = stage_module.StageClassifier(taxonomy.get_sequential_scoring_policy())
+    global_result = taxonomy.classify_work_cascade(
+        text,
+        row_role="work",
+        variant_scope=taxonomy.get_variant_scope(estimate_type, project_variant),
+        estimate_type_scope=taxonomy.get_estimate_type_scope(estimate_type),
+    )
+
+    match = classifier.classify_row_to_stage(
+        text,
+        "work",
+        stages,
+        global_result=global_result,
+    )
+
+    assert global_result.subtype_code == "windows_doors/window_coverings_blinds_curtains"
+    assert match.stage is not None
+    assert match.stage["number"] == "3.1.9"
+
+
 @pytest.mark.parametrize(
     ("text", "expected_stage"),
     [

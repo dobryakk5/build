@@ -69,6 +69,35 @@ _DEMOLITION_ACTION_TOKENS = {
     "демонтируется", "разборка", "разобрать", "снятие", "снять",
     "удаление", "удалить",
 }
+_GENERIC_STAGE_OPTION_TERMS = {
+    "армирование",
+    "демонтаж",
+    "изготовление",
+    "монтаж",
+    "окраска",
+    "опалубка",
+    "подготовка",
+    "разборка",
+    "снятие",
+    "установка",
+    "усиление",
+    "устройство",
+    "шпаклевка",
+    "шпатлевка",
+}
+_FINISHING_STAGE_GENERIC_SUBTYPES = {"surface_preparation"}
+_FINISHING_STAGE_COMPATIBLE_SUBTYPES = {
+    "commercial_wall_floor_finishes",
+    "floor_coverings",
+    "painting",
+    "plastering",
+    "putty_primer",
+    "surface_preparation",
+    "tile_laying",
+    "wallpaper",
+}
+_WINDOW_COVERING_STAGE_COMPATIBLE_SUBTYPES = {"window_coverings_blinds_curtains"}
+_ROOFING_ROLL_MATERIAL_TERMS = {"рулонная"}
 
 _PREPARATION_ACTION_RE = re.compile(
     r"\b(?:подметан\w*|обеспылив\w*|грунтов\w*|подготов\w*|"
@@ -1382,6 +1411,8 @@ class StageClassifier:
         title = normalize_text(stage.get("title"))
         title_terms = _important_terms(stage.get("title"))
         title_matches = _match_terms(title_terms, text, text.split())
+        if title_matches and _spurious_roofing_roll_title_match(title, title_matches, text):
+            title_matches = []
         if title and title in text:
             matched["stage_title_exact"] = [title]
             component_scores["title_match"] = 8
@@ -1682,12 +1713,22 @@ class StageClassifier:
                 continue
             terms = _important_terms(option.get("title"))
             matches = _match_terms(terms, text, tokens)
+            title = normalize_text(option.get("title"))
+            exact_title_match = bool(title and title in text)
+            work_type_matches = self._work_type_matches(option, global_section, global_subtype)
+            if (
+                matches
+                and not exact_title_match
+                and not work_type_matches
+                and _generic_only_stage_option_match(matches)
+            ):
+                continue
             score = 0
-            if normalize_text(option.get("title")) and normalize_text(option.get("title")) in text:
+            if exact_title_match:
                 score += 8
             elif matches:
                 score += len(matches) * 5
-            if self._work_type_matches(option, global_section, global_subtype):
+            if work_type_matches:
                 # Exact scoped subtype is decisive when the option title also
                 # matches the row. Without title/object evidence it is only a
                 # supporting signal, because generic subtypes such as electrical
@@ -1736,9 +1777,22 @@ class StageClassifier:
     def _work_type_matches(self, ref: dict[str, Any], section_id: str | None, subtype_id: str | None) -> bool:
         if not ref or not section_id:
             return False
-        if ref.get("section_id") != section_id:
-            return False
-        return not ref.get("subtype_id") or ref.get("subtype_id") == subtype_id
+        ref_section = ref.get("section_id")
+        ref_subtype = ref.get("subtype_id")
+        if ref_section != section_id:
+            return (
+                ref_section == "interior_finishing"
+                and ref_subtype in _FINISHING_STAGE_GENERIC_SUBTYPES
+                and section_id == "windows_doors"
+                and subtype_id in _WINDOW_COVERING_STAGE_COMPATIBLE_SUBTYPES
+            )
+        if not ref_subtype or ref_subtype == subtype_id:
+            return True
+        return (
+            section_id == "interior_finishing"
+            and ref_subtype in _FINISHING_STAGE_GENERIC_SUBTYPES
+            and subtype_id in _FINISHING_STAGE_COMPATIBLE_SUBTYPES
+        )
 
 
 def _important_terms(value: Any) -> list[str]:
@@ -1768,6 +1822,21 @@ def _important_terms(value: Any) -> list[str]:
 
 def _has_explicit_phrase(terms: list[str]) -> bool:
     return any(len(normalize_text(term).split()) > 1 for term in terms)
+
+
+def _generic_only_stage_option_match(terms: list[str]) -> bool:
+    normalized = {normalize_text(term) for term in terms if normalize_text(term)}
+    return bool(normalized) and normalized.issubset(_GENERIC_STAGE_OPTION_TERMS)
+
+
+def _spurious_roofing_roll_title_match(stage_title: str, terms: list[str], text: str) -> bool:
+    normalized = {normalize_text(term) for term in terms if normalize_text(term)}
+    return (
+        bool(normalized)
+        and normalized.issubset(_ROOFING_ROLL_MATERIAL_TERMS)
+        and "кров" in stage_title
+        and "кров" not in text
+    )
 
 
 def _work_type_code(ref: dict[str, Any]) -> str:
