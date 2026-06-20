@@ -65,7 +65,7 @@ CAUTIOUS_STAGE_ROLES = {
 }
 
 _DEMOLITION_ACTION_TOKENS = {
-    "демонтаж", "демонтажные", "демонтировать", "демонтируем",
+    "демонтаж", "демотаж", "демонтажные", "демонтировать", "демонтируем",
     "демонтируется", "разборка", "разобрать", "снятие", "снять",
     "удаление", "удалить",
 }
@@ -106,7 +106,7 @@ _PREPARATION_ACTION_RE = re.compile(
 )
 _ELECTRICAL_ACTION_RE = re.compile(
     r"\b(?:подключ\w*|монтаж\w*|установ\w*|проклад\w*|затяж\w*|"
-    r"устройств\w*)\b",
+    r"прозвон\w*|устройств\w*)\b",
     re.IGNORECASE,
 )
 _CONSTRUCTIVE_OPENING_ACTION_RE = re.compile(
@@ -127,7 +127,12 @@ def _has_any(text: str, terms: tuple[str, ...]) -> bool:
 
 
 def _row_object_intents(text: str) -> set[str]:
-    """Return high-confidence physical object/action intents for hard gates."""
+    """Return high-confidence physical object/action intents for hard gates.
+
+    Intents are deliberately physical/action based. They are used only when
+    the row itself contains enough evidence; generic subtype compatibility is
+    not treated as an object intent.
+    """
     normalized = normalize_text(text)
     intents: set[str] = set()
 
@@ -135,35 +140,99 @@ def _row_object_intents(text: str) -> set[str]:
     if demolition:
         intents.add("demolition")
 
-    has_floor = _has_any(normalized, (
-        "пол", "пола", "полу", "напольн", "стяжк", "линоле", "ламинат",
-        "паркет", "фанер", "плинтус", "порож", "шумоизоляц пола",
-        "звукоизоляц пола", "зипс на пол",
-    ))
+    has_floor = bool(re.search(r"\bпол(?:а|у|ом|е|ы)?\b", normalized)) or _has_any(normalized, (
+        "напольн", "стяжк", "линоле", "ламинат", "паркет", "инженерн дос",
+        "инжинерн дос", "массивн дос", "фанер", "плинтус", "порож",
+        "шумоизоляц пола", "звукоизоляц пола", "зипс на пол",
+    )) or bool(re.search(r"\b(?:osb|осп)\b", normalized))
     has_wall = _has_any(normalized, ("стен", "перегород"))
     has_ceiling = "потол" in normalized
-    has_opening = _has_any(normalized, ("двер", "окон", "проем", "проём", "люк"))
+    has_door = bool(_match_terms(
+        ["дверь", "наличник", "добор"], normalized, normalized.split()
+    ))
+    has_window = bool(_match_terms(
+        ["окно", "оконный блок", "остекление", "стеклопакет", "подоконник", "оконный откос", "оконный отлив"],
+        normalized,
+        normalized.split(),
+    ))
+    has_hatch = bool(_match_terms(
+        ["люк-невидимка", "люк-неведимка", "ревизионный люк", "технический люк"],
+        normalized,
+        normalized.split(),
+    ))
+    has_opening = has_door or has_window or has_hatch or _has_any(normalized, ("проем", "проём"))
 
     if has_floor:
         intents.add("floor")
         if _has_any(normalized, ("наливн", "самовыравнив", "стяжк", "основани пола")):
             intents.add("floor_base")
         if _has_any(normalized, (
-            "линоле", "ламинат", "ковролин", "паркет", "напольн покрыт",
-            "плинтус", "порож", "фанер",
-        )):
+            "линоле", "ламинат", "ковролин", "паркет", "инженерн дос", "инжинерн дос",
+            "массивн дос", "напольн покрыт", "плинтус", "порож", "фанер", "резинов плит",
+            "напольн плит",
+        )) or bool(re.search(r"\b(?:osb|осп)\b", normalized)):
             intents.add("floor_finish")
         if _PREPARATION_ACTION_RE.search(normalized):
             intents.add("floor_base")
 
     if has_wall:
         intents.add("wall")
+        if not demolition and _has_any(normalized, (
+            "теплоизоляц", "пароизоляц", "утеплен", "минеральн ват",
+        )):
+            intents.add("wall_insulation")
+        if not demolition and _has_any(normalized, (
+            "штукатур", "шпаклев", "шпатлев", "грунтов", "выравнив", "подготовк стен",
+        )):
+            intents.add("wall_preparation")
+        if not demolition and _has_any(normalized, (
+            "окраск", "покраск", "обои", "настенн плит", "облицовк стен", "керамическ плит", "панел", "декоративн отделк",
+        )):
+            intents.add("wall_finishing")
     if has_ceiling:
         intents.add("ceiling")
+        if not demolition and _has_any(normalized, (
+            "армстронг", "грильято", "реечн", "натяжн", "подвесн", "гкл", "вгкл",
+            "каркас потол", "обшивк потол",
+        )) and _has_any(normalized, ("монтаж", "устройств", "обшивк", "установ")):
+            intents.add("ceiling_system")
+        if not demolition and _has_any(normalized, (
+            "штукатур", "шпаклев", "шпатлев", "грунтов", "выравнив", "окраск", "покраск",
+        )):
+            intents.add("ceiling_preparation")
     if has_opening:
         intents.add("opening")
         if _CONSTRUCTIVE_OPENING_ACTION_RE.search(normalized) and not demolition:
             intents.add("constructive_opening")
+    if has_door and not demolition and _has_any(normalized, ("монтаж", "установ", "добор", "наличник")):
+        intents.add("door_installation")
+    if has_window and not demolition:
+        intents.add("window_installation")
+    if has_hatch and not demolition:
+        intents.add("technical_hatch")
+
+    tile_match = bool(re.search(r"\b(?:плитк|плиточн)\w*", normalized))
+    if not demolition and tile_match:
+        intents.add("tile_work")
+        if has_wall:
+            intents.add("wall_finishing")
+        if has_floor or "напольн" in normalized:
+            intents.add("floor_finish")
+
+    if not demolition and _match_terms(["швы ГКЛ"], normalized, normalized.split()) and _has_any(
+        normalized, ("заделк", "шпаклев", "армирован", "грунтов", "шлифов")
+    ):
+        intents.add("gkl_surface_finish")
+
+    if not demolition and "перегород" in normalized and _has_any(normalized, (
+        "возведен", "кладк", "устройств", "монтаж", "обшивк", "каркас",
+    )):
+        intents.add("new_partition")
+    if not demolition and _has_any(normalized, (
+        "короб из гкл", "короба из гкл", "гкл короб", "вгкл короб",
+    )):
+        intents.add("gkl_box")
+        intents.add("ceiling_system")
 
     if _has_any(normalized, ("шумоизоляц", "звукоизоляц", "зипс")):
         intents.add("sound_insulation")
@@ -176,33 +245,56 @@ def _row_object_intents(text: str) -> set[str]:
         elif has_wall:
             intents.add("sound_wall")
 
+    low_voltage_terms = (
+        "интернет", "кабеля интернет", "кабеля tv", "tv", "телевид", "скс", "слаботоч", "витая пара", "utp", "ftp",
+        "видеонаблюден", "камера", "пожарн сигнал", "оповещен", "скуд", "контрол доступ",
+        "домофон", "звонков связ", "охранн сигнал",
+    )
+    if _has_any(normalized, low_voltage_terms):
+        intents.add("low_voltage")
+
     electrical_objects = (
         "светильник", "люстр", "трек", "шинопровод", "led", "выключател",
         "розет", "подрозет", "кабел", "провод", "гофр", "щит", "автомат",
-        "узо", "электроточ",
+        "узо", "электроточ", "лотк", "контактор", "электрощит",
+        "распределительн панел", "регулятор теплого пола",
     )
-    if _has_any(normalized, electrical_objects) and _ELECTRICAL_ACTION_RE.search(normalized):
+    if _match_terms(list(electrical_objects), normalized, normalized.split()) and _ELECTRICAL_ACTION_RE.search(normalized):
         intents.add("electrical_installation")
-    if _has_any(normalized, ("светильник", "люстр", "трек", "шинопровод", "led", "бра", "прожектор")):
+    if _has_any(normalized, ("светильник", "люстр", "трек", "шинопровод", "led", "бра", "прожектор", "софит")):
         intents.add("lighting_equipment")
-    if _has_any(normalized, ("кабел", "провод", "гофр", "труб", "лоток")):
+    if _has_any(normalized, ("кабел", "провод", "гофр", "кабельн канал", "лоток", "лотк")) or (
+        "труб" in normalized and _has_any(normalized, ("электр", "кабел", "провод", "гофр"))
+    ):
         intents.add("electrical_distribution")
 
-    if _has_any(normalized, ("электрическ тепл пол", "электрическ тёпл пол", "нагревательн мат")):
+    if _match_terms([
+        "электрический теплый пол", "электрический тёплый пол", "нагревательный мат",
+        "регулятор теплого пола", "терморегулятор теплого пола",
+    ], normalized, normalized.split()):
         intents.add("electric_heated_floor")
 
     appliance_objects = (
         "стиральн машин", "посудомоечн", "электроплит", "электрическ плит",
-        "водонагревател", "бойлер", "кухонн вытяж", "оборудован",
+        "водонагревател", "бойлер", "кухонн вытяж", "оборудован", "инвентар",
     )
-    if _has_any(normalized, appliance_objects):
+    if _match_terms(list(appliance_objects), normalized, normalized.split()):
         intents.add("equipment")
 
     plumbing_objects = (
         "водопровод", "труб ppr", "трубы ppr", "хвс", "гвс", "канализац",
-        "смесител", "раковин", "душев", "унитаз", "трап", "гидролок",
+        "смесител", "раковин", "душев", "унитаз", "трап", "гидролок", "ванн",
+        "полотенцесушител", "санитарн прибор", "биде", "умывальник",
+        "гребенка", "гребёнка", "узел воды", "расчеканка труб",
     )
-    if _has_any(normalized, plumbing_objects) or ("кран" in normalized and "шаров" in normalized):
+    plumbing_match = bool(_match_terms(list(plumbing_objects), normalized, normalized.split()))
+    generic_pipe_match = bool(_match_terms(["труба"], normalized, normalized.split())) and not _has_any(
+        normalized, ("кабель", "провод", "электр", "гофр")
+    )
+    if plumbing_match or generic_pipe_match or (
+        _match_terms(["кран"], normalized, normalized.split())
+        and _match_terms(["шаровой"], normalized, normalized.split())
+    ):
         intents.add("plumbing_installation")
     if "гидролок" in normalized:
         if _has_any(normalized, ("подключ", "расключ")):
@@ -211,6 +303,11 @@ def _row_object_intents(text: str) -> set[str]:
             intents.add("hydrolock_water")
     if "трап" in normalized or "канализац" in normalized:
         intents.add("floor_drainage")
+
+    if _has_any(normalized, ("воздуховод", "вентиляц", "вентилятор", "кондиционер", "сплит систем")):
+        intents.add("hvac_installation")
+    if _has_any(normalized, ("радиатор", "конвектор", "стояк отоплен", "терморегулятор", "отоплен", "полотенцесушител")):
+        intents.add("heating_installation")
 
     if _has_any(normalized, (
         "жалюзи", "рулонн штор", "римск штор", "светофильтр",
@@ -227,23 +324,31 @@ def _row_object_intents(text: str) -> set[str]:
         intents.add("window_slopes")
 
     if _has_any(normalized, (
-        "разгрузк материал", "доставк материал", "погрузк материал",
-        "вынос мусор", "вывоз мусор", "контейнер для мусор", "контейнер для вывоз",
+        "разгрузк материал", "разгрузк и погрузк", "разгрузк инструмент", "доставк материал",
+        "погрузк материал", "вынос мусор", "вывоз мусор", "контейнер для мусор",
+        "контейнер для вывоз", "финальн уборк", "финишн уборк", "дезинфекц",
     )):
         intents.add("logistics_cleanup")
     if _has_any(normalized, (
         "укрытие пленк", "укрытие плёнк", "защита существующ отделк",
-        "укрытие мебел", "защита мебел",
+        "укрытие мебел", "защита мебел", "перекрытие доступа",
     )):
         intents.add("site_protection")
 
     if _has_any(normalized, (
         "штроблен", "устройство штроб", "штроба в", "бурение сквозн отверст",
-        "отверстие для электроточ", "устройство ниш", "ниша в бетон",
+        "отверстие для электроточ", "отверсти для электроточ", "устройство ниш", "ниша в бетон",
         "ниша в кирпич", "ниша в газоблок",
     )) and not _has_any(normalized, ("без штроб", "готовой штроб", "готовую штроб")):
         intents.add("chasing_drilling")
 
+    if _has_any(normalized, ("защитн угол", "поручн", "антивандальн", "отбойн дос", "защитн экран")):
+        intents.add("protective_elements")
+    if _has_any(normalized, ("пусконалад", "пнр", "испытан", "наладк систем")):
+        intents.add("commissioning")
+
+    # Generic ceiling intent is kept for branch 6.2 compatibility. More
+    # specific ceiling_system/ceiling_preparation intents take precedence in 6.4.
     if has_ceiling and not ({"lighting_equipment", "blinds_curtains", "demolition"} & intents):
         intents.add("ceiling_finishing")
     return intents
@@ -255,10 +360,61 @@ def _stage_object_intents(stage: dict[str, Any]) -> set[str]:
     intents: set[str] = set()
     if "демонтаж" in title:
         intents.add("demolition")
+
+    # Commercial renovation 6.2.
     if number == "6.2.2":
         intents.add("structural_demolition")
     if number == "6.2.3":
         intents.add("engineering_demolition")
+    if number in {"6.2.6", "6.2.13"}:
+        intents.add("floor_finish" if number == "6.2.13" else "floor_base")
+    if number in {"6.2.4", "6.2.5", "6.2.14"}:
+        intents.add("wall")
+    if number == "6.2.7":
+        intents.add("ceiling")
+    if number == "6.2.8":
+        intents.add("electrical_installation")
+    if number == "6.2.16":
+        intents.add("lighting_equipment")
+    if number == "6.2.12":
+        intents.add("plumbing_installation")
+    if number == "6.2.17":
+        intents.add("blinds_curtains")
+    if number == "6.2.19":
+        intents.add("logistics_cleanup")
+    if number == "6.2.1":
+        intents.add("site_protection")
+    if number == "6.2.21":
+        intents.add("chasing_drilling")
+
+    # Public/social commercial renovation 6.4.
+    stage_64_intents = {
+        "6.4.1": {"site_protection"},
+        "6.4.2": {"structural_demolition"},
+        "6.4.3": {"wall_demolition"},
+        "6.4.4": {"engineering_demolition"},
+        "6.4.6": {"new_partition"},
+        "6.4.7": {"wall_preparation", "ceiling_preparation"},
+        "6.4.8": {"floor_base"},
+        "6.4.10": {"ceiling_system", "ceiling", "gkl_box"},
+        "6.4.11": {"electrical_installation", "chasing_drilling"},
+        "6.4.12": {"lighting_equipment"},
+        "6.4.13": {"low_voltage"},
+        "6.4.14": {"hvac_installation"},
+        "6.4.15": {"heating_installation"},
+        "6.4.16": {"plumbing_installation"},
+        "6.4.17": {"floor_finish"},
+        "6.4.18": {"wall_finishing", "wall_insulation", "gkl_surface_finish"},
+        "6.4.19": {"protective_elements"},
+        "6.4.20": {"door_installation", "technical_hatch"},
+        "6.4.21": {"window_installation", "window_slopes", "blinds_curtains"},
+        "6.4.23": {"equipment"},
+        "6.4.24": {"commissioning"},
+        "6.4.25": {"logistics_cleanup"},
+    }
+    intents.update(stage_64_intents.get(number, set()))
+
+    # Title-based fallback for other variants.
     if _has_any(title, ("стяж", "основани")) and _has_any(title, ("пол", "пола")):
         intents.add("floor_base")
     if _has_any(title, ("напольн покрыт", "плинтус", "порожк")):
@@ -271,20 +427,12 @@ def _stage_object_intents(stage: dict[str, Any]) -> set[str]:
         intents.add("opening")
     if "электромонтаж" in title:
         intents.add("electrical_installation")
-    if "осветительн оборудован" in title:
+    if "осветительн оборудован" in title or "монтаж освещен" in title:
         intents.add("lighting_equipment")
     if _has_any(title, ("мебел", "бытов", "технологическ оборудован")):
         intents.add("equipment")
     if _has_any(title, ("сантехническ", "водоснабжен", "канализац")):
         intents.add("plumbing_installation")
-    if number == "6.2.17":
-        intents.add("blinds_curtains")
-    if number == "6.2.19":
-        intents.add("logistics_cleanup")
-    if number == "6.2.1":
-        intents.add("site_protection")
-    if number == "6.2.21":
-        intents.add("chasing_drilling")
     return intents
 
 
@@ -302,10 +450,18 @@ def _object_priority_adjustment(stage: dict[str, Any], text: str) -> tuple[int, 
         reasons.append(reason)
 
     for intent, boost in (
-        ("floor_base", 14), ("floor_finish", 12), ("wall", 8), ("ceiling", 10),
-        ("opening", 12), ("electrical_installation", 16), ("lighting_equipment", 14),
-        ("equipment", 12), ("plumbing_installation", 14), ("blinds_curtains", 18),
-        ("logistics_cleanup", 18), ("site_protection", 18), ("chasing_drilling", 20),
+        ("floor_base", 14), ("floor_finish", 14), ("wall", 8),
+        ("wall_preparation", 14), ("wall_finishing", 14), ("wall_insulation", 16),
+        ("tile_work", 14), ("gkl_surface_finish", 16),
+        ("ceiling", 10), ("ceiling_system", 18), ("ceiling_preparation", 16), ("gkl_box", 20),
+        ("opening", 12), ("door_installation", 18), ("window_installation", 18),
+        ("window_slopes", 18), ("technical_hatch", 18), ("new_partition", 18),
+        ("electrical_installation", 16), ("lighting_equipment", 18),
+        ("low_voltage", 20), ("equipment", 12), ("plumbing_installation", 16),
+        ("hvac_installation", 16), ("heating_installation", 16),
+        ("blinds_curtains", 18), ("logistics_cleanup", 20),
+        ("site_protection", 18), ("chasing_drilling", 20),
+        ("protective_elements", 16), ("commissioning", 18),
     ):
         if intent in row_intents and intent in stage_intents:
             add(boost, f"{intent}_object_match")
@@ -318,29 +474,13 @@ def _stage_object_gate(
     global_section: str | None,
     global_subtype: str | None,
 ) -> tuple[bool, list[str]]:
-    """Hard-exclude a stage whose physical object contradicts the row."""
+    """Hard-exclude a stage whose physical object/action contradicts the row."""
     intents = _row_object_intents(text)
     number = str(stage.get("number") or "")
     reasons: list[str] = []
 
-    # The gates below describe the commercial-renovation branch 6.2. Other
-    # variants keep their existing scoring and are covered by their own rules.
-    if not number.startswith("6.2."):
-        return True, reasons
-
     def reject(reason: str) -> tuple[bool, list[str]]:
         return False, [reason]
-
-    # Explicit logistics/protection intent wins over quoted descriptions of
-    # the source work (for example «вынос мусора после демонтажа стен»).
-    if "logistics_cleanup" in intents:
-        if number != "6.2.19":
-            return reject("logistics_cleanup_requires_stage_6_2_19")
-        return True, reasons
-    if "site_protection" in intents:
-        if number != "6.2.1":
-            return reject("site_protection_requires_stage_6_2_1")
-        return True, reasons
 
     demolition_subtype = str(global_subtype or "")
     structural_demolition = demolition_subtype in {
@@ -350,63 +490,201 @@ def _stage_object_gate(
     engineering_demolition = demolition_subtype in {
         "plumbing_demolition", "electrical_demolition", "hvac_demolition",
     }
-    if "demolition" in intents:
-        if number not in {"6.2.2", "6.2.3"}:
-            return reject("demolition_action_excludes_new_work_stage")
-        if number == "6.2.2" and engineering_demolition:
-            return reject("engineering_demolition_excludes_structural_demolition_stage")
-        if number == "6.2.3" and structural_demolition:
-            return reject("structural_demolition_excludes_engineering_demolition_stage")
-    elif number in {"6.2.2", "6.2.3"}:
-        return reject("non_demolition_row_excludes_demolition_stage")
 
-    if "chasing_drilling" in intents and number != "6.2.21":
-        return reject("chasing_drilling_requires_stage_6_2_21")
-    if "lighting_equipment" in intents:
-        target = "6.2.8" if "electrical_distribution" in intents else "6.2.16"
-        if number != target:
-            return reject(f"lighting_equipment_requires_stage_{target.replace('.', '_')}")
-    if "hydrolock_electrical" in intents and number != "6.2.8":
-        return reject("hydrolock_electrical_requires_stage_6_2_8")
-    if "hydrolock_water" in intents and number != "6.2.12":
-        return reject("hydrolock_water_requires_stage_6_2_12")
-    if "window_slopes" in intents and number != "6.2.15":
-        return reject("window_slopes_require_stage_6_2_15")
-    if "blinds_curtains" in intents:
-        allowed = {"6.2.17"}
-        if "blinds_electrical" in intents:
-            allowed.add("6.2.8")
-        if number not in allowed:
-            return reject("blinds_curtains_stage_conflict")
-    if "sound_floor" in intents and number != "6.2.6":
-        return reject("floor_sound_insulation_requires_stage_6_2_6")
-    if "sound_ceiling" in intents and number != "6.2.7":
-        return reject("ceiling_sound_insulation_requires_stage_6_2_7")
-    if "sound_wall" in intents and number != "6.2.5":
-        return reject("wall_sound_insulation_requires_stage_6_2_5")
-    if "sound_new_partition" in intents and number != "6.2.4":
-        return reject("partition_sound_insulation_requires_stage_6_2_4")
+    if number.startswith("6.2."):
+        # Explicit logistics/protection intent wins over quoted descriptions of
+        # the source work (for example «вынос мусора после демонтажа стен»).
+        if "logistics_cleanup" in intents:
+            if number != "6.2.19":
+                return reject("logistics_cleanup_requires_stage_6_2_19")
+            return True, reasons
+        if "site_protection" in intents:
+            if number != "6.2.1":
+                return reject("site_protection_requires_stage_6_2_1")
+            return True, reasons
 
-    if "ceiling_finishing" in intents and "demolition" not in intents and number != "6.2.7":
-        return reject("ceiling_finishing_requires_stage_6_2_7")
+        if "demolition" in intents:
+            if number not in {"6.2.2", "6.2.3"}:
+                return reject("demolition_action_excludes_new_work_stage")
+            if number == "6.2.2" and engineering_demolition:
+                return reject("engineering_demolition_excludes_structural_demolition_stage")
+            if number == "6.2.3" and structural_demolition:
+                return reject("structural_demolition_excludes_engineering_demolition_stage")
+        elif number in {"6.2.2", "6.2.3"}:
+            return reject("non_demolition_row_excludes_demolition_stage")
 
-    if "floor" in intents:
-        if number in {"6.2.15", "6.2.10", "6.2.17"}:
-            return reject("floor_object_excludes_unrelated_stage")
-        if number in {"6.2.8", "6.2.16"} and "electric_heated_floor" not in intents:
-            return reject("floor_object_excludes_electrical_stage")
-        if number == "6.2.12" and "floor_drainage" not in intents:
-            return reject("floor_object_excludes_plumbing_stage")
+        if "chasing_drilling" in intents and number != "6.2.21":
+            return reject("chasing_drilling_requires_stage_6_2_21")
+        if "lighting_equipment" in intents:
+            target = "6.2.8" if "electrical_distribution" in intents else "6.2.16"
+            if number != target:
+                return reject(f"lighting_equipment_requires_stage_{target.replace('.', '_')}")
+        if "hydrolock_electrical" in intents and number != "6.2.8":
+            return reject("hydrolock_electrical_requires_stage_6_2_8")
+        if "hydrolock_water" in intents and number != "6.2.12":
+            return reject("hydrolock_water_requires_stage_6_2_12")
+        if "window_slopes" in intents and number != "6.2.15":
+            return reject("window_slopes_require_stage_6_2_15")
+        if "blinds_curtains" in intents:
+            allowed = {"6.2.17"}
+            if "blinds_electrical" in intents:
+                allowed.add("6.2.8")
+            if number not in allowed:
+                return reject("blinds_curtains_stage_conflict")
+        if "sound_floor" in intents and number != "6.2.6":
+            return reject("floor_sound_insulation_requires_stage_6_2_6")
+        if "sound_ceiling" in intents and number != "6.2.7":
+            return reject("ceiling_sound_insulation_requires_stage_6_2_7")
+        if "sound_wall" in intents and number != "6.2.5":
+            return reject("wall_sound_insulation_requires_stage_6_2_5")
+        if "sound_new_partition" in intents and number != "6.2.4":
+            return reject("partition_sound_insulation_requires_stage_6_2_4")
+        if "ceiling_finishing" in intents and "demolition" not in intents and number != "6.2.7":
+            return reject("ceiling_finishing_requires_stage_6_2_7")
 
-    # Exact subtype-to-stage conflicts are excluded even if raw scoring is high.
-    if global_section == "windows_doors" and global_subtype == "window_slopes_sills" and number != "6.2.15":
-        return reject("window_slopes_subtype_stage_conflict")
-    if global_section == "mobilization" and global_subtype == "logistics_cleanup" and number != "6.2.19":
-        return reject("logistics_subtype_stage_conflict")
-    if global_section == "mobilization" and global_subtype == "site_setup" and "site_protection" in intents and number != "6.2.1":
-        return reject("site_setup_protection_stage_conflict")
-    if global_section == "reconstruction_works" and global_subtype == "chasing_drilling_niches" and number != "6.2.21":
-        return reject("chasing_subtype_stage_conflict")
+        if "floor" in intents:
+            if number in {"6.2.15", "6.2.10", "6.2.17"}:
+                return reject("floor_object_excludes_unrelated_stage")
+            if number in {"6.2.8", "6.2.16"} and "electric_heated_floor" not in intents:
+                return reject("floor_object_excludes_electrical_stage")
+            if number == "6.2.12" and "floor_drainage" not in intents:
+                return reject("floor_object_excludes_plumbing_stage")
+
+        if global_section == "windows_doors" and global_subtype == "window_slopes_sills" and number != "6.2.15":
+            return reject("window_slopes_subtype_stage_conflict")
+        if global_section == "mobilization" and global_subtype == "logistics_cleanup" and number != "6.2.19":
+            return reject("logistics_subtype_stage_conflict")
+        if global_section == "mobilization" and global_subtype == "site_setup" and "site_protection" in intents and number != "6.2.1":
+            return reject("site_setup_protection_stage_conflict")
+        if global_section == "reconstruction_works" and global_subtype == "chasing_drilling_niches" and number != "6.2.21":
+            return reject("chasing_subtype_stage_conflict")
+        return True, reasons
+
+    if number.startswith("6.4."):
+        # Logistics and protection override object words quoted in the row.
+        if "logistics_cleanup" in intents:
+            return (True, reasons) if number == "6.4.25" else reject("logistics_cleanup_requires_stage_6_4_25")
+        if "site_protection" in intents:
+            return (True, reasons) if number == "6.4.1" else reject("site_protection_requires_stage_6_4_1")
+
+        demolition_types = {
+            "ceiling_demolition", "wall_demolition", "floor_demolition",
+            "general_structural_demolition", "openings_diamond_cutting",
+            "plumbing_demolition", "electrical_demolition", "hvac_demolition",
+        }
+        if "demolition" in intents or demolition_subtype in demolition_types:
+            old_wall_covering = _has_any(text, (
+                "старых обоев", "старые обои", "краск со стен", "краски со стен",
+                "побелк со стен", "настенн плит", "штукатурк со стен",
+            ))
+            if engineering_demolition:
+                target = "6.4.4"
+            elif demolition_subtype in {"wall_demolition", "openings_diamond_cutting"} and not old_wall_covering:
+                target = "6.4.3"
+            else:
+                target = "6.4.2"
+            return (True, reasons) if number == target else reject(
+                f"demolition_object_requires_stage_{target.replace('.', '_')}"
+            )
+        if number in {"6.4.2", "6.4.3", "6.4.4"}:
+            return reject("non_demolition_row_excludes_demolition_stage_6_4")
+
+        if (
+            "tile_work" in intents
+            and not ({"floor_finish", "wall_finishing"} & intents)
+            and not ({"technical_hatch", "door_installation", "window_installation", "window_slopes"} & intents)
+        ):
+            if number not in {"6.4.17", "6.4.18"}:
+                return reject("generic_tile_work_requires_floor_or_wall_finish_stage")
+
+        # Explicit action/object routes. Ordering is intentional: a light or
+        # low-voltage row is also electrical, and a window slope is also a wall.
+        target_by_intent: tuple[tuple[str, str], ...] = (
+            ("low_voltage", "6.4.13"),
+            ("lighting_equipment", "6.4.12"),
+            ("hydrolock_electrical", "6.4.11"),
+            ("hydrolock_water", "6.4.16"),
+            ("window_slopes", "6.4.21"),
+            ("window_installation", "6.4.21"),
+            ("blinds_curtains", "6.4.21"),
+            ("door_installation", "6.4.20"),
+            ("technical_hatch", "6.4.20"),
+            ("new_partition", "6.4.6"),
+            ("gkl_box", "6.4.10"),
+            ("ceiling_system", "6.4.10"),
+            ("ceiling_preparation", "6.4.7"),
+            ("sound_floor", "6.4.8"),
+            ("sound_ceiling", "6.4.10"),
+            ("sound_new_partition", "6.4.6"),
+            ("sound_wall", "6.4.18"),
+            ("chasing_drilling", "6.4.11"),
+            ("hvac_installation", "6.4.14"),
+            ("heating_installation", "6.4.15"),
+            ("plumbing_installation", "6.4.16"),
+            ("floor_finish", "6.4.17"),
+            ("floor_base", "6.4.8"),
+            ("gkl_surface_finish", "6.4.18"),
+            ("wall_finishing", "6.4.18"),
+            ("wall_insulation", "6.4.18"),
+            ("wall_preparation", "6.4.7"),
+            ("protective_elements", "6.4.19"),
+            ("commissioning", "6.4.24"),
+            ("electrical_installation", "6.4.11"),
+            ("equipment", "6.4.23"),
+        )
+        for intent, target in target_by_intent:
+            if intent in intents:
+                return (True, reasons) if number == target else reject(
+                    f"{intent}_requires_stage_{target.replace('.', '_')}"
+                )
+
+        # Accepted subtype also constrains the stage when the row text itself
+        # is less explicit.
+        subtype_targets = {
+            ("reconstruction_works", "ceiling_demolition"): "6.4.2",
+            ("reconstruction_works", "floor_demolition"): "6.4.2",
+            ("reconstruction_works", "general_structural_demolition"): "6.4.2",
+            ("reconstruction_works", "wall_demolition"): "6.4.3",
+            ("reconstruction_works", "openings_diamond_cutting"): "6.4.3",
+            ("reconstruction_works", "plumbing_demolition"): "6.4.4",
+            ("reconstruction_works", "electrical_demolition"): "6.4.4",
+            ("reconstruction_works", "hvac_demolition"): "6.4.4",
+            ("reconstruction_works", "chasing_drilling_niches"): "6.4.11",
+            ("insulation", "sound_acoustic_insulation"): "6.4.18",
+            ("insulation", "internal_wall_insulation"): "6.4.18",
+            ("mobilization", "logistics_cleanup"): "6.4.25",
+            ("partitions", "drywall_partitions"): "6.4.6",
+            ("partitions", "brick_partitions"): "6.4.6",
+            ("partitions", "block_partitions"): "6.4.6",
+            ("interior_finishing", "suspended_ceilings"): "6.4.10",
+            ("interior_finishing", "gkl_ceilings"): "6.4.10",
+            ("interior_finishing", "stretch_ceilings"): "6.4.10",
+            ("interior_finishing", "floor_coverings"): "6.4.17",
+            ("interior_finishing", "sports_floor_finishes"): "6.4.17",
+            ("interior_finishing", "gkl_surface_finishing"): "6.4.18",
+            ("windows_doors", "window_slopes_sills"): "6.4.21",
+            ("windows_doors", "windows"): "6.4.21",
+            ("windows_doors", "interior_doors"): "6.4.20",
+            ("windows_doors", "exterior_doors"): "6.4.20",
+            ("windows_doors", "fire_doors"): "6.4.20",
+            ("windows_doors", "technical_doors_hatches"): "6.4.20",
+            ("mep_internal", "structured_cabling"): "6.4.13",
+            ("mep_internal", "cctv"): "6.4.13",
+            ("mep_internal", "fire_alarm_ops"): "6.4.13",
+            ("mep_internal", "access_control"): "6.4.13",
+            ("mep_internal", "tv_radio"): "6.4.13",
+            ("mep_internal", "sanitary_fixtures"): "6.4.16",
+            ("mep_internal", "water_supply"): "6.4.16",
+            ("mep_internal", "sewage"): "6.4.16",
+            ("mep_internal", "hvac"): "6.4.14",
+            ("mep_internal", "heating"): "6.4.15",
+            ("mep_internal", "commissioning"): "6.4.24",
+        }
+        target = subtype_targets.get((str(global_section or ""), str(global_subtype or "")))
+        if target and number != target:
+            return reject(f"accepted_subtype_requires_stage_{target.replace('.', '_')}")
+        return True, reasons
+
     return True, reasons
 
 
@@ -799,10 +1077,13 @@ class WorkTypeClassifier:
         if (
             matching_source == "related_work_type"
             and int(stage_match.score_breakdown.get("explicit_stage_evidence_score") or 0) > 0
+            and subtype_id in {"electrical"}
         ):
-            # A confident global type is supporting context only when the row
-            # explicitly identifies a more specific stage (for example PNR).
-            # Let stage-scoped candidates resolve the primary work type.
+            # Only a generic shared subtype may be refined by a more explicit
+            # stage (the main example is electrical -> commissioning/PNR).
+            # Specific accepted object subtypes such as hvac_demolition,
+            # window_slopes_sills or stretch_ceilings must stay locked even
+            # when they are listed as related_work_type for the target stage.
             return None
 
         if matching_ref is None:
@@ -1038,6 +1319,25 @@ class StageClassifier:
         if normalized_role in SERVICE_ROLES:
             return self._unmatched(f"row_role_{normalized_role}_skipped", normalized_role, needs_review=False)
 
+        # A grout-only tile row does not identify floor vs wall by itself.
+        # In catalogue estimates it immediately follows the corresponding tile
+        # installation, so preserve only a confident floor/wall finish context.
+        if (
+            normalized_role == "work"
+            and "tile_work" in row_intents
+            and not ({"floor_finish", "wall_finishing"} & row_intents)
+            and previous_context
+            and str(previous_context.get("work_stage_number") or "") in {"6.4.17", "6.4.18"}
+        ):
+            inherited = self._inherit_from_context(
+                allowed_stages,
+                normalized_role,
+                previous_context,
+                row_order=row_order,
+            )
+            if inherited is not None:
+                return inherited
+
         # Flat resource rows inherit before any taxonomy or stage scoring. This
         # is the critical fast path for PDF material/labour estimates.
         if normalized_role in EARLY_INHERIT_ROLES:
@@ -1156,11 +1456,20 @@ class StageClassifier:
 
         explicit_score = int(best.score_breakdown.get("explicit_stage_evidence_score") or 0)
         primary_unique = bool(best.score_breakdown.get("primary_work_type_unique_in_variant"))
-        hard_gate_explicit = bool(
+        confident_global_gate = bool(
             len(scored) == 1
             and hard_excluded_stages
-            and row_intents
-            & {
+            and global_result is not None
+            and not global_result.needs_review
+            and global_result.subtype_code != UNKNOWN_SUBTYPE_CODE
+        )
+        hard_gate_explicit = bool(
+            confident_global_gate
+            or (
+                len(scored) == 1
+                and hard_excluded_stages
+                and row_intents
+                & {
                 "logistics_cleanup",
                 "site_protection",
                 "chasing_drilling",
@@ -1172,7 +1481,31 @@ class StageClassifier:
                 "sound_ceiling",
                 "sound_wall",
                 "sound_new_partition",
-            }
+                "lighting_equipment",
+                "low_voltage",
+                "new_partition",
+                "ceiling_system",
+                "gkl_box",
+                "ceiling_preparation",
+                "wall_preparation",
+                "wall_finishing",
+                "wall_insulation",
+                "gkl_surface_finish",
+                "tile_work",
+                "floor_finish",
+                "floor_base",
+                "door_installation",
+                "window_installation",
+                "technical_hatch",
+                "hvac_installation",
+                "heating_installation",
+                "plumbing_installation",
+                "protective_elements",
+                "equipment",
+                "commissioning",
+                "electrical_installation",
+                }
+            )
         )
         auto_accept_gate_passed = explicit_score > 0 or primary_unique or hard_gate_explicit
         auto_accept_gate_reason = None
@@ -1181,13 +1514,21 @@ class StageClassifier:
             auto_accept_gate_reason = "shared_primary_work_type_without_explicit_stage_evidence"
             reason = reason or auto_accept_gate_reason
         elif hard_gate_explicit and explicit_score <= 0 and not primary_unique:
-            auto_accept_gate_reason = "unique_stage_after_explicit_object_gate"
+            auto_accept_gate_reason = (
+                "unique_stage_after_confident_subtype_gate"
+                if confident_global_gate
+                else "unique_stage_after_explicit_object_gate"
+            )
+
+        if hard_gate_explicit:
+            needs_review = False
+            reason = None
 
         stage_role = str((best.stage or {}).get("stage_role") or "work")
         if stage_role in ALWAYS_REVIEW_STAGE_ROLES:
             needs_review = True
             reason = f"stage_role_{stage_role}_requires_review"
-        weak_reason = self._weak_stage_signal_reason(best)
+        weak_reason = None if hard_gate_explicit else self._weak_stage_signal_reason(best)
         if weak_reason:
             needs_review = True
             reason = reason or weak_reason
@@ -1591,10 +1932,33 @@ class StageClassifier:
         object_reasons = set(matched.get("object_priority") or [])
         if object_reasons & {
             "ceiling_object_match",
+            "ceiling_system_object_match",
+            "gkl_box_object_match",
+            "ceiling_preparation_object_match",
             "lighting_equipment_object_match",
+            "low_voltage_object_match",
             "floor_base_object_match",
             "floor_finish_object_match",
+            "wall_preparation_object_match",
+            "wall_finishing_object_match",
+            "wall_insulation_object_match",
+            "new_partition_object_match",
+            "door_installation_object_match",
+            "window_installation_object_match",
+            "window_slopes_object_match",
+            "technical_hatch_object_match",
             "plumbing_installation_object_match",
+            "hvac_installation_object_match",
+            "heating_installation_object_match",
+            "logistics_cleanup_object_match",
+            "site_protection_object_match",
+            "chasing_drilling_object_match",
+            "protective_elements_object_match",
+            "equipment_object_match",
+            "commissioning_object_match",
+            "electrical_installation_object_match",
+            "tile_work_object_match",
+            "gkl_surface_finish_object_match",
         }:
             return None
         if _has_explicit_phrase(matched.get("stage_option") or []):

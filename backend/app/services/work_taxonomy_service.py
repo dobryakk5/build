@@ -1,6 +1,6 @@
 """Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v6_4_8.json`` is the canonical work
+``construction_work_dictionary_v6_4_9.json`` is the canonical work
 classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
@@ -22,10 +22,10 @@ from app.models import WorkPrecedence, WorkSubtype
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v6_4_8.json"
+    / "construction_work_dictionary_v6_4_9.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_8"
-PROMPT_VERSION = "estimate-v6.4.8"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_9"
+PROMPT_VERSION = "estimate-v6.4.9"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
@@ -1841,6 +1841,7 @@ def _subtype_candidates(
 
 _DEMOLITION_ACTION_TERMS = (
     "демонтаж",
+    "демотаж",
     "демонтажные",
     "демонтировать",
     "демонтируем",
@@ -2007,6 +2008,62 @@ def _explicit_object_priority_pair(
 
     demolition = _has_demolition_action(haystack)
 
+    if not demolition and _contains_any(haystack, (
+        "очистка стар", "очистка ветх", "расчистка стар", "снятие стар",
+    )) and _contains_any(haystack, ("краск", "кле", "побел", "обо", "покрыт")):
+        if "потол" in haystack:
+            return (
+                "reconstruction_works", "ceiling_demolition",
+                "old_ceiling_coating_removal_priority", ["удаление старого покрытия потолка"],
+            )
+        if _contains_any(haystack, ("стен", "обо")):
+            return (
+                "reconstruction_works", "wall_demolition",
+                "old_wall_coating_removal_priority", ["удаление старого покрытия стен"],
+            )
+        if _contains_any(haystack, ("пол", "линоле", "паркет", "фанер")):
+            return (
+                "reconstruction_works", "floor_demolition",
+                "old_floor_coating_removal_priority", ["удаление старого покрытия пола"],
+            )
+
+    if not demolition and _contains_any(haystack, (
+        "кабель интернет", "кабеля интернет", "кабель tv", "кабеля tv", "интернет и tv", "витая пара",
+        "кабель utp", "кабель ftp", "скс", "структурированн кабельн",
+    )):
+        return (
+            "mep_internal", "structured_cabling",
+            "structured_cabling_object_priority", ["СКС/интернет/TV"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "грунтование потол", "грунтовка потол", "шпаклевка потол", "шпатлевка потол",
+        "грунтование стен", "грунтовка стен", "шпаклевка стен", "шпатлевка стен",
+    )):
+        return (
+            "interior_finishing", "putty_primer",
+            "putty_primer_surface_object_priority", ["грунтовка/шпаклевка поверхности"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "ремонт потол", "устранение мелких дефектов потол", "расчистка руст",
+        "заделка руст", "ремонтными смесями потол",
+    )):
+        return (
+            "interior_finishing", "plastering",
+            "ceiling_repair_object_priority", ["ремонт потолка"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "прозвонка кабел", "прокладка лотк", "монтаж контактор",
+        "установка электрощит", "установка распределительн панел",
+        "установка автомат", "монтаж регулятора теплого пола",
+    )):
+        return (
+            "mep_internal", "electrical",
+            "electrical_equipment_object_priority", ["электромонтажное оборудование"],
+        )
+
     if "гидролок" in haystack:
         if _contains_any(haystack, ("подключ", "расключ")):
             return (
@@ -2037,6 +2094,41 @@ def _explicit_object_priority_pair(
         return (
             "windows_doors", "window_slopes_sills", "window_slopes_sills_object_priority",
             ["оконные откосы/подоконник"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "люк невидим", "люк невидимк", "люк неведим", "люк неведимк", "ревизионн люк", "техническ люк",
+    )):
+        return (
+            "windows_doors", "technical_doors_hatches",
+            "technical_hatch_object_priority", ["технический люк"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "монтаж вгкл", "монтаж гкл по каркас", "обшивка вгкл",
+        "обшивка гкл по каркас", "каркас перегород", "перегородка из гкл",
+    )) and "потол" not in haystack:
+        return (
+            "partitions", "drywall_partitions",
+            "drywall_partition_object_priority", ["ГКЛ/ВГКЛ по каркасу"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "теплоизоляц стен", "пароизоляц стен", "утепление стен",
+        "утепление внутренн стен", "тепло и пароизоляц стен",
+    )):
+        return (
+            "insulation", "internal_wall_insulation",
+            "internal_wall_insulation_object_priority", ["изоляция стен"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "окраска стен", "покраска стен", "окраска потол", "покраска потол",
+        "нанесение краски", "окрашивание стен",
+    )):
+        return (
+            "interior_finishing", "painting",
+            "painting_object_priority", ["окраска поверхности"],
         )
 
     if not demolition and _contains_any(haystack, (
@@ -2076,7 +2168,11 @@ def _explicit_object_priority_pair(
                 ["потолочный плинтус/молдинг"],
             )
 
-    if not demolition and _contains_any(haystack, ("спортивн покрыт", "спортивн пол")):
+    if not demolition and _contains_any(haystack, (
+        "спортивн покрыт", "спортивн пол", "ласточкин хвост",
+        "замковое спортивн покрыт", "модульн спортивн покрыт",
+        "резинов плит с замк",
+    )):
         return (
             "interior_finishing", "sports_floor_finishes", "sports_floor_object_priority",
             ["спортивное покрытие"],
@@ -2090,6 +2186,7 @@ def _explicit_object_priority_pair(
         )
     if not demolition and _contains_any(haystack, (
         "линоле", "ламинат", "паркет", "ковролин", "фанера под",
+        "инженерн дос", "инжинерн дос", "массивн дос", "настил фанер", "настил osb", "настил осп",
     )):
         return (
             "interior_finishing", "floor_coverings", "floor_covering_object_priority",
