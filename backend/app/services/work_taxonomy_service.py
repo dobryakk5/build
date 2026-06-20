@@ -1,6 +1,6 @@
 """Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v6_4_6.json`` is the canonical work
+``construction_work_dictionary_v6_4_8.json`` is the canonical work
 classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
@@ -22,10 +22,10 @@ from app.models import WorkPrecedence, WorkSubtype
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v6_4_6.json"
+    / "construction_work_dictionary_v6_4_8.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_6"
-PROMPT_VERSION = "estimate-v6.4.6"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_8"
+PROMPT_VERSION = "estimate-v6.4.8"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
@@ -138,6 +138,12 @@ class ClassificationResult:
     scope_candidate_sections: int = 0
     scope_candidate_pairs: int = 0
     fallback_used: bool = False
+    scoped_rejection_reason: str | None = None
+    scoped_candidate_subtype: str | None = None
+    global_candidate_subtype: str | None = None
+    global_fallback_accept_reason: str | None = None
+    object_priority_rule: str | None = None
+    object_conflicts: tuple[str, ...] = ()
 
     def as_raw_data(self) -> dict[str, Any]:
         return {
@@ -165,6 +171,12 @@ class ClassificationResult:
             "classification_scope_candidate_sections": self.scope_candidate_sections,
             "classification_scope_candidate_pairs": self.scope_candidate_pairs,
             "classification_fallback_used": self.fallback_used,
+            "scoped_rejection_reason": self.scoped_rejection_reason,
+            "scoped_candidate_subtype": self.scoped_candidate_subtype,
+            "global_candidate_subtype": self.global_candidate_subtype,
+            "global_fallback_accept_reason": self.global_fallback_accept_reason,
+            "object_priority_rule": self.object_priority_rule,
+            "object_conflicts": list(self.object_conflicts),
             # Legacy names kept until the UI/API is fully migrated.
             "subtype_code": self.subtype_code,
             "subtype_name": self.subtype_name,
@@ -595,54 +607,134 @@ def update_project_stage_title(stage_id: str, title: str) -> dict[str, Any]:
     return _public_work_stage(matched_stage)
 
 
+def _estimate_categories_from_texts(texts: list[str]) -> set[str]:
+    """Detect broad estimate categories once per distinct source phrase."""
+    categories: set[str] = set()
+    unique = {normalize_text(text) for text in texts if normalize_text(text)}
+    for text in unique:
+        if re.search(r"\b(?:полы?|пола|напольн\w*|стяжк\w*|линоле\w*|ламинат\w*|паркет\w*|плинтус\w*)", text):
+            categories.add("floors")
+        if re.search(r"\b(?:стен\w*|перегород\w*|гкл|гипсокартон)", text):
+            categories.add("walls_partitions")
+        if re.search(r"\bпотол\w*", text):
+            categories.add("ceilings")
+        if re.search(r"\b(?:окон\w*|двер\w*|витраж\w*|наличник\w*|добор\w*)", text):
+            categories.add("windows_doors")
+        if re.search(r"\b(?:сантех\w*|водоснабж\w*|канализац\w*|унитаз\w*|смесител\w*|раковин\w*|душев\w*|поддон\w*|труб\w*\s+ppr)", text):
+            categories.add("plumbing")
+        if re.search(r"\b(?:электромонтаж\w*|электрическ\w*|светильник\w*|кабел\w*|провод\w*|розет\w*|выключател\w*|автоматическ\w*\s+выключател\w*)", text):
+            categories.add("electrical")
+        if re.search(r"\b(?:доставк\w*|разгрузк\w*|погрузк\w*|вывоз\w*\s+мусор\w*|вынос\w*\s+мусор\w*|контейнер\w*\s+для\s+мусор\w*)", text):
+            categories.add("logistics_cleanup")
+    return categories
+
+
+def _stage_option_category(option: dict[str, Any], stage: dict[str, Any]) -> str | None:
+    explicit = option.get("category") or option.get("estimate_category")
+    if explicit:
+        return str(explicit)
+    number = str(stage.get("number") or "")
+    title = normalize_text(" ".join((str(stage.get("title") or ""), str(option.get("title") or ""))))
+    section_id = str(option.get("section_id") or "")
+    subtype_id = str(option.get("subtype_id") or "")
+    if number in {"6.2.6", "6.2.13"} or section_id == "floor_screed" or subtype_id in {"floor_coverings", "sports_floor_finishes", "polymer_floors"}:
+        return "floors"
+    if number in {"6.2.4", "6.2.5", "6.2.14"} or section_id == "partitions":
+        return "walls_partitions"
+    if number == "6.2.7" or "потол" in title:
+        return "ceilings"
+    if number in {"6.2.15", "6.2.17"} or section_id == "windows_doors":
+        return "windows_doors"
+    if number in {"6.2.9", "6.2.11", "6.2.12"} or (section_id == "mep_internal" and subtype_id in {"water_supply", "sewage", "sanitary_fixtures", "heating"}):
+        return "plumbing"
+    if number in {"6.2.8", "6.2.16", "6.2.18"} or (section_id == "mep_internal" and subtype_id in {"electrical", "commissioning"}):
+        return "electrical"
+    if number == "6.2.19" or (section_id == "mobilization" and subtype_id == "logistics_cleanup"):
+        return "logistics_cleanup"
+    return None
+
+
+def _variant_allowed_categories(variant: dict[str, Any]) -> tuple[set[str], str]:
+    """Resolve scope from explicit metadata, otherwise only from stage_options."""
+    explicit = variant.get("allowed_categories")
+    if isinstance(explicit, list) and any(str(value or "").strip() for value in explicit):
+        return {str(value).strip() for value in explicit if str(value or "").strip()}, "allowed_categories"
+    inferred: set[str] = set()
+    for stage in variant.get("stages") or []:
+        if not isinstance(stage, dict):
+            continue
+        for option in stage.get("stage_options") or []:
+            if not isinstance(option, dict):
+                continue
+            category = _stage_option_category(option, stage)
+            if category:
+                inferred.add(category)
+    return inferred, "stage_options"
+
+
 def suggest_project_hierarchy_variants(
     texts: list[str],
     *,
     estimate_type_id: str | None = None,
     limit: int = 3,
 ) -> dict[str, Any]:
-    """Suggest top project hierarchy nodes without running stage-aware matching.
-
-    This is intentionally broad and cheap: it scores only titles/detail lines from
-    the selected scope, so import still requires the user to choose a variant
-    before stage-aware classification is allowed.
-    """
+    """Suggest hierarchy variants using deduplicated terms and category coverage."""
     payload = _load_dictionary()
-    haystack = normalize_text(" ".join(texts[:100]))
+    unique_texts = list(dict.fromkeys(normalize_text(text) for text in texts if normalize_text(text)))
+    haystack = " ".join(unique_texts[:200])
     hay_tokens = haystack.split()
+    matched_categories = _estimate_categories_from_texts(unique_texts)
     estimate_types = _hierarchy_estimate_types(payload)
     type_scores: list[tuple[int, dict[str, Any], list[str]]] = []
-    variant_scores: list[tuple[int, dict[str, Any], dict[str, Any], list[str]]] = []
+    variant_scores: list[tuple[int, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
 
     def semantic_terms(values: list[Any]) -> list[str]:
-        """Keep only human-readable hierarchy terms.
-
-        Internal ids and numeric stage/variant numbers are deliberately not
-        indexed: equipment articles, voltages and position numbers otherwise
-        dominate suggestions for structured electrical estimates.
-        """
         result: list[str] = []
         for value in values:
             term = str(value or "").strip()
             normalized = normalize_text(term)
-            if not normalized:
-                continue
-            if not re.search(r"[a-zа-яё]", normalized, re.IGNORECASE):
+            if not normalized or not re.search(r"[a-zа-яё]", normalized, re.IGNORECASE):
                 continue
             if len(normalized) < 4 and len(normalized.split()) == 1:
                 continue
             result.append(term)
         return result
 
+    hay_token_set = set(hay_tokens)
+    hay_stem_set = set(_cached_stems(tuple(hay_tokens)))
+
+    def fast_match_terms(terms: list[str]) -> list[str]:
+        """Suggestion matching without repeatedly scanning the full haystack."""
+        matched: list[str] = []
+        seen: set[str] = set()
+        for raw in terms:
+            term = str(raw or "").strip()
+            normalized, tokens = _term_signature(term)
+            if not normalized or normalized in seen:
+                continue
+            if normalized in haystack:
+                seen.add(normalized)
+                matched.append(term)
+                continue
+            token_matches = 0
+            significant = [token for token in tokens if len(token) >= 4]
+            for token in significant:
+                if token in hay_token_set or _stem(token) in hay_stem_set:
+                    token_matches += 1
+            required = max(1, len(significant))
+            if significant and token_matches >= required:
+                seen.add(normalized)
+                matched.append(term)
+        return matched
+
     for estimate_type in estimate_types:
-        type_terms = semantic_terms([estimate_type.get("title")])
-        type_matches = _match_terms(type_terms, haystack, hay_tokens)
-        title_score = len(type_matches) * 3
         best_variant_score = 0
+        best_matches: list[str] = []
+        type_title_terms = semantic_terms([estimate_type.get("title")])
         for variant in estimate_type.get("project_variants") or []:
             if not isinstance(variant, dict):
                 continue
-            variant_terms: list[str] = semantic_terms([variant.get("title")])
+            variant_terms = semantic_terms([estimate_type.get("title"), variant.get("title")])
             for stage in variant.get("stages") or []:
                 if not isinstance(stage, dict):
                     continue
@@ -651,33 +743,52 @@ def suggest_project_hierarchy_variants(
                 for option in stage.get("stage_options") or []:
                     if isinstance(option, dict):
                         variant_terms.extend(semantic_terms([option.get("title")]))
-            matches = _match_terms([term for term in variant_terms if term], haystack, hay_tokens)
-            score = title_score + len(matches)
-            variant_scores.append((score, estimate_type, variant, matches[:10]))
-            best_variant_score = max(best_variant_score, len(matches))
-        type_scores.append((title_score + best_variant_score, estimate_type, type_matches[:10]))
+            matches = fast_match_terms(variant_terms)
+            unique_matches = list(dict.fromkeys(normalize_text(term) for term in matches if normalize_text(term)))
+            unique_term_score = len(unique_matches)
+            allowed_categories, scope_source = _variant_allowed_categories(variant)
+            covered = matched_categories & allowed_categories if allowed_categories else set()
+            foreign = matched_categories - allowed_categories if allowed_categories else set()
+            coverage_score = 4 * len(covered)
+            complex_boost = 0
+            if str(variant.get("number") or "") == "6.2":
+                finish_categories = {"floors", "walls_partitions", "ceilings", "windows_doors"}
+                engineering_categories = {"plumbing", "electrical"}
+                if len(matched_categories & finish_categories) >= 3 and matched_categories & engineering_categories:
+                    complex_boost = 10
+            scope_penalty = 5 * min(len(foreign), 4)
+            final_score = unique_term_score + coverage_score + complex_boost - scope_penalty
+            diagnostics = {
+                "unique_matched_terms": unique_matches[:20],
+                "matched_categories": sorted(matched_categories),
+                "allowed_categories": sorted(allowed_categories),
+                "scope_source": scope_source,
+                "covered_categories": sorted(covered),
+                "foreign_categories": sorted(foreign),
+                "unique_term_score": unique_term_score,
+                "category_coverage_score": coverage_score,
+                "complex_renovation_boost": complex_boost,
+                "scope_mismatch_penalty": scope_penalty,
+                "final_score": final_score,
+            }
+            variant_scores.append((final_score, estimate_type, variant, diagnostics))
+            if final_score > best_variant_score:
+                best_variant_score = final_score
+                best_matches = unique_matches[:10]
+        type_matches = fast_match_terms(type_title_terms)
+        type_scores.append((best_variant_score + len(type_matches) * 3, estimate_type, best_matches or type_matches[:10]))
 
     type_scores.sort(key=lambda item: item[0], reverse=True)
     if estimate_type_id:
-        try:
-            selected_type = _find_estimate_type(payload, estimate_type_id)
-        except ValueError:
-            selected_type = None
-        if selected_type:
-            variant_scores = [
-                item for item in variant_scores
-                if str(item[1].get("id") or "") == str(selected_type.get("id") or "")
-            ]
+        variant_scores = [item for item in variant_scores if str(item[1].get("id") or "") == str(estimate_type_id)]
     variant_scores.sort(key=lambda item: item[0], reverse=True)
     return {
         "estimate_types": [
             {
-                "id": str(item.get("id") or ""),
-                "number": str(item.get("number") or ""),
+                "id": str(item.get("id") or ""), "number": str(item.get("number") or ""),
                 "title": str(item.get("title") or ""),
                 "estimate_kind": legacy_estimate_kind_for_type(str(item.get("id") or "")),
-                "score": score,
-                "matched_terms": matches,
+                "score": score, "matched_terms": matches,
             }
             for score, item, matches in type_scores[:limit]
         ],
@@ -686,14 +797,13 @@ def suggest_project_hierarchy_variants(
                 "estimate_type_id": str(estimate_type.get("id") or ""),
                 "estimate_type_number": str(estimate_type.get("number") or ""),
                 "estimate_type_title": str(estimate_type.get("title") or ""),
-                "id": str(variant.get("id") or ""),
-                "number": str(variant.get("number") or ""),
+                "id": str(variant.get("id") or ""), "number": str(variant.get("number") or ""),
                 "title": str(variant.get("title") or ""),
                 "stages_count": len(variant.get("stages") or []),
-                "score": score,
-                "matched_terms": matches,
+                "score": score, "matched_terms": diagnostics["unique_matched_terms"],
+                **diagnostics,
             }
-            for score, estimate_type, variant, matches in variant_scores[:limit]
+            for score, estimate_type, variant, diagnostics in variant_scores[:limit]
         ],
     }
 
@@ -1743,30 +1853,20 @@ _DEMOLITION_ACTION_TERMS = (
     "удалить",
 )
 _DEMOLITION_OBJECT_TERMS = (
-    "потолок",
-    "каркас потолка",
-    "обрешетка потолка",
-    "стена",
-    "перегородка",
-    "пол",
-    "стяжка",
-    "напольное покрытие",
-    "плитка пола",
-    "сантехника",
-    "труба",
-    "водоснабжение",
-    "канализация",
-    "кабель",
-    "розетка",
-    "выключатель",
-    "светильник",
-    "щит",
-    "вентиляция",
-    "воздуховод",
-    "кондиционер",
-    "окно",
-    "дверь",
-    "конструкция",
+    "потолок", "армстронг", "грильято", "реечный потолок", "натяжной потолок",
+    "каркас потолка", "обрешетка потолка", "потолочный плинтус",
+    "стена", "перегородка", "короб гкл", "стеновая панель", "обои",
+    "пол", "стяжка", "линолеум", "ламинат", "паркет", "фанера", "оргалит",
+    "плинтус", "порожек", "напольное покрытие", "плитка пола", "подсыпка",
+    "сантехника", "унитаз", "инсталляция", "биде", "писсуар", "ванна",
+    "душевая кабина", "поддон", "раковина", "мойка", "смеситель",
+    "полотенцесушитель", "радиатор", "конвектор", "труба", "водоснабжение",
+    "канализация", "отопление",
+    "кабель", "проводка", "розетка", "выключатель", "светильник", "щит",
+    "автомат", "лоток", "электрическая коробка",
+    "вентиляция", "воздуховод", "гибкий воздуховод", "вентиляционный короб",
+    "вентилятор", "вентиляционная решетка", "кондиционер", "сплит система",
+    "окно", "дверь", "проем", "конструкция",
 )
 _DEMOLITION_SUBTYPE_IDS = frozenset(
     {
@@ -1777,33 +1877,231 @@ _DEMOLITION_SUBTYPE_IDS = frozenset(
         "plumbing_demolition",
         "electrical_demolition",
         "hvac_demolition",
+        "openings_diamond_cutting",
     }
 )
 
 
-def _has_demolition_intent(haystack: str, hay_tokens: list[str]) -> bool:
-    # Action detection is intentionally exact. Fuzzy stemming must not treat
-    # «монтаж» as «демонтаж» or vice versa.
-    action_found = any(
-        (normalize_text(term) in hay_tokens)
+def _contains_any(text: str, terms: tuple[str, ...] | list[str]) -> bool:
+    return any(normalize_text(term) in text for term in terms)
+
+
+def _has_demolition_action(text: str) -> bool:
+    tokens = text.split()
+    return any(
+        (normalize_text(term) in tokens)
         if len(normalize_text(term).split()) == 1
-        else bool(_boundary_pattern(normalize_text(term)).search(haystack))
+        else bool(_boundary_pattern(normalize_text(term)).search(text))
         for term in _DEMOLITION_ACTION_TERMS
     )
+
+
+def resolve_demolition_object(
+    item_text: str,
+    section_context: str | None = None,
+) -> str | None:
+    """Resolve the physical object of demolition.
+
+    The item itself always wins. Section context is only a fallback for generic
+    rows such as «Демонтаж оборудования».
+    """
+    item = normalize_text(item_text)
+    section = normalize_text(section_context)
+    if not _has_demolition_action(item):
+        return None
+
+    groups: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("hvac", (
+            "воздуховод", "гибк воздуховод", "вентиляцион короб", "вентилятор",
+            "вентиляцион решет", "кондиционер", "сплит систем", "вентиляц",
+        )),
+        ("plumbing", (
+            "унитаз", "инсталляц", "биде", "писсуар", "ванн", "душев",
+            "поддон", "раковин", "мойк", "смесител", "полотенцесушител",
+            "радиатор", "конвектор", "водоснабжен", "канализац", "сантех",
+            "труб отоплен", "труб вод", "труб канал",
+        )),
+        ("electrical", (
+            "кабел", "проводк", "розет", "выключател", "светильник", "щит",
+            "автомат", "электрооборуд", "электрическ лот", "кабельн лот",
+            "электрическ короб",
+        )),
+        ("floor", (
+            "стяж", "линоле", "ламинат", "паркет", "фанер", "оргалит",
+            "плинтус", "порож", "дощат пол", "напольн покрыт", "пол плит",
+            "плитк пола", "подсыпк", "полы", "пола",
+        )),
+        ("ceiling", (
+            "потол", "армстронг", "грильято", "реечн", "натяжн",
+            "каркас потол", "обрешетк потол", "обрешётк потол",
+        )),
+        ("wall_partition", (
+            "перегород", "короб из гкл", "коробов из гкл", "короб гкл", "стенов панел",
+            "настенн плит", "штукатурк стен", "обои", "краск со стен",
+            "стены", "стена",
+        )),
+        ("opening", ("оконн блок", "дверн блок", "окно", "двер", "проем", "проём")),
+    )
+    for object_id, terms in groups:
+        if _contains_any(item, terms):
+            return object_id
+
+    # Section context is deliberately weaker than the item text.
+    for object_id, terms in groups:
+        if _contains_any(section, terms):
+            return object_id
+    return "general"
+
+
+def _has_demolition_intent(haystack: str, hay_tokens: list[str]) -> bool:
     return bool(
-        action_found
+        _has_demolition_action(haystack)
         and _match_terms(list(_DEMOLITION_OBJECT_TERMS), haystack, hay_tokens)
     )
 
 
-def _explicit_object_priority_pair(haystack: str) -> tuple[str, str, str, list[str]] | None:
-    """Resolve a small set of unambiguous action/object phrases.
+def _explicit_object_priority_pair(
+    haystack: str,
+    section_context: str | None = None,
+) -> tuple[str, str, str, list[str]] | None:
+    """Resolve unambiguous action/object phrases before ordinary scoring."""
+    # Logistics and protection must be resolved before generic objects such as
+    # doors, floors or quoted source-work descriptions can steal the row.
+    if _contains_any(haystack, (
+        "разгрузк материал", "доставк материал", "погрузк материал",
+        "вынос мусор", "вывоз мусор", "контейнер для мусор",
+        "контейнер для вывоз", "строительн мусор",
+    )):
+        return (
+            "mobilization", "logistics_cleanup", "logistics_cleanup_object_priority",
+            ["логистика", "мусор"],
+        )
+    if _contains_any(haystack, (
+        "укрытие пленк", "укрытие плёнк", "защита существующ отделк",
+        "укрытие мебел", "защита мебел", "укрытие полов", "укрытие стен",
+    )):
+        return (
+            "mobilization", "site_setup", "site_protection_object_priority",
+            ["защита существующей отделки"],
+        )
 
-    This is deliberately narrow. It corrects cases where a generic operation
-    word (for example ``грунтовка``) outweighs the explicit physical object
-    (``пол``), or where negated accessory words steal a door-installation row.
-    """
-    demolition = any(term in haystack.split() for term in _DEMOLITION_ACTION_TERMS)
+    demolition_object = resolve_demolition_object(haystack, section_context)
+    if demolition_object:
+        subtype_by_object = {
+            "ceiling": "ceiling_demolition",
+            "wall_partition": "wall_demolition",
+            "floor": "floor_demolition",
+            "plumbing": "plumbing_demolition",
+            "electrical": "electrical_demolition",
+            "hvac": "hvac_demolition",
+            "opening": "openings_diamond_cutting",
+            "general": "general_structural_demolition",
+        }
+        subtype_id = subtype_by_object[demolition_object]
+        return (
+            "reconstruction_works",
+            subtype_id,
+            f"demolition_object_priority_{demolition_object}",
+            ["demolition", demolition_object],
+        )
+
+    demolition = _has_demolition_action(haystack)
+
+    if "гидролок" in haystack:
+        if _contains_any(haystack, ("подключ", "расключ")):
+            return (
+                "mep_internal", "electrical", "hydrolock_electrical_connection_priority",
+                ["подключение гидролока"],
+            )
+        if _contains_any(haystack, ("монтаж", "установ")):
+            return (
+                "mep_internal", "water_supply", "hydrolock_water_installation_priority",
+                ["монтаж гидролока"],
+            )
+
+    if not demolition and _contains_any(haystack, (
+        "штроблен", "устройство штроб", "штроба в", "бурение сквозн отверст",
+        "отверстие для электроточ", "устройство ниш", "ниша в бетон",
+        "ниша в кирпич", "ниша в газоблок",
+    )) and not _contains_any(haystack, ("без штроб", "готовой штроб", "готовую штроб")):
+        return (
+            "reconstruction_works", "chasing_drilling_niches",
+            "chasing_drilling_niches_object_priority",
+            ["штробление/бурение/ниша"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "монтаж откосов пвх", "оконн откос", "дверн откос", "подоконник",
+        "оконн отлив", "отлив окон", "отделка откос",
+    )):
+        return (
+            "windows_doors", "window_slopes_sills", "window_slopes_sills_object_priority",
+            ["оконные откосы/подоконник"],
+        )
+
+    if not demolition and _contains_any(haystack, (
+        "жалюзи", "рулонн штор", "римск штор", "светофильтр",
+        "внутренн карниз", "солнцезащитн систем",
+    )):
+        return (
+            "windows_doors", "window_coverings_blinds_curtains",
+            "window_coverings_object_priority", ["жалюзи/шторы"],
+        )
+
+    if not demolition and _contains_any(haystack, ("шумоизоляц", "звукоизоляц", "зипс")):
+        return (
+            "insulation", "sound_acoustic_insulation", "sound_insulation_object_priority",
+            ["звукоизоляция"],
+        )
+
+    if not demolition and "потол" in haystack and "светильник" not in haystack:
+        if "натяжн" in haystack:
+            return (
+                "interior_finishing", "stretch_ceilings", "stretch_ceiling_object_priority",
+                ["натяжной потолок"],
+            )
+        if _contains_any(haystack, ("армстронг", "грильято", "реечн", "подвесн")):
+            return (
+                "interior_finishing", "suspended_ceilings", "suspended_ceiling_object_priority",
+                ["подвесной потолок"],
+            )
+        if "гкл" in haystack or "гипсокарт" in haystack:
+            return (
+                "interior_finishing", "gkl_ceilings", "gkl_ceiling_object_priority",
+                ["потолок из ГКЛ"],
+            )
+        if _contains_any(haystack, ("потолочн плинт", "молдинг", "лепнин")):
+            return (
+                "interior_finishing", "ceiling_moulding", "ceiling_moulding_object_priority",
+                ["потолочный плинтус/молдинг"],
+            )
+
+    if not demolition and _contains_any(haystack, ("спортивн покрыт", "спортивн пол")):
+        return (
+            "interior_finishing", "sports_floor_finishes", "sports_floor_object_priority",
+            ["спортивное покрытие"],
+        )
+    if not demolition and _contains_any(haystack, (
+        "плинтус", "порож", "профиль примыкан",
+    )) and "потолочн" not in haystack:
+        return (
+            "interior_finishing", "baseboards_trims", "baseboard_object_priority",
+            ["плинтус/порожек"],
+        )
+    if not demolition and _contains_any(haystack, (
+        "линоле", "ламинат", "паркет", "ковролин", "фанера под",
+    )):
+        return (
+            "interior_finishing", "floor_coverings", "floor_covering_object_priority",
+            ["напольное покрытие"],
+        )
+    if not demolition and "пол" in haystack and _contains_any(haystack, (
+        "подготов", "грунтов", "обеспылив", "очист",
+    )):
+        return (
+            "floor_screed", "floor_base_preparation", "floor_base_preparation_priority",
+            ["подготовка основания пола"],
+        )
 
     if "наливн" in haystack and "пол" in haystack:
         preparation = any(
@@ -1812,23 +2110,18 @@ def _explicit_object_priority_pair(haystack: str) -> tuple[str, str, str, list[s
         )
         if preparation:
             return (
-                "floor_screed",
-                "floor_base_preparation",
+                "floor_screed", "floor_base_preparation",
                 "floor_object_preparation_priority",
                 ["пол", "наливной пол", "подготовка основания"],
             )
         return (
-            "floor_screed",
-            "self_leveling_floor",
-            "self_leveling_floor_object_priority",
-            ["наливной пол"],
+            "floor_screed", "self_leveling_floor",
+            "self_leveling_floor_object_priority", ["наливной пол"],
         )
 
     if re.search(r"\bкран\w*\s+шаров\w*\b", haystack):
         return (
-            "mep_internal",
-            "water_supply",
-            "water_valve_object_priority",
+            "mep_internal", "water_supply", "water_valve_object_priority",
             ["шаровой кран"],
         )
 
@@ -1846,9 +2139,7 @@ def _explicit_object_priority_pair(haystack: str) -> tuple[str, str, str, list[s
         else:
             return None
         return (
-            "windows_doors",
-            subtype_id,
-            "door_installation_object_priority",
+            "windows_doors", subtype_id, "door_installation_object_priority",
             ["установка двери"],
         )
 
@@ -1856,10 +2147,8 @@ def _explicit_object_priority_pair(haystack: str) -> tuple[str, str, str, list[s
         term in haystack for term in ("задел", "шпаклев", "грунтов", "шлифов")
     ):
         return (
-            "interior_finishing",
-            "gkl_surface_finishing",
-            "gkl_seam_finishing_object_priority",
-            ["швы гкл"],
+            "interior_finishing", "gkl_surface_finishing",
+            "gkl_seam_finishing_object_priority", ["швы гкл"],
         )
 
     return None
@@ -1923,6 +2212,7 @@ def _explicit_object_priority_result(
         reason=reason,
         dictionary_version=version,
         row_role=resolved_role,
+        object_priority_rule=reason,
         **scope_fields,
     )
 
@@ -1943,6 +2233,8 @@ def classify_work(
     weights = (payload.get("scoring") or {}).get("weights") or {}
     thresholds = (payload.get("scoring") or {}).get("decision_thresholds") or {}
     text = " ".join(part for part in (name, section) if part)
+    item_haystack = normalize_text(name)
+    section_haystack = normalize_text(section)
     haystack = normalize_text(text)
     hay_tokens = haystack.split()
     version = dictionary_version(payload)
@@ -1975,8 +2267,13 @@ def classify_work(
                 subtype_id for pair_section, subtype_id in normalized_pairs if pair_section == section_id
             )
 
+    pre_object_priority_pair = _explicit_object_priority_pair(
+        item_haystack,
+        section_haystack,
+    )
     demolition_priority = False
-    if _has_demolition_intent(haystack, hay_tokens):
+    priority_section = pre_object_priority_pair[0] if pre_object_priority_pair else None
+    if _has_demolition_intent(haystack, hay_tokens) and priority_section in {None, "reconstruction_works"}:
         reconstruction_allowed = allowed_section_ids is None or "reconstruction_works" in allowed_section_ids
         allowed_demolition_ids = _DEMOLITION_SUBTYPE_IDS
         if normalized_pairs is not None:
@@ -2061,7 +2358,7 @@ def classify_work(
             **scope_fields,
         )
 
-    object_priority_pair = _explicit_object_priority_pair(haystack)
+    object_priority_pair = pre_object_priority_pair
     if object_priority_pair is not None:
         object_section, object_subtype, _, _ = object_priority_pair
         pair_allowed = (
@@ -2236,11 +2533,107 @@ def classify_work(
 
 
 def _scope_result_requires_fallback(result: ClassificationResult, review_min_score: int) -> bool:
-    if result.reason in {"empty_candidate_scope", "no_section_match", "empty_name"}:
+    if result.reason in {
+        "empty_candidate_scope",
+        "no_section_match",
+        "empty_name",
+        "subtype_ambiguous",
+        "scoped_subtype_rejected",
+    }:
         return True
     if result.section_code is None:
         return True
-    return int(result.score or 0) < review_min_score
+    if result.needs_review:
+        return True
+    if not result.subtype_code or result.subtype_code == UNKNOWN_SUBTYPE_CODE:
+        return True
+    if int(result.score or 0) < review_min_score:
+        return True
+    subtype_candidates = [
+        candidate for candidate in result.candidates
+        if candidate.stage == "subtype" and candidate.subtype_code
+    ]
+    if subtype_candidates:
+        best = subtype_candidates[0]
+        if best.needs_review:
+            return True
+        if int(best.delta_to_next or 0) < int(
+            ((_load_dictionary().get("scoring") or {}).get("decision_thresholds") or {}).get(
+                "min_delta_between_top_two", 3
+            )
+        ):
+            return True
+    return False
+
+
+def _scoped_rejection_reason(result: ClassificationResult, review_min_score: int) -> str:
+    if result.reason in {"subtype_ambiguous", "no_section_match", "empty_candidate_scope"}:
+        return result.reason
+    if not result.subtype_code or result.subtype_code == UNKNOWN_SUBTYPE_CODE:
+        return "scoped_subtype_unknown"
+    if result.needs_review:
+        return "scoped_result_needs_review"
+    if int(result.score or 0) < review_min_score:
+        return "scoped_score_below_review_min"
+    return "scoped_subtype_rejected"
+
+
+def _as_rejected_scoped_result(
+    result: ClassificationResult,
+    rejection_reason: str,
+    *,
+    global_candidate: str | None = None,
+) -> ClassificationResult:
+    matched = dict(result.matched_terms or {})
+    matched.setdefault("scoped_rejection", []).append(rejection_reason)
+    return replace(
+        result,
+        subtype_code=UNKNOWN_SUBTYPE_CODE,
+        subtype_name=UNKNOWN_SUBTYPE_NAME,
+        confidence="low",
+        needs_review=True,
+        source="scoped_rejected",
+        matched_terms=matched,
+        reason="scoped_subtype_rejected",
+        scoped_rejection_reason=rejection_reason,
+        scoped_candidate_subtype=(
+            result.subtype_code if result.subtype_code != UNKNOWN_SUBTYPE_CODE else None
+        ),
+        global_candidate_subtype=global_candidate,
+        global_fallback_accept_reason=None,
+    )
+
+
+def _global_result_is_safe(
+    result: ClassificationResult,
+    thresholds: dict[str, Any],
+) -> tuple[bool, str]:
+    if result.needs_review or result.subtype_code == UNKNOWN_SUBTYPE_CODE:
+        return False, "global_result_needs_review"
+    if int(result.score or 0) < int(thresholds.get("auto_accept_min_score", 9)):
+        return False, "global_score_below_auto_accept"
+    subtype_candidates = [
+        candidate for candidate in result.candidates
+        if candidate.stage == "subtype" and candidate.subtype_code
+    ]
+    if subtype_candidates and int(subtype_candidates[0].delta_to_next or 0) < int(
+        thresholds.get("min_delta_between_top_two", 3)
+    ):
+        return False, "global_subtype_delta_too_small"
+    matched = result.matched_terms or {}
+    strong_evidence = bool(
+        result.source == "object_priority"
+        or result.object_priority_rule
+        or matched.get("object_priority")
+        or matched.get("action_object_pairs")
+        or matched.get("subtype_strong_terms")
+        or matched.get("exact_strong_phrase")
+    )
+    if not strong_evidence:
+        return False, "global_result_has_only_generic_terms"
+    if matched.get("subtype_negative_terms") or result.object_conflicts:
+        return False, "global_object_conflict"
+    return True, "strong_global_object_or_phrase"
 
 
 def classify_work_cascade(
@@ -2252,13 +2645,7 @@ def classify_work_cascade(
     estimate_type_scope: TaxonomyScope | None = None,
     allow_global_fallback: bool = True,
 ) -> ClassificationResult:
-    """Classify in variant → estimate type → optional global order.
-
-    Ambiguity inside a non-empty scope remains reviewable inside that scope. The
-    global dictionary is used only when the current scope has no meaningful
-    section match or its score is below the review threshold and global fallback
-    is explicitly allowed.
-    """
+    """Classify in variant → estimate type → controlled global fallback order."""
     thresholds = ((_load_dictionary().get("scoring") or {}).get("decision_thresholds") or {})
     review_min = int(thresholds.get("review_min_score", 5))
     attempts: list[TaxonomyScope] = []
@@ -2268,6 +2655,7 @@ def classify_work_cascade(
         attempts.append(estimate_type_scope)
 
     scoped_results: list[ClassificationResult] = []
+    rejection_reasons: list[str] = []
     for index, scope in enumerate(attempts):
         result = classify_work(
             name,
@@ -2283,12 +2671,18 @@ def classify_work_cascade(
         scoped_results.append(result)
         if not _scope_result_requires_fallback(result, review_min):
             return result
+        rejection_reasons.append(_scoped_rejection_reason(result, review_min))
+
+    strongest_scoped = max(scoped_results, key=lambda item: int(item.score or 0)) if scoped_results else None
+    strongest_reason = (
+        rejection_reasons[scoped_results.index(strongest_scoped)]
+        if strongest_scoped is not None
+        else "no_scoped_result"
+    )
 
     if not allow_global_fallback:
-        if scoped_results:
-            # Keep the strongest scoped answer. It can remain needs_review, but
-            # must not escape into unrelated global taxonomy branches.
-            return max(scoped_results, key=lambda item: int(item.score or 0))
+        if strongest_scoped is not None:
+            return _as_rejected_scoped_result(strongest_scoped, strongest_reason)
         return ClassificationResult(
             section_code=None,
             section_name=None,
@@ -2306,11 +2700,12 @@ def classify_work_cascade(
             row_role=row_role or "unknown",
             classification_scope="scoped_classification_unavailable",
             fallback_used=False,
+            scoped_rejection_reason="no_scoped_result",
         )
 
     global_scope_name = "global_fallback" if scoped_results else "global_no_hierarchy"
     selected_scope = variant_scope or estimate_type_scope
-    return classify_work(
+    global_result = classify_work(
         name,
         section,
         row_role=row_role,
@@ -2318,6 +2713,38 @@ def classify_work_cascade(
         scope_estimate_type_id=selected_scope.estimate_type_id if selected_scope else None,
         scope_project_variant_id=variant_scope.project_variant_id if variant_scope else None,
         fallback_used=bool(scoped_results),
+    )
+    safe, accept_reason = _global_result_is_safe(global_result, thresholds)
+    if safe:
+        return replace(
+            global_result,
+            scoped_rejection_reason=strongest_reason if strongest_scoped else None,
+            scoped_candidate_subtype=(
+                strongest_scoped.subtype_code
+                if strongest_scoped and strongest_scoped.subtype_code != UNKNOWN_SUBTYPE_CODE
+                else None
+            ),
+            global_candidate_subtype=global_result.subtype_code,
+            global_fallback_accept_reason=accept_reason,
+        )
+
+    if strongest_scoped is not None:
+        return _as_rejected_scoped_result(
+            strongest_scoped,
+            strongest_reason,
+            global_candidate=global_result.subtype_code,
+        )
+    return replace(
+        global_result,
+        subtype_code=UNKNOWN_SUBTYPE_CODE,
+        subtype_name=UNKNOWN_SUBTYPE_NAME,
+        confidence="low",
+        needs_review=True,
+        source="global_rejected",
+        reason="global_fallback_rejected",
+        scoped_rejection_reason="no_scoped_result",
+        global_candidate_subtype=global_result.subtype_code,
+        global_fallback_accept_reason=None,
     )
 
 

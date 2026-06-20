@@ -237,13 +237,15 @@ def _make_material(
     qty=None,
     price=None,
     total=None,
+    source_excel_row: int | None = None,
 ) -> dict:
     return {
         "name": name,
         "unit": _to_str(unit),
         "quantity": _to_optional_float(qty),
-        "unit_price": _to_optional_float(price, treat_zero_as_none=True),
-        "total_price": _to_optional_float(total, treat_zero_as_none=True),
+        "unit_price": _to_optional_float(price, treat_zero_as_none=False),
+        "total_price": _to_optional_float(total, treat_zero_as_none=False),
+        "source_excel_row": source_excel_row,
     }
 
 
@@ -305,14 +307,56 @@ def subtotal_row_amount(row) -> Optional[float]:
 
 
 def describe_subtotal_row(row) -> dict:
+    raw = getattr(row, "raw_data", None)
+    raw = raw if isinstance(raw, dict) else {}
+    work_total = _to_optional_float(raw.get("work_total_declared"), treat_zero_as_none=False)
+    material_total = _to_optional_float(raw.get("material_total_declared"), treat_zero_as_none=False)
+    gross_total = _to_optional_float(raw.get("gross_total_declared"), treat_zero_as_none=False)
+    row_subtotal = _to_optional_float(raw.get("row_subtotal_declared"), treat_zero_as_none=False)
+    if gross_total is None:
+        gross_total = row_subtotal
+    if gross_total is None and work_total is not None and material_total is not None:
+        gross_total = work_total + material_total
+    if gross_total is None:
+        gross_total = subtotal_row_amount(row)
     return {
         "label": str(getattr(row, "work_name", "") or "").strip(),
         "section": getattr(row, "section", None),
-        "total_price": subtotal_row_amount(row),
+        "work_total": work_total,
+        "material_total": material_total,
+        "total_price": gross_total,
         "row_order": getattr(row, "row_order", None),
         "source_strategy": getattr(row, "source_strategy", None),
     }
 
+
+
+
+def _structured_smeta_meta(rows: list[ParsedRow]) -> dict:
+    meta: dict = {
+        "parent_total_mode": "work_only_with_nested_materials",
+        "financial_model_version": 2,
+    }
+    for row in reversed(rows):
+        if not is_subtotal_row(row):
+            continue
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        work_total = raw.get("work_total_declared")
+        material_total = raw.get("material_total_declared")
+        gross_total = raw.get("gross_total_declared")
+        if gross_total is None:
+            gross_total = raw.get("row_subtotal_declared")
+        declared = []
+        if work_total is not None:
+            declared.append({"kind": "work_total", "label": "Сумма работ", "total": float(work_total)})
+        if material_total is not None:
+            declared.append({"kind": "material_total", "label": "Сумма материалов", "total": float(material_total)})
+        if gross_total is not None:
+            declared.append({"kind": "total_without_vat", "label": str(row.work_name or "ВСЕГО"), "total": float(gross_total)})
+        if declared:
+            meta["declared_totals"] = declared
+        break
+    return meta
 
 # ─────────────────────────────────────────────────────────────────────────────
 # СТРАТЕГИЯ 0: СТРУКТУРИРОВАННАЯ СМЕТА (группа → работа → материалы)
@@ -481,23 +525,30 @@ class StructuredSmetaParser:
             "material_price": base + 8,
             "work_total": base + 9,
             "material_total": base + 10,
-            "grand_total": base + 11,
+            "row_subtotal": base + 11,
+            "combined_unit_price": base + 12,
+            "gross_total": base + 13,
         }
 
+        def cell_value(row_idx: int, key: str):
+            col_idx = cols[key]
+            return ws.cell(row_idx, col_idx).value if col_idx <= ws.max_column else None
+
         for row_idx in range(info["header_row"] + 1, ws.max_row + 1):
-            work_name = _cell_text(ws.cell(row_idx, cols["work_name"]).value)
-            material_name = _cell_text(ws.cell(row_idx, cols["material_name"]).value)
-            work_unit = ws.cell(row_idx, cols["work_unit"]).value
-            material_unit = ws.cell(row_idx, cols["material_unit"]).value
-            work_qty = ws.cell(row_idx, cols["work_qty"]).value
-            material_qty = ws.cell(row_idx, cols["material_qty"]).value
-            work_price = ws.cell(row_idx, cols["work_price"]).value
-            work_price_markup = ws.cell(row_idx, cols["work_price_markup"]).value
-            material_price = ws.cell(row_idx, cols["material_price"]).value
-            work_total = ws.cell(row_idx, cols["work_total"]).value
-            material_total = ws.cell(row_idx, cols["material_total"]).value
-            grand_total = ws.cell(row_idx, cols["grand_total"]).value
-            row_rightmost_total = _pick_rightmost_numeric(ws, row_idx, info.get("rightmost_total_cols", []))
+            work_name = _cell_text(cell_value(row_idx, "work_name"))
+            material_name = _cell_text(cell_value(row_idx, "material_name"))
+            work_unit = cell_value(row_idx, "work_unit")
+            material_unit = cell_value(row_idx, "material_unit")
+            work_qty = cell_value(row_idx, "work_qty")
+            material_qty = cell_value(row_idx, "material_qty")
+            work_price = cell_value(row_idx, "work_price")
+            work_price_markup = cell_value(row_idx, "work_price_markup")
+            material_price = cell_value(row_idx, "material_price")
+            work_total = cell_value(row_idx, "work_total")
+            material_total = cell_value(row_idx, "material_total")
+            row_subtotal = cell_value(row_idx, "row_subtotal")
+            combined_unit_price = cell_value(row_idx, "combined_unit_price")
+            gross_total = cell_value(row_idx, "gross_total")
 
             if not work_name and not material_name:
                 continue
@@ -509,19 +560,62 @@ class StructuredSmetaParser:
                 continue
 
             if work_name and self._is_work_row_type2(work_name, work_unit, work_qty, work_total, work_price, material_name):
+                work_total_value = _to_optional_float(work_total, treat_zero_as_none=False)
+                material_total_value = _to_optional_float(material_total, treat_zero_as_none=False)
+                row_subtotal_value = _to_optional_float(row_subtotal, treat_zero_as_none=False)
+                combined_unit_price_value = _to_optional_float(combined_unit_price, treat_zero_as_none=False)
+                gross_total_value = _to_optional_float(gross_total, treat_zero_as_none=False)
+                if gross_total_value is None:
+                    gross_total_value = row_subtotal_value
+                work_total_derived = False
+                if work_total_value is None and gross_total_value is not None:
+                    nested_total = sum(
+                        float(material.get("total_price") or 0)
+                        for material in pending_materials
+                    )
+                    derived = gross_total_value - nested_total
+                    if derived >= 0:
+                        work_total_value = derived
+                        work_total_derived = True
+
+                raw_data = {
+                    "source_excel_row": row_idx,
+                    "work_total_price": work_total_value,
+                    "material_total_price_declared": material_total_value,
+                    "row_subtotal_price": row_subtotal_value,
+                    "combined_unit_price": combined_unit_price_value,
+                    "gross_total_price": gross_total_value,
+                    "parent_total_mode": "work_only_with_nested_materials",
+                    "financial_model_version": 2,
+                    "item_type": "work",
+                    "item_type_confidence": 0.99,
+                }
+                if work_total_derived:
+                    raw_data["work_total_derived"] = True
+                    raw_data["work_total_derivation_reason"] = "gross_minus_nested_materials"
+                if is_subtotal_label(work_name):
+                    raw_data.update({
+                        "work_total_declared": work_total_value,
+                        "material_total_declared": material_total_value,
+                        "row_subtotal_declared": row_subtotal_value,
+                        "combined_unit_price_declared": combined_unit_price_value,
+                        "gross_total_declared": gross_total_value,
+                    })
+
                 current_work = ParsedRow(
                     section=current_section,
                     work_name=work_name,
                     unit=_to_str(work_unit),
                     quantity=_to_optional_float(work_qty),
-                    unit_price=_to_optional_float(work_price, treat_zero_as_none=True)
-                    or _to_optional_float(work_price_markup, treat_zero_as_none=True),
-                    total_price=_to_optional_float(row_rightmost_total, treat_zero_as_none=True)
-                    or _to_optional_float(work_total, treat_zero_as_none=True)
-                    or _to_optional_float(grand_total, treat_zero_as_none=True),
+                    unit_price=(
+                        _to_optional_float(work_price, treat_zero_as_none=False)
+                        if _to_optional_float(work_price, treat_zero_as_none=False) is not None
+                        else _to_optional_float(work_price_markup, treat_zero_as_none=False)
+                    ),
+                    total_price=work_total_value,
                     materials=list(pending_materials),
                     row_order=order,
-                    raw_data={},
+                    raw_data=raw_data,
                     source_strategy=self.name,
                 )
                 pending_materials.clear()
@@ -530,12 +624,14 @@ class StructuredSmetaParser:
                 continue
 
             if material_name:
+                material_value = material_total if material_total is not None else gross_total
                 material = _make_material(
                     material_name,
                     unit=material_unit,
                     qty=material_qty,
                     price=material_price,
-                    total=material_total or grand_total,
+                    total=material_value,
+                    source_excel_row=row_idx,
                 )
                 if current_work is not None:
                     current_work.materials.append(material)
@@ -737,6 +833,8 @@ class RowOrientedParser:
                 raw_data={
                     **{f: str(v) for f, v in row_values.items() if v is not None},
                     **({"group_path": group_path} if group_path else {}),
+                    "source_excel_row": row_idx,
+                    **({"source_num": str(num_value).strip()} if num_value is not None else {}),
                 },
                 source_strategy="row",
             ))
@@ -753,10 +851,25 @@ class RowOrientedParser:
         work_name = row_values.get("work_name")
         if not work_name:
             return False
-        has_numbers = any(
-            _to_float(row_values.get(f)) is not None
-            for f in ("quantity", "unit_price", "total_price")
+        quantity = _to_float(row_values.get("quantity"))
+        unit_price = _to_float(row_values.get("unit_price"))
+        total_price = _to_float(row_values.get("total_price"))
+        num_value = _to_str(row_values.get("num"))
+        unit = _to_str(row_values.get("unit"))
+
+        # In MosMontazh-style catalogues text sublabels often carry a literal
+        # zero in the total column. They remain section context, not work rows.
+        zero_total_text_label = (
+            not num_value
+            and not unit
+            and quantity is None
+            and unit_price is None
+            and total_price in (None, 0.0)
         )
+        if zero_total_text_label and len(str(work_name)) < 120:
+            return True
+
+        has_numbers = any(value is not None for value in (quantity, unit_price, total_price))
         return not has_numbers and len(str(work_name)) < 120
 
     def _section_level(
@@ -1204,12 +1317,14 @@ class ExcelEstimateParser:
                 rows = structured.parse(ws_structured)
                 if rows:
                     wb_structured.close()
-                    return rows, {
+                    meta = {
                         "strategy": structured.name,
                         "sheet": sheet_name,
                         "confidence": confidence,
                         "rows_found": len(rows),
                     }
+                    meta.update(_structured_smeta_meta(rows))
+                    return rows, meta
         wb_structured.close()
 
         # ── Быстрая проверка: есть ли лист типа «Смета»? ──────────────────
@@ -1228,12 +1343,14 @@ class ExcelEstimateParser:
                 rows = structured.parse(ws_named)
                 wb_named.close()
                 if rows:
-                    return rows, {
+                    meta = {
                         "strategy":   structured.name,
                         "sheet":      smeta_sheet,
                         "confidence": 0.99,
                         "rows_found": len(rows),
                     }
+                    meta.update(_structured_smeta_meta(rows))
+                    return rows, meta
 
             wb_named.close()
 

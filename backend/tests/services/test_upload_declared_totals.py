@@ -138,6 +138,8 @@ def test_declared_totals_new_and_legacy_formats() -> None:
         "vat_rate": 22.0,
         "total_with_vat": 122.0,
         "legacy_total": 122.0,
+        "work_total": None,
+        "material_total": None,
     }
     assert upload._declared_total_from_meta(new_meta) == 100.0
 

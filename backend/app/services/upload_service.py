@@ -332,6 +332,56 @@ def _zero_or_empty(value) -> bool:
         return False
 
 
+_CATALOG_PLACEHOLDER_RE = re.compile(
+    r"^(?:здесь\s+можно\s+вписать\s+свою\s+позицию|"
+    r"впишите\s+свою\s+позицию|добавьте\s+свою\s+позицию)\.?$",
+    re.IGNORECASE,
+)
+
+
+def _filter_catalog_placeholders(rows: list, meta: dict) -> tuple[list, int]:
+    """Remove template placeholders before suggestions/taxonomy/stage scoring.
+
+    A zero total alone is never enough. The row must have a known template
+    phrase and zero/empty quantity, unit price and total.
+    """
+    kept: list = []
+    filtered: list[dict] = []
+    for row in rows:
+        name = re.sub(r"\s+", " ", str(getattr(row, "work_name", "") or "")).strip()
+        is_placeholder = bool(_CATALOG_PLACEHOLDER_RE.match(name)) and all(
+            _zero_or_empty(getattr(row, field, None))
+            for field in ("quantity", "unit_price", "total_price")
+        )
+        if not is_placeholder:
+            kept.append(row)
+            continue
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        raw.update(
+            {
+                "source_row_kind": "catalog_placeholder",
+                "is_active_estimate_row": False,
+                "row_role": "placeholder",
+                "skip_taxonomy": True,
+                "skip_stage_classifier": True,
+                "classification_source": "catalog_placeholder_filter",
+                "classification_reason": "catalog_placeholder",
+            }
+        )
+        row.raw_data = raw
+        filtered.append(
+            {
+                "name": name,
+                "source_num": raw.get("source_num") or raw.get("num"),
+                "source_excel_row": raw.get("source_excel_row"),
+                "reason": "catalog_placeholder",
+            }
+        )
+    meta["catalog_placeholder_rows_count"] = len(filtered)
+    meta["catalog_placeholder_rows"] = filtered
+    return kept, len(filtered)
+
+
 def _filter_unselected_catalog_rows(rows: list, meta: dict) -> tuple[list, int]:
     """Remove unselected rows from catalog-like Excel price lists.
 
@@ -376,6 +426,22 @@ def _filter_unselected_catalog_rows(rows: list, meta: dict) -> tuple[list, int]:
                 "classification_source": "inactive_catalog_row",
                 "classification_reason": "zero_quantity_and_total_in_catalog_like_excel",
             }
+        )
+        row.raw_data = raw
+
+    # In this catalogue template every selected non-zero row is a work item.
+    # Mark it before row-role/taxonomy classification so names such as
+    # «Отверстие для электроточки» are not misread as material resources.
+    for row in rows:
+        if id(row) in zero_ids:
+            continue
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        raw.setdefault("source_row_kind", "catalog_item")
+        raw.setdefault("is_active_estimate_row", True)
+        raw["item_type"] = "work"
+        raw["item_type_confidence"] = max(
+            float(raw.get("item_type_confidence") or 0.0),
+            0.95,
         )
         row.raw_data = raw
 
@@ -437,6 +503,12 @@ def _enrich_work_subtypes_sync(
         "classification_scope_candidate_sections",
         "classification_scope_candidate_pairs",
         "classification_fallback_used",
+        "scoped_rejection_reason",
+        "scoped_candidate_subtype",
+        "global_candidate_subtype",
+        "global_fallback_accept_reason",
+        "object_priority_rule",
+        "object_conflicts",
         "operator_review_required",
         "operator_review_status",
         "operator_review_reason",
@@ -922,6 +994,7 @@ def _parse_upload_rows_for_import(
             "но не считаются работами."
         )
 
+    rows, _placeholder_count = _filter_catalog_placeholders(rows, meta)
     rows, _inactive_count = _filter_unselected_catalog_rows(rows, meta)
     if not rows:
         raise ValueError("В файле не осталось активных строк сметы после исключения нулевых позиций каталога.")
@@ -970,7 +1043,8 @@ def _decimal_value(value, default: Decimal = Decimal("0")) -> Decimal:
 
 
 def _money_float(value) -> float:
-    return float(_decimal_value(value).quantize(_MONEY_QUANT, rounding=ROUND_HALF_UP))
+    rounded = _decimal_value(value).quantize(_MONEY_QUANT, rounding=ROUND_HALF_UP)
+    return 0.0 if rounded == 0 else float(rounded)
 
 
 def _material_identity(material: dict) -> tuple:
@@ -1023,6 +1097,36 @@ def _iter_unique_nested_materials(rows: list):
             yield row, material
 
 
+def _row_financial_totals(row, unique_nested_materials: list[dict] | None = None) -> dict:
+    """Return the normalized financial components of one parsed estimate row.
+
+    ``row.total_price`` is always the work/top-level amount. Nested materials are
+    added exactly once. Source gross columns are reconciliation evidence only.
+    """
+    materials = unique_nested_materials
+    if materials is None:
+        materials = list(getattr(row, "materials", None) or [])
+    work_total = _decimal_value(getattr(row, "total_price", None))
+    material_total = sum(
+        (_decimal_value(m.get("total_price") if m.get("total_price") is not None else m.get("total")) for m in materials),
+        Decimal("0"),
+    )
+    gross_total = work_total + material_total
+    raw = getattr(row, "raw_data", None) or {}
+    source_gross = raw.get("gross_total_price")
+    source_gross_decimal = _decimal_value(source_gross) if source_gross is not None else None
+    source_difference = None
+    if source_gross_decimal is not None:
+        source_difference = gross_total - source_gross_decimal
+    return {
+        "work_total": work_total,
+        "material_total": material_total,
+        "gross_total": gross_total,
+        "source_gross_total": source_gross_decimal,
+        "source_difference": source_difference,
+    }
+
+
 _GROUP_BUCKETS = {
     "work": "works",
     "material": "materials",
@@ -1033,13 +1137,7 @@ _GROUP_BUCKETS = {
 
 
 def _build_preview_groups(rows: list) -> dict:
-    """Group rows by section → {works, materials, mechanisms, overhead, unknown}.
-
-    Totals are computed over ALL rows; the row lists are capped at
-    MAX_PREVIEW_GROUP_ROWS (transient payload, never persisted). Materials with no
-    per-work link sit at the group level; works that DO carry ParsedRow.materials
-    expose them nested under the work.
-    """
+    """Group rows by section and expose normalized work/material/gross totals."""
     groups: dict[str, dict] = {}
     order: list[str] = []
     no_section_count = 0
@@ -1058,26 +1156,37 @@ def _build_preview_groups(rows: list) -> dict:
             groups[section] = {
                 "section": section,
                 "totals": {t: {"count": 0, "total": 0.0} for t in _ITEM_TYPE_ORDER},
+                "work_total": 0.0,
+                "material_total": 0.0,
+                "total": 0.0,
                 "works": [], "materials": [], "mechanisms": [], "overhead": [], "unknown": [],
             }
             order.append(section)
             group_decimal_totals[section] = {t: Decimal("0") for t in _ITEM_TYPE_ORDER}
+            group_decimal_totals[section].update({
+                "_work": Decimal("0"), "_material": Decimal("0"), "_gross": Decimal("0")
+            })
 
         g = groups[section]
         item_type = resolve_item_type(row)
         bucket_totals = g["totals"].setdefault(item_type, {"count": 0, "total": 0.0})
         bucket_totals["count"] += 1
         group_decimal_totals[section].setdefault(item_type, Decimal("0"))
-        group_decimal_totals[section][item_type] += _decimal_value(row.total_price)
+
+        nested_materials = unique_nested_by_parent.get(id(row), []) if item_type == "work" else []
+        financial = _row_financial_totals(row, nested_materials)
+        row_top_total = financial["work_total"]
+        group_decimal_totals[section][item_type] += row_top_total
+        group_decimal_totals[section]["_work"] += row_top_total if item_type == "work" else Decimal("0")
+        group_decimal_totals[section]["_material"] += row_top_total if item_type == "material" else Decimal("0")
+        group_decimal_totals[section]["_gross"] += row_top_total
 
         if item_type == "work":
-            nested_materials = unique_nested_by_parent.get(id(row), [])
             material_totals = g["totals"].setdefault("material", {"count": 0, "total": 0.0})
             material_totals["count"] += len(nested_materials)
-            group_decimal_totals[section]["material"] += sum(
-                (_decimal_value(m.get("total_price")) for m in nested_materials),
-                Decimal("0"),
-            )
+            group_decimal_totals[section]["material"] += financial["material_total"]
+            group_decimal_totals[section]["_material"] += financial["material_total"]
+            group_decimal_totals[section]["_gross"] += financial["material_total"]
 
         if rows_emitted >= MAX_PREVIEW_GROUP_ROWS:
             truncated = True
@@ -1086,17 +1195,22 @@ def _build_preview_groups(rows: list) -> dict:
         entry = _row_preview_dict(row)
         if item_type == "work":
             entry["materials"] = [_material_dict(m) for m in (getattr(row, "materials", None) or [])]
-            entry["materials_total"] = _money_float(sum(
-                (_decimal_value(m.get("total_price")) for m in (getattr(row, "materials", None) or [])),
-                Decimal("0"),
-            ))
+            entry["work_total"] = _money_float(financial["work_total"])
+            entry["materials_total"] = _money_float(financial["material_total"])
+            entry["gross_total"] = _money_float(financial["gross_total"])
         g[_GROUP_BUCKETS.get(item_type, "unknown")].append(entry)
         rows_emitted += 1
 
     for section in order:
-        for item_type, total in group_decimal_totals[section].items():
+        totals = group_decimal_totals[section]
+        for item_type, total in totals.items():
+            if item_type.startswith("_"):
+                continue
             groups[section]["totals"].setdefault(item_type, {"count": 0, "total": 0.0})
             groups[section]["totals"][item_type]["total"] = _money_float(total)
+        groups[section]["work_total"] = _money_float(totals["_work"])
+        groups[section]["material_total"] = _money_float(totals["_material"])
+        groups[section]["total"] = _money_float(totals["_gross"])
 
     return {
         "groups": [groups[s] for s in order],
@@ -1108,6 +1222,10 @@ def _build_preview_groups(rows: list) -> dict:
 def _build_stage_preview_groups(rows: list) -> list[dict]:
     groups: dict[str, dict] = {}
     order: list[str] = []
+    decimal_totals: dict[str, dict[str, Decimal]] = {}
+    unique_nested_by_parent: dict[int, list[dict]] = {}
+    for parent, material in _iter_unique_nested_materials(rows):
+        unique_nested_by_parent.setdefault(id(parent), []).append(material)
     for index, row in enumerate(rows[:MAX_PREVIEW_GROUP_ROWS]):
         raw = getattr(row, "raw_data", None) or {}
         stage_number = raw.get("work_stage_number") or "unmatched"
@@ -1120,17 +1238,44 @@ def _build_stage_preview_groups(rows: list) -> list[dict]:
                 "stage_options_mode": raw.get("stage_options_mode") or "none",
                 "rows_count": 0,
                 "needs_review_count": 0,
+                "work_total": 0.0,
+                "material_total": 0.0,
                 "total": 0.0,
                 "rows": [],
+            }
+            decimal_totals[stage_number] = {
+                "work": Decimal("0"),
+                "material": Decimal("0"),
+                "gross": Decimal("0"),
             }
             order.append(stage_number)
         group = groups[stage_number]
         entry = _row_preview_dict(row, index=index)
+        financial = _row_financial_totals(row, unique_nested_by_parent.get(id(row), []))
         group["rows_count"] += 1
-        group["total"] = round(float(group["total"]) + float(row.total_price or 0), 2)
+        decimal_totals[stage_number]["work"] += financial["work_total"]
+        decimal_totals[stage_number]["material"] += financial["material_total"]
+        decimal_totals[stage_number]["gross"] += financial["gross_total"]
         if entry.get("needs_review") or entry.get("operator_review_required"):
             group["needs_review_count"] += 1
         group["rows"].append(entry)
+    for stage_number in order:
+        totals = decimal_totals[stage_number]
+        groups[stage_number]["work_total"] = _money_float(totals["work"])
+        groups[stage_number]["material_total"] = _money_float(totals["material"])
+        groups[stage_number]["total"] = _money_float(totals["gross"])
+
+    # Independently rounded stage totals can differ from the rounded grand total
+    # by one or two kopecks. Reconcile that harmless rounding residue on the
+    # largest stage so the visible stage sum equals the import total exactly.
+    if order:
+        target = _decimal_value(_money_float(sum((v["gross"] for v in decimal_totals.values()), Decimal("0"))))
+        visible = sum((_decimal_value(groups[key]["total"]) for key in order), Decimal("0"))
+        residue = (target - visible).quantize(_MONEY_QUANT, rounding=ROUND_HALF_UP)
+        if residue != 0 and abs(residue) <= Decimal("0.05"):
+            target_stage = max(order, key=lambda key: abs(decimal_totals[key]["gross"]))
+            groups[target_stage]["total"] = _money_float(_decimal_value(groups[target_stage]["total"]) + residue)
+            groups[target_stage]["rounding_adjustment"] = float(residue)
     return [groups[key] for key in order]
 
 
@@ -1139,16 +1284,39 @@ def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
     breakdown_totals = {t: Decimal("0") for t in _ITEM_TYPE_ORDER}
     unknown_rows: list[dict] = []
     low_confidence_rows: list[dict] = []
+    unique_nested_by_parent: dict[int, list[dict]] = {}
+    for parent, material in _iter_unique_nested_materials(rows):
+        unique_nested_by_parent.setdefault(id(parent), []).append(material)
 
-    top_level_total = Decimal("0")
+    computed_work = Decimal("0")
+    computed_material = Decimal("0")
+    computed_top_level = Decimal("0")
+    financial_warnings: list[dict] = []
+    nested_material_count = 0
     for row in rows:
         item_type = resolve_item_type(row)
         breakdown_counts.setdefault(item_type, 0)
         breakdown_totals.setdefault(item_type, Decimal("0"))
         breakdown_counts[item_type] += 1
-        row_total = _decimal_value(getattr(row, "total_price", None))
-        breakdown_totals[item_type] += row_total
-        top_level_total += row_total
+        nested = unique_nested_by_parent.get(id(row), []) if item_type == "work" else []
+        financial = _row_financial_totals(row, nested)
+        breakdown_totals[item_type] += financial["work_total"]
+        computed_top_level += financial["work_total"]
+        if item_type == "work":
+            computed_work += financial["work_total"]
+            computed_material += financial["material_total"]
+            nested_material_count += len(nested)
+            breakdown_counts["material"] = breakdown_counts.get("material", 0) + len(nested)
+            breakdown_totals["material"] = breakdown_totals.get("material", Decimal("0")) + financial["material_total"]
+            if financial["source_difference"] is not None and abs(financial["source_difference"]) > Decimal("0.01"):
+                financial_warnings.append({
+                    "row_order": getattr(row, "row_order", None),
+                    "work_name": getattr(row, "work_name", ""),
+                    "difference": _money_float(financial["source_difference"]),
+                    "reason": "source_gross_total_mismatch",
+                })
+        elif item_type == "material":
+            computed_material += financial["work_total"]
 
         raw = getattr(row, "raw_data", None) or {}
         if item_type == "unknown" and len(unknown_rows) < 20:
@@ -1159,15 +1327,6 @@ def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
         if conf is not None and conf < _LOW_CONFIDENCE and len(low_confidence_rows) < 20:
             low_confidence_rows.append(_row_preview_dict(row))
 
-    nested_material_total = Decimal("0")
-    nested_material_count = 0
-    for _parent, material in _iter_unique_nested_materials(rows):
-        nested_material_count += 1
-        material_total = _decimal_value(material.get("total_price"))
-        nested_material_total += material_total
-        breakdown_counts["material"] = breakdown_counts.get("material", 0) + 1
-        breakdown_totals["material"] = breakdown_totals.get("material", Decimal("0")) + material_total
-
     breakdown = {
         item_type: {
             "count": breakdown_counts.get(item_type, 0),
@@ -1175,9 +1334,13 @@ def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
         }
         for item_type in dict.fromkeys((*_ITEM_TYPE_ORDER, *breakdown_counts.keys()))
     }
-    computed_work_total = breakdown.get("work", {}).get("total", 0.0)
-    computed_material_total = breakdown.get("material", {}).get("total", 0.0)
-    computed_total_without_vat = _money_float(top_level_total + nested_material_total)
+    computed_work_total = _money_float(computed_work)
+    computed_material_total = _money_float(computed_material)
+    nested_only_material = sum(
+        (_row_financial_totals(row, unique_nested_by_parent.get(id(row), []))["material_total"] for row in rows if resolve_item_type(row) == "work"),
+        Decimal("0"),
+    )
+    computed_total_without_vat = _money_float(computed_top_level + nested_only_material)
 
     declared = _declared_totals_from_meta(meta)
     declared_total = declared["total_without_vat"]
@@ -1185,31 +1348,22 @@ def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
         declared_total = declared["legacy_total"]
     if declared_total is None:
         declared_total = _declared_total_price(subtotal_rows)
+    declared_work_total = declared["work_total"]
+    declared_material_total = declared["material_total"]
 
     vat_rate = declared["vat_rate"]
     computed_vat_total = None
     computed_total_with_vat = None
     if vat_rate is not None:
-        computed_vat_total = _money_float(
-            _decimal_value(computed_total_without_vat)
-            * _decimal_value(vat_rate)
-            / Decimal("100")
-        )
-        computed_total_with_vat = _money_float(
-            _decimal_value(computed_total_without_vat) + _decimal_value(computed_vat_total)
-        )
+        computed_vat_total = _money_float(_decimal_value(computed_total_without_vat) * _decimal_value(vat_rate) / Decimal("100"))
+        computed_total_with_vat = _money_float(_decimal_value(computed_total_without_vat) + _decimal_value(computed_vat_total))
 
-    difference = (
-        _money_float(_decimal_value(declared_total) - _decimal_value(computed_total_without_vat))
-        if declared_total is not None
-        else None
-    )
+    difference_work = (_money_float(_decimal_value(declared_work_total) - computed_work) if declared_work_total is not None else None)
+    difference_material = (_money_float(_decimal_value(declared_material_total) - computed_material) if declared_material_total is not None else None)
+    difference = (_money_float(_decimal_value(declared_total) - _decimal_value(computed_total_without_vat)) if declared_total is not None else None)
     difference_with_vat = (
-        _money_float(
-            _decimal_value(declared["total_with_vat"]) - _decimal_value(computed_total_with_vat)
-        )
-        if declared["total_with_vat"] is not None and computed_total_with_vat is not None
-        else None
+        _money_float(_decimal_value(declared["total_with_vat"]) - _decimal_value(computed_total_with_vat))
+        if declared["total_with_vat"] is not None and computed_total_with_vat is not None else None
     )
     difference_reason = None
     if difference is not None and abs(difference) > 1:
@@ -1225,15 +1379,19 @@ def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
         "computed_total_without_vat": computed_total_without_vat,
         "computed_vat_total": computed_vat_total,
         "computed_total_with_vat": computed_total_with_vat,
-        # Backward-compatible field: now includes nested materials once.
         "computed_total_all_rows": computed_total_without_vat,
+        "declared_work_total": declared_work_total,
+        "declared_material_total": declared_material_total,
         "declared_total": declared_total,
         "declared_vat": declared["vat"],
         "declared_vat_rate": declared["vat_rate"],
         "declared_total_with_vat": declared["total_with_vat"],
+        "difference_work": difference_work,
+        "difference_material": difference_material,
         "difference": difference,
         "difference_with_vat": difference_with_vat,
         "difference_reason": difference_reason,
+        "financial_warnings": financial_warnings,
         "unknown_count": breakdown.get("unknown", {}).get("count", 0),
         "unknown_rows": unknown_rows,
         "low_confidence_rows": low_confidence_rows,
@@ -1245,18 +1403,33 @@ def _compute_preview(rows: list, subtotal_rows: list[dict], meta: dict) -> dict:
     }
 
 
-def _sample_texts_for_suggestions(rows: list, limit: int = 80) -> list[str]:
-    texts: list[str] = []
-    for row in rows[:limit]:
-        text_value = " ".join(str(part or "") for part in (row.section, row.work_name)).strip()
-        if text_value:
-            texts.append(text_value)
-    return texts
+def _sample_texts_for_suggestions(rows: list, limit: int = 200) -> list[str]:
+    """Return deduplicated section titles and active work names for suggestions."""
+    sections: list[str] = []
+    names: list[str] = []
+    seen_sections: set[str] = set()
+    seen_names: set[str] = set()
+    for row in rows:
+        section = re.sub(r"\s+", " ", str(getattr(row, "section", None) or "").strip())
+        name = re.sub(r"\s+", " ", str(getattr(row, "work_name", None) or "").strip())
+        section_key = section.casefold()
+        name_key = name.casefold()
+        if section and section_key not in seen_sections:
+            seen_sections.add(section_key)
+            sections.append(section)
+        if name and name_key not in seen_names:
+            seen_names.add(name_key)
+            names.append(name)
+        if len(sections) + len(names) >= limit:
+            break
+    return (sections + names)[:limit]
 
 
 def _declared_totals_from_meta(meta: dict) -> dict:
     """Normalize parser-declared totals without changing the legacy list contract."""
     result = {
+        "work_total": None,
+        "material_total": None,
         "total_without_vat": None,
         "vat": None,
         "vat_rate": None,
@@ -1266,7 +1439,6 @@ def _declared_totals_from_meta(meta: dict) -> dict:
     totals = meta.get("declared_totals")
     if not isinstance(totals, list):
         return result
-
     section_totals: list[Decimal] = []
     for item in totals:
         if not isinstance(item, dict):
@@ -1276,7 +1448,11 @@ def _declared_totals_from_meta(meta: dict) -> dict:
         if total is None:
             continue
         value = _money_float(total)
-        if kind == "total_without_vat":
+        if kind == "work_total":
+            result["work_total"] = value
+        elif kind == "material_total":
+            result["material_total"] = value
+        elif kind == "total_without_vat":
             result["total_without_vat"] = value
         elif kind == "vat":
             result["vat"] = value
@@ -1286,10 +1462,6 @@ def _declared_totals_from_meta(meta: dict) -> dict:
             result["total_with_vat"] = value
         elif kind == "section_total":
             section_totals.append(_decimal_value(total))
-
-    # Preserve the previous PDF semantics: last grand_total wins, otherwise
-    # section totals are added together.  For the new matrix profile the
-    # explicit total_without_vat takes precedence in _declared_total_from_meta.
     if result["total_with_vat"] is not None:
         result["legacy_total"] = result["total_with_vat"]
     elif section_totals:
@@ -1307,6 +1479,22 @@ def _declared_total_from_meta(meta: dict) -> float | None:
     if totals["total_without_vat"] is not None:
         return totals["total_without_vat"]
     return totals["legacy_total"]
+
+
+def structured_smeta_financial_warning(meta: dict | None) -> dict | None:
+    """Return a stable warning payload for legacy structured-smeta batches."""
+    meta = meta if isinstance(meta, dict) else {}
+    if meta.get("strategy") != "structured_smeta":
+        return None
+    if meta.get("financial_model_version") == 2:
+        return None
+    return {
+        "warning_code": "legacy_structured_smeta_financial_model",
+        "message": (
+            "Импорт создан до исправления финансовой модели; материалы могли учитываться "
+            "дважды. Выполните повторный импорт исходного файла."
+        ),
+    }
 
 
 async def preview_upload_job(
@@ -1367,9 +1555,11 @@ async def preview_upload_job(
         raise HTTPException(422, "Не удалось распознать строки сметы в выбранном формате.")
 
     rows, subtotal_rows = _split_work_and_subtotal_rows(rows)
+    rows, catalog_placeholder_rows_count = _filter_catalog_placeholders(rows, meta)
     rows, inactive_catalog_rows_count = _filter_unselected_catalog_rows(rows, meta)
     preview = _compute_preview(rows, subtotal_rows, meta)
     preview["inactive_catalog_rows_count"] = inactive_catalog_rows_count
+    preview["catalog_placeholder_rows_count"] = catalog_placeholder_rows_count
     grouped = _build_preview_groups(rows)
     flat_rows = [_row_preview_dict(r, index=i) for i, r in enumerate(rows[:MAX_PREVIEW_GROUP_ROWS])]
     suggestions = None
@@ -1381,6 +1571,13 @@ async def preview_upload_job(
         )
 
     warnings: list[str] = []
+    warning_codes: list[str] = []
+    warning_details: list[dict] = []
+    legacy_warning = structured_smeta_financial_warning(meta)
+    if legacy_warning:
+        warning_codes.append(legacy_warning["warning_code"])
+        warning_details.append(legacy_warning)
+        warnings.append(legacy_warning["message"])
     if preview["difference_reason"]:
         warnings.append(preview["difference_reason"])
     if grouped["no_section_count"]:
@@ -1388,6 +1585,10 @@ async def preview_upload_job(
     if preview.get("inactive_catalog_rows_count"):
         warnings.append(
             f"Исключены невыбранные позиции каталога: {preview['inactive_catalog_rows_count']}."
+        )
+    if preview.get("catalog_placeholder_rows_count"):
+        warnings.append(
+            f"Исключены шаблонные строки каталога: {preview['catalog_placeholder_rows_count']}."
         )
 
     preview_id = await save_preview_session({
@@ -1423,6 +1624,8 @@ async def preview_upload_job(
         "truncated":      grouped["truncated"],
         "no_section_count": grouped["no_section_count"],
         "warnings":       warnings,
+        "warning_codes":  warning_codes,
+        "warning_details": warning_details,
         **preview,
     }
 
@@ -1611,13 +1814,20 @@ async def _process_upload(job_id: str) -> None:
                     "computed_vat_total": preview_stats["computed_vat_total"],
                     "computed_total_with_vat": preview_stats["computed_total_with_vat"],
                     "computed_total_all_rows": preview_stats["computed_total_all_rows"],
+                    "declared_work_total": preview_stats["declared_work_total"],
+                    "declared_material_total": preview_stats["declared_material_total"],
                     "declared_total":   preview_stats["declared_total"],
                     "declared_vat": preview_stats["declared_vat"],
                     "declared_vat_rate": preview_stats["declared_vat_rate"],
                     "declared_total_with_vat": preview_stats["declared_total_with_vat"],
+                    "difference_work": preview_stats["difference_work"],
+                    "difference_material": preview_stats["difference_material"],
                     "difference":       preview_stats["difference"],
                     "difference_with_vat": preview_stats["difference_with_vat"],
+                    "financial_model_version": meta.get("financial_model_version"),
+                    "parent_total_mode": meta.get("parent_total_mode"),
                     "difference_reason": preview_stats["difference_reason"],
+                    "financial_warnings": preview_stats.get("financial_warnings", []),
                     "unknown_count":    preview_stats["unknown_count"],
                     "inactive_catalog_rows_count": meta.get("inactive_catalog_rows_count", 0),
                     "active_estimate_rows_count": meta.get("active_estimate_rows_count", len(rows)),
