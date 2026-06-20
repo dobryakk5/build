@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowUp, Download } from "lucide-react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { ktpEstimate, workTaxonomy } from "@/lib/api";
@@ -106,74 +107,6 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
-function ExportIcon() {
-  return (
-    <span
-      aria-hidden="true"
-      style={{
-        width: 15,
-        height: 15,
-        display: "inline-block",
-        position: "relative",
-        boxSizing: "border-box",
-        border: "1.8px solid currentColor",
-        borderTop: 0,
-        borderRadius: "0 0 3px 3px",
-      }}
-    >
-      <span
-        style={{
-          position: "absolute",
-          left: 6,
-          top: -4,
-          width: 1.8,
-          height: 10,
-          background: "currentColor",
-          borderRadius: 2,
-        }}
-      />
-      <span
-        style={{
-          position: "absolute",
-          left: 3.5,
-          top: 3,
-          width: 7,
-          height: 7,
-          borderRight: "1.8px solid currentColor",
-          borderBottom: "1.8px solid currentColor",
-          transform: "rotate(45deg)",
-        }}
-      />
-    </span>
-  );
-}
-
-function ArrowUpIcon() {
-  return (
-    <span
-      aria-hidden="true"
-      style={{
-        width: 13,
-        height: 13,
-        display: "inline-block",
-        borderLeft: "2px solid currentColor",
-        borderTop: "2px solid currentColor",
-        transform: "rotate(45deg)",
-        marginTop: 4,
-      }}
-    />
-  );
-}
-
-function xmlEscape(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
-
 function confidenceLabel(value: string | number | null | undefined) {
   if (value == null || value === "") return "";
   if (typeof value === "number") return `${Math.round(value)}%`;
@@ -214,44 +147,19 @@ function buildStructureExportRows(wbs: KtpWbs) {
   });
 }
 
-function downloadStructureExcel(wbs: KtpWbs, sessionId: string) {
+async function downloadStructureExcel(wbs: KtpWbs, sessionId: string) {
+  const XLSX = await import("xlsx");
   const rows = [
     ["Наименование", "Уверенность", "Определенный тип"],
     ...buildStructureExportRows(wbs).map((row) => [row.name, row.confidence, row.type]),
   ];
-  const xmlRows = rows
-    .map(
-      (row) =>
-        `<Row>${row
-          .map((cell) => `<Cell><Data ss:Type="String">${xmlEscape(cell)}</Data></Cell>`)
-          .join("")}</Row>`,
-    )
-    .join("");
-  const workbook = `<?xml version="1.0" encoding="UTF-8"?>
-<?mso-application progid="Excel.Sheet"?>
-<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:o="urn:schemas-microsoft-com:office:office"
- xmlns:x="urn:schemas-microsoft-com:office:excel"
- xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
- xmlns:html="http://www.w3.org/TR/REC-html40">
- <Worksheet ss:Name="Структура работ">
-  <Table>
-   <Column ss:Width="420"/>
-   <Column ss:Width="120"/>
-   <Column ss:Width="260"/>
-   ${xmlRows}
-  </Table>
- </Worksheet>
-</Workbook>`;
-  const blob = new Blob([workbook], { type: "application/vnd.ms-excel;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `ktp-structure-${sessionId}.xls`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  worksheet["!cols"] = [{ wch: 72 }, { wch: 16 }, { wch: 48 }];
+  worksheet["!autofilter"] = { ref: `A1:C${Math.max(rows.length, 1)}` };
+
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Структура работ");
+  XLSX.writeFile(workbook, `ktp-structure-${sessionId}.xlsx`, { compression: true });
 }
 
 export default function KtpEstimateWizardPage() {
@@ -691,7 +599,7 @@ export default function KtpEstimateWizardPage() {
             justifyContent: "center",
           }}
         >
-          <ArrowUpIcon />
+          <ArrowUp size={16} strokeWidth={2.2} aria-hidden="true" />
         </button>
       </div>
     </div>
@@ -951,11 +859,11 @@ function Stage1({
                   alignItems: "center",
                   justifyContent: "center",
                 }}
-                onClick={() => downloadStructureExcel(wbs, sessionId)}
+                onClick={() => void downloadStructureExcel(wbs, sessionId)}
                 title="Экспортировать структуру в Excel"
                 aria-label="Экспортировать структуру в Excel"
               >
-                <ExportIcon />
+                <Download size={16} strokeWidth={2.2} aria-hidden="true" />
               </button>
               <button
                 style={btn("primary")}

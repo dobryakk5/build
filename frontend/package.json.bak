@@ -10,18 +10,15 @@
   },
   "dependencies": {
     "lucide-react": "^1.21.0",
-    "next": "^15.5.19",
+    "next": "15.5.16",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-dropzone": "^14.3.5",
-    "xlsx": "file:vendor/xlsx-0.20.3.tgz"
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "typescript": "^5.7.2"
-  },
-  "overrides": {
-    "postcss": "8.5.10"
   }
 }
