@@ -166,7 +166,8 @@ export default function UploadPage() {
   const answeredCount = Object.values(clarificationAnswers).filter((answers) => answers.length > 0).length;
   const questionsCount = currentClarification?.sections.reduce((sum, section) => sum + section.questions.length, 0) ?? 0;
   const allClarificationsAnswered = questionsCount > 0 && answeredCount === questionsCount;
-  const canUpload = estimateKind !== null && !!estimateTypeId && clarificationsConfirmed;
+  const hasRequiredSelection = estimateKind !== null && !!estimateTypeId && (!!projectVariantId || projectVariants.length === 0);
+  const canUpload = hasRequiredSelection;
   const wasAllClarificationsAnsweredRef = useRef(false);
   const clarificationStartedRef = useRef(false);
   const trackedJobTerminalStatusRef = useRef<string | null>(null);
@@ -332,7 +333,7 @@ export default function UploadPage() {
   }, [canUpload, complexMode, estimateKind, estimateTypeId, id, projectVariantId]);
 
   async function handleUpload() {
-    if (!file || !estimateKind || !estimateTypeId) return;
+    if (!file || !canUpload || !estimateKind || !estimateTypeId) return;
 
     setUploading(true);
     autoStartedKtpBatchRef.current = null;
@@ -591,7 +592,7 @@ export default function UploadPage() {
         <div>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>Загрузка сметы</h2>
           <div style={{ fontSize: 12, color: "var(--muted)", maxWidth: 620 }}>
-            Сначала выберите тип и подтип объекта, затем заполните уточнения. Форма загрузки файла появится после этого шага.
+            Выберите тип и подтип объекта. Уточняющие чекбоксы необязательны, а загрузка сметы доступна внизу сразу после выбора.
           </div>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -731,10 +732,10 @@ export default function UploadPage() {
 
         <div>
           <div style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
-            3. Уточните исходные данные
+            3. Уточните исходные данные, если нужно
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
-            Для каждого вопроса выберите один или несколько чекбоксов. После подтверждения появится загрузка файла.
+            Чекбоксы необязательны. Если отметить подходящие пункты, они помогут точнее разобрать смету.
           </div>
         </div>
       </div>
@@ -751,21 +752,19 @@ export default function UploadPage() {
             <button
               type="button"
               onClick={() => setClarificationsConfirmed(true)}
-              disabled={!allClarificationsAnswered}
               style={{
                 padding: "9px 14px",
-                background: allClarificationsAnswered ? "var(--blue-dark)" : "#94a3b8",
+                background: "var(--blue-dark)",
                 color: "#fff",
                 border: "none",
                 borderRadius: 6,
                 fontSize: 13,
                 fontWeight: 600,
-                cursor: allClarificationsAnswered ? "pointer" : "default",
-                opacity: allClarificationsAnswered ? 1 : 0.75,
+                cursor: "pointer",
                 whiteSpace: "nowrap",
               }}
             >
-              {allClarificationsAnswered ? "Перейти к загрузке" : "Ответьте на все вопросы"}
+              Свернуть уточнения
             </button>
           </div>
 
@@ -817,7 +816,7 @@ export default function UploadPage() {
       {currentClarification && selectedEstimateType && clarificationsConfirmed && !status && (
         <div style={{ marginBottom: 20, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,.25)", background: "rgba(34,197,94,.06)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
           <div style={{ fontSize: 12, color: "#166534" }}>
-            Уточнения заполнены: {answeredCount} из {questionsCount}. Теперь можно загрузить смету.
+            Уточнения отмечены: {answeredCount} из {questionsCount}. Загрузка сметы доступна внизу.
           </div>
           <button
             type="button"
@@ -869,7 +868,7 @@ export default function UploadPage() {
         ))}
       </div>
 
-      {!status && clarificationsConfirmed && !mappingPayload && !preview && (
+      {!status && !mappingPayload && !preview && (
         <div style={{ marginBottom: 16 }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: "pointer" }}>
             <input type="checkbox" checked={buildGantt} onChange={(e) => setBuildGantt(e.target.checked)} />
@@ -878,7 +877,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {!status && clarificationsConfirmed && !mappingPayload && !preview && (
+      {!status && !mappingPayload && !preview && (
         <div
           onClick={() => {
             if (canUpload) {
@@ -918,14 +917,14 @@ export default function UploadPage() {
           />
           <div style={{ fontSize: 36, marginBottom: 10 }}>{file ? "📊" : canUpload ? "⬆" : "🔒"}</div>
           <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
-            {file ? file.name : canUpload ? "Перетащите смету сюда" : "Сначала заполните уточнения"}
+            {file ? file.name : canUpload ? "Перетащите смету сюда" : "Выберите тип и подтип объекта"}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
             {file
               ? `${(file.size / 1024).toFixed(1)} KB · нажмите для замены`
               : canUpload
                 ? "Поддерживаются .xlsx, .xls, .pdf · ГрандСмета, CourtDoc, PDF-сметы"
-                : "После уточнений поле загрузки станет активным"}
+                : "После выбора объекта поле загрузки станет активным"}
           </div>
         </div>
       )}
@@ -964,7 +963,7 @@ export default function UploadPage() {
         />
       )}
 
-      {mappingPayload && estimateKind && estimateTypeId && projectVariantId && !status && (
+      {mappingPayload && estimateKind && estimateTypeId && !status && (
         <div style={{ marginTop: 18, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "0 16px" }}>
           <ColumnMapper
             payload={mappingPayload}
