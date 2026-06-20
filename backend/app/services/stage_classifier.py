@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from app.services.work_taxonomy_service import (
     PROMPT_VERSION,
     UNKNOWN_SUBTYPE_CODE,
+    ClassificationResult,
     classify_work,
     dictionary_version,
     normalize_text,
@@ -44,7 +46,8 @@ LEGACY_ROW_ROLE_MAP = {
     "documentation": "overhead",
 }
 
-INHERIT_ROLES = {"material", "mechanism", "labor", "logistics", "overhead", "unknown"}
+EARLY_INHERIT_ROLES = {"material", "mechanism", "labor", "logistics", "overhead"}
+CONDITIONAL_INHERIT_ROLES = {"unknown"}
 SERVICE_ROLES = {"total", "placeholder"}
 
 PARENT_STAGE_ROLES = {"selectable_group", "grouped_stage", "group_header"}
@@ -60,6 +63,187 @@ CAUTIOUS_STAGE_ROLES = {
     "commissioning",
     "optional_work",
 }
+
+_DEMOLITION_ACTION_TOKENS = {
+    "демонтаж", "демонтажные", "демонтировать", "демонтируем",
+    "демонтируется", "разборка", "разобрать", "снятие", "снять",
+    "удаление", "удалить",
+}
+
+_PREPARATION_ACTION_RE = re.compile(
+    r"\b(?:подметан\w*|обеспылив\w*|грунтов\w*|подготов\w*|"
+    r"выравнив\w*|очист\w*|ремонт\w*)\b",
+    re.IGNORECASE,
+)
+_ELECTRICAL_ACTION_RE = re.compile(
+    r"\b(?:подключ\w*|монтаж\w*|установ\w*|проклад\w*|затяж\w*|"
+    r"устройств\w*)\b",
+    re.IGNORECASE,
+)
+_CONSTRUCTIVE_OPENING_ACTION_RE = re.compile(
+    r"\b(?:усилен\w*|устройств\w*|монтаж\w*|установ\w*|закладн\w*|"
+    r"обрамлен\w*|оформлен\w*|откос\w*)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_any(text: str, terms: tuple[str, ...]) -> bool:
+    return any(term in text for term in terms)
+
+
+def _row_object_intents(text: str) -> set[str]:
+    """Return high-confidence object/action intents for stage tie-breaking.
+
+    The taxonomy still owns the semantic classification. These intents only
+    prevent generic words such as ``грунтовка`` or ``подключение`` from moving a
+    row to a stage whose physical object contradicts the row text.
+    """
+    normalized = normalize_text(text)
+    intents: set[str] = set()
+
+    has_floor = _has_any(normalized, ("пол", "пола", "полу", "напольн", "стяжк"))
+    has_wall = _has_any(normalized, ("стен", "перегород"))
+    has_ceiling = "потол" in normalized
+    has_opening = _has_any(normalized, ("двер", "окон", "проем", "проём", "люк"))
+
+    if has_floor:
+        if _has_any(normalized, ("наливн", "самовыравнив", "стяжк", "основани пола")):
+            intents.add("floor_base")
+        elif _has_any(
+            normalized,
+            ("линолеум", "ламинат", "ковролин", "паркет", "плитк", "керамогранит", "напольн покрыт"),
+        ):
+            intents.add("floor_finish")
+        elif _PREPARATION_ACTION_RE.search(normalized):
+            intents.add("floor_base")
+        else:
+            intents.add("floor")
+
+    if has_wall:
+        intents.add("wall")
+    if has_ceiling:
+        intents.add("ceiling")
+    if has_opening:
+        intents.add("opening")
+        if _CONSTRUCTIVE_OPENING_ACTION_RE.search(normalized) and not _has_demolition_action(normalized):
+            intents.add("constructive_opening")
+
+    electrical_objects = (
+        "светильник", "выключател", "розет", "подрозет", "кабел", "провод",
+        "гофр", "щит", "автомат", "узо", "шинопровод", "электроточ",
+    )
+    if _has_any(normalized, electrical_objects) and _ELECTRICAL_ACTION_RE.search(normalized):
+        intents.add("electrical_installation")
+
+    appliance_objects = (
+        "стиральн машин", "посудомоечн", "электроплит", "электрическ плит",
+        "водонагревател", "бойлер", "кухонн вытяж", "оборудован",
+    )
+    if _has_any(normalized, appliance_objects):
+        intents.add("equipment")
+
+    plumbing_objects = (
+        "водопровод", "труб ppr", "трубы ppr", "хвс", "гвс",
+        "канализац", "смесител", "раковин", "душев", "унитаз", "трап",
+    )
+    if _has_any(normalized, plumbing_objects) or ("кран" in normalized and "шаров" in normalized):
+        intents.add("plumbing_installation")
+
+    return intents
+
+
+def _stage_object_intents(stage: dict[str, Any]) -> set[str]:
+    title = normalize_text(stage.get("title"))
+    intents: set[str] = set()
+    if "демонтаж" in title:
+        intents.add("demolition")
+    if _has_any(title, ("стяж", "основани")) and _has_any(title, ("пол", "пола")):
+        intents.add("floor_base")
+    if _has_any(title, ("напольн покрыт", "плинтус", "порожк")):
+        intents.add("floor_finish")
+    if _has_any(title, ("стен", "перегород", "мокрых зон")):
+        intents.add("wall")
+    if "потол" in title:
+        intents.add("ceiling")
+    if _has_any(title, ("двер", "окон", "проем", "проём", "люк", "стеклян")):
+        intents.add("opening")
+    if "электромонтаж" in title:
+        intents.add("electrical_installation")
+    if "осветительн оборудован" in title:
+        intents.add("lighting_equipment")
+    if _has_any(title, ("мебел", "бытов", "технологическ оборудован")):
+        intents.add("equipment")
+    if _has_any(title, ("сантехническ", "водоснабжен", "канализац", "сантехнические работы")):
+        intents.add("plumbing_installation")
+    return intents
+
+
+def _object_priority_adjustment(stage: dict[str, Any], text: str) -> tuple[int, list[str]]:
+    row_intents = _row_object_intents(text)
+    if not row_intents:
+        return 0, []
+    stage_intents = _stage_object_intents(stage)
+    score = 0
+    reasons: list[str] = []
+
+    def add(value: int, reason: str) -> None:
+        nonlocal score
+        score += value
+        reasons.append(reason)
+
+    if "floor_base" in row_intents:
+        if "floor_base" in stage_intents:
+            add(14, "floor_base_object_match")
+        if "wall" in stage_intents:
+            add(-14, "floor_object_conflicts_with_wall_stage")
+        if "ceiling" in stage_intents:
+            add(-10, "floor_object_conflicts_with_ceiling_stage")
+    elif "floor_finish" in row_intents:
+        if "floor_finish" in stage_intents:
+            add(12, "floor_finish_object_match")
+        if "wall" in stage_intents or "ceiling" in stage_intents:
+            add(-10, "floor_finish_conflicts_with_non_floor_stage")
+
+    if "wall" in row_intents:
+        if "wall" in stage_intents:
+            add(8, "wall_object_match")
+        if "floor_base" in stage_intents or "floor_finish" in stage_intents or "ceiling" in stage_intents:
+            add(-8, "wall_object_conflict")
+
+    if "ceiling" in row_intents:
+        if "ceiling" in stage_intents:
+            add(10, "ceiling_object_match")
+        if "wall" in stage_intents or "floor_base" in stage_intents or "floor_finish" in stage_intents:
+            add(-8, "ceiling_object_conflict")
+
+    if "opening" in row_intents and "opening" in stage_intents:
+        add(12, "opening_object_match")
+    if "constructive_opening" in row_intents and "demolition" in stage_intents:
+        add(-20, "constructive_opening_conflicts_with_demolition")
+
+    if "electrical_installation" in row_intents:
+        if "electrical_installation" in stage_intents:
+            add(16, "electrical_installation_match")
+        elif "lighting_equipment" in stage_intents:
+            add(4, "lighting_equipment_secondary_match")
+        if "equipment" in stage_intents:
+            add(-14, "fixed_electrical_item_conflicts_with_equipment_stage")
+
+    if "equipment" in row_intents and "equipment" in stage_intents:
+        add(12, "equipment_object_match")
+
+    if "plumbing_installation" in row_intents:
+        if "plumbing_installation" in stage_intents:
+            add(14, "plumbing_installation_match")
+        if "equipment" in stage_intents and "equipment" not in row_intents:
+            add(-12, "plumbing_item_conflicts_with_equipment_stage")
+
+    return score, reasons
+
+
+def _has_demolition_action(text: str) -> bool:
+    return bool(set(normalize_text(text).split()) & _DEMOLITION_ACTION_TOKENS)
+
 
 OCCURRENCE_PATTERNS = [
     (re.compile(r"\b(\d+)\s*(этаж|эт\.?|этажа)\b", re.IGNORECASE), "{N} этаж"),
@@ -143,7 +327,15 @@ class StageMatch:
         normalized_role = normalize_row_role(row_role or self.normalized_row_role)
         stage_needs_review = bool(self.needs_review or (work_type.needs_review if work_type else False))
         review_reason = self.review_reason or (work_type.reason if work_type and work_type.needs_review else None)
-        return {
+        context_inherited = self.inherited_from_row_order is not None
+        inheritance_reason = None
+        if context_inherited:
+            inheritance_reason = (
+                "overhead_inherits_stage_only"
+                if normalized_role == "overhead"
+                else f"{normalized_role}_inherits_previous_context"
+            )
+        data = {
             "estimate_type_id": estimate_type_id,
             "estimate_type_number": estimate_type_number,
             "project_variant_id": project_variant_id,
@@ -178,7 +370,15 @@ class StageMatch:
             "prompt_version": PROMPT_VERSION,
             "work_section_code": section_id,
             "work_subtype_code": work_subtype_code,
+            "context_inherited": context_inherited,
+            "context_inheritance_reason": inheritance_reason,
+            "stage_classification_source": "context_inheritance" if context_inherited else "stage_classifier",
+            "work_type_applicable": normalized_role != "overhead",
         }
+        if context_inherited:
+            data["classification_source"] = "context_inheritance"
+            data["operator_review_required"] = False
+        return data
 
 
 def normalize_row_role(row_role: str | None) -> str:
@@ -211,6 +411,7 @@ class WorkTypeClassifier:
         stage: dict[str, Any],
         stage_match: StageMatch,
         estimate_profile_id: str | None = None,
+        global_result: ClassificationResult | None = None,
     ) -> WorkTypeMatch:
         text = normalize_text(row_text)
         tokens = text.split()
@@ -235,6 +436,9 @@ class WorkTypeClassifier:
 
         primary = stage.get("primary_work_type") if isinstance(stage.get("primary_work_type"), dict) else {}
         if primary:
+            explicit_stage_context = int(
+                stage_match.score_breakdown.get("explicit_stage_evidence_score") or 0
+            )
             candidates.append(
                 self._candidate_from_ref(
                     primary,
@@ -243,7 +447,7 @@ class WorkTypeClassifier:
                     tokens,
                     base_score=1,
                     title=stage.get("title"),
-                    stage_context_boost=2,
+                    stage_context_boost=6 if explicit_stage_context > 0 else 2,
                 )
             )
 
@@ -262,7 +466,10 @@ class WorkTypeClassifier:
                 )
             )
 
-        global_result = classify_work(row_text, row_role="work")
+        global_result = global_result or classify_work(row_text, row_role="work")
+        locked = self._locked_global_work_type(stage, stage_match, global_result)
+        if locked is not None:
+            return locked
         if global_result.subtype_code and global_result.subtype_code != UNKNOWN_SUBTYPE_CODE:
             section_id, subtype_id = self._split_subtype_code(global_result.subtype_code)
             score = max(0, min(int(global_result.score or 0), 7))
@@ -271,7 +478,7 @@ class WorkTypeClassifier:
                 {
                     "section_id": section_id,
                     "subtype_id": subtype_id,
-                    "source": "global_classifier",
+                    "source": global_result.source or "preclassified",
                     "score": score,
                     "matched_terms": global_result.matched_terms,
                     "stage_option_id": None,
@@ -287,10 +494,33 @@ class WorkTypeClassifier:
         for candidate in candidates:
             key = (str(candidate.get("section_id")), str(candidate.get("subtype_id")))
             previous = collapsed.get(key)
-            if previous is None or int(candidate.get("score") or 0) > int(previous.get("score") or 0):
+            if previous is None:
                 collapsed[key] = candidate
-            elif previous is not None:
+                continue
+
+            previous_score = int(previous.get("score") or 0)
+            candidate_score = int(candidate.get("score") or 0)
+            if candidate_score > previous_score:
+                candidate.setdefault("also_matched_sources", []).append(previous.get("source"))
+                if previous.get("source") == "stage_option":
+                    candidate["source"] = "stage_option"
+                    candidate["stage_option_id"] = previous.get("stage_option_id")
+                    candidate["stage_option_title"] = previous.get("stage_option_title")
+                    candidate.setdefault("matched_terms", {}).update(previous.get("matched_terms") or {})
+                collapsed[key] = candidate
+                previous = candidate
+            else:
                 previous.setdefault("also_matched_sources", []).append(candidate.get("source"))
+
+            # A grouped stage must retain its option identity even when a related
+            # or preclassified candidate for the same pair has a slightly higher
+            # textual score. The score stays the maximum; only the source/gate
+            # metadata is upgraded to stage_option.
+            if candidate.get("source") == "stage_option":
+                previous["source"] = "stage_option"
+                previous["stage_option_id"] = candidate.get("stage_option_id")
+                previous["stage_option_title"] = candidate.get("stage_option_title")
+                previous.setdefault("matched_terms", {}).update(candidate.get("matched_terms") or {})
         candidates = list(collapsed.values())
         candidates.sort(key=lambda item: int(item.get("score") or 0), reverse=True)
         top = candidates[0] if candidates else None
@@ -341,14 +571,115 @@ class WorkTypeClassifier:
             "reason": reason,
         }
         return WorkTypeMatch(
-            section_id=top.get("section_id") if top and not needs_review else None,
-            subtype_id=top.get("subtype_id") if top and not needs_review else None,
+            section_id=top.get("section_id") if top else None,
+            subtype_id=top.get("subtype_id") if top else None,
             confidence=confidence,
             needs_review=needs_review,
             reason=reason,
             source=top.get("source") if top else None,
-            stage_option=option if not needs_review else None,
+            stage_option=option,
             score_breakdown=score_json,
+        )
+
+    def _locked_global_work_type(
+        self,
+        stage: dict[str, Any],
+        stage_match: StageMatch,
+        global_result: ClassificationResult,
+    ) -> WorkTypeMatch | None:
+        """Keep an accepted subtype when the selected stage explicitly allows it.
+
+        Stage-context candidates may refine ambiguous results, but they must not
+        replace a confident subtype with another child of the same grouped stage.
+        This was the source of unstable results when a generic option title had a
+        slightly higher local score than the already accepted taxonomy result.
+        """
+        if (
+            not global_result
+            or global_result.needs_review
+            or global_result.subtype_code == UNKNOWN_SUBTYPE_CODE
+            or int(global_result.score or 0) < self.thresholds["auto_accept_min_score"]
+        ):
+            return None
+
+        section_id, subtype_id = self._split_subtype_code(global_result.subtype_code)
+        if not section_id or not subtype_id:
+            return None
+
+        matching_ref: dict[str, Any] | None = None
+        matching_source: str | None = None
+        primary = stage.get("primary_work_type") if isinstance(stage.get("primary_work_type"), dict) else {}
+        if str(primary.get("section_id") or "") == section_id and str(primary.get("subtype_id") or "") == subtype_id:
+            matching_ref = primary
+            matching_source = "primary_work_type"
+
+        if matching_ref is None:
+            for option in stage.get("stage_options") or []:
+                if not isinstance(option, dict):
+                    continue
+                if str(option.get("section_id") or "") == section_id and str(option.get("subtype_id") or "") == subtype_id:
+                    matching_ref = option
+                    matching_source = "stage_option"
+                    break
+
+        if matching_ref is None:
+            for related in stage.get("related_work_types") or []:
+                if not isinstance(related, dict):
+                    continue
+                if str(related.get("section_id") or "") == section_id and str(related.get("subtype_id") or "") == subtype_id:
+                    matching_ref = related
+                    matching_source = "related_work_type"
+                    break
+
+        if (
+            matching_source == "related_work_type"
+            and int(stage_match.score_breakdown.get("explicit_stage_evidence_score") or 0) > 0
+        ):
+            # A confident global type is supporting context only when the row
+            # explicitly identifies a more specific stage (for example PNR).
+            # Let stage-scoped candidates resolve the primary work type.
+            return None
+
+        if matching_ref is None:
+            return None
+
+        option = matching_ref if matching_source == "stage_option" else None
+        score = int(global_result.score or 0)
+        return WorkTypeMatch(
+            section_id=section_id,
+            subtype_id=subtype_id,
+            confidence=global_result.confidence or "high",
+            needs_review=False,
+            reason=None,
+            source="preclassified_locked",
+            stage_option=option,
+            score_breakdown={
+                "candidate_scores": [
+                    {
+                        "section_id": section_id,
+                        "subtype_id": subtype_id,
+                        "source": "preclassified_locked",
+                        "score": score,
+                        "original_source": global_result.source,
+                        "stage_reference_source": matching_source,
+                    }
+                ],
+                "winner": {
+                    "section_id": section_id,
+                    "subtype_id": subtype_id,
+                    "source": "preclassified_locked",
+                    "score": score,
+                },
+                "thresholds": self.thresholds,
+                "delta_top_1_top_2": score,
+                "stage_context": {
+                    "work_stage_number": stage.get("number"),
+                    "stage_options_mode": stage.get("stage_options_mode") or "none",
+                    "stage_role": str(stage.get("stage_role") or "work"),
+                },
+                "needs_review": False,
+                "reason": "confident_preclassified_subtype_preserved",
+            },
         )
 
     def _candidate_from_ref(
@@ -475,8 +806,6 @@ class WorkTypeClassifier:
             return f"stage_role_{stage_role}_requires_explicit_match"
         if stage_role in CAUTIOUS_STAGE_ROLES and int(winner.get("score") or 0) < self.thresholds["auto_accept_min_score"]:
             return f"stage_role_{stage_role}_requires_strong_match"
-        if stage_match.needs_review:
-            return "stage_match_requires_review"
         return None
 
     def _find_option(self, stage: dict[str, Any], option_id: Any, option_title: Any) -> dict[str, Any] | None:
@@ -520,6 +849,7 @@ class StageClassifier:
         *,
         estimate_profile_id: str | None = None,
         row_order: int | None = None,
+        global_result: ClassificationResult | None = None,
     ) -> StageMatch:
         text = normalize_text(row_text)
         normalized_role = normalize_row_role(row_role)
@@ -528,10 +858,67 @@ class StageClassifier:
         if normalized_role in SERVICE_ROLES:
             return self._unmatched(f"row_role_{normalized_role}_skipped", normalized_role, needs_review=False)
 
-        global_result = classify_work(row_text, row_role="work")
+        # Flat resource rows inherit before any taxonomy or stage scoring. This
+        # is the critical fast path for PDF material/labour estimates.
+        if normalized_role in EARLY_INHERIT_ROLES:
+            inherited = self._inherit_from_context(
+                allowed_stages,
+                normalized_role,
+                previous_context,
+                row_order=row_order,
+            )
+            if inherited is not None:
+                return inherited
+            return self._unmatched(
+                "resource_row_without_parent_context",
+                normalized_role,
+                needs_review=True,
+            )
+
+        if global_result is None:
+            global_result = classify_work(row_text, row_role="work")
+
+        # A weak unknown is not allowed to manufacture a new stage. It either
+        # inherits the nearest confident work or remains explicitly unmatched.
+        if normalized_role in CONDITIONAL_INHERIT_ROLES and (
+            global_result.needs_review
+            or global_result.subtype_code == UNKNOWN_SUBTYPE_CODE
+        ):
+            inherited = self._inherit_from_context(
+                allowed_stages,
+                normalized_role,
+                previous_context,
+                row_order=row_order,
+            )
+            if inherited is not None:
+                return inherited
+            return self._unmatched(
+                "unknown_row_without_confident_match_or_parent",
+                normalized_role,
+                needs_review=True,
+            )
+
         global_section, global_subtype = self.work_type_classifier._split_subtype_code(global_result.subtype_code)
+        primary_type_counts = Counter(
+            (
+                str((stage.get("primary_work_type") or {}).get("section_id") or ""),
+                str((stage.get("primary_work_type") or {}).get("subtype_id") or ""),
+            )
+            for stage in allowed_stages
+            if isinstance(stage.get("primary_work_type"), dict)
+            and (stage.get("primary_work_type") or {}).get("section_id")
+            and (stage.get("primary_work_type") or {}).get("subtype_id")
+        )
         scored = [
-            self._score_stage(stage, text, normalized_role, previous_context, global_section, global_subtype)
+            self._score_stage(
+                stage,
+                text,
+                normalized_role,
+                previous_context,
+                global_section,
+                global_subtype,
+                primary_type_counts,
+            )
             for stage in allowed_stages
         ]
         scored.sort(key=lambda item: item.score, reverse=True)
@@ -561,6 +948,15 @@ class StageClassifier:
         elif delta < self.thresholds["stage_min_delta_between_top_two"]:
             reason = "stage_candidates_ambiguous"
 
+        explicit_score = int(best.score_breakdown.get("explicit_stage_evidence_score") or 0)
+        primary_unique = bool(best.score_breakdown.get("primary_work_type_unique_in_variant"))
+        auto_accept_gate_passed = explicit_score > 0 or primary_unique
+        auto_accept_gate_reason = None
+        if not auto_accept_gate_passed:
+            needs_review = True
+            auto_accept_gate_reason = "shared_primary_work_type_without_explicit_stage_evidence"
+            reason = reason or auto_accept_gate_reason
+
         stage_role = str((best.stage or {}).get("stage_role") or "work")
         if stage_role in ALWAYS_REVIEW_STAGE_ROLES:
             needs_review = True
@@ -569,14 +965,6 @@ class StageClassifier:
         if weak_reason:
             needs_review = True
             reason = reason or weak_reason
-        if (
-            reason == "stage_candidates_ambiguous"
-            and best.matched_terms.get("primary_work_type")
-            and best.score >= self.thresholds["stage_auto_accept_min_score"]
-        ):
-            needs_review = False
-            reason = None
-
         confidence = "low" if needs_review else "high" if best.score >= 14 else "medium"
         occurrence_label = self._resolve_occurrence_label(best.stage, text, previous_context)
         preliminary = StageMatch(
@@ -590,7 +978,16 @@ class StageClassifier:
             None,
             reason,
             occurrence_label=occurrence_label,
-            score_breakdown=self._stage_score_json(scored, best, second_score, delta, reason, needs_review),
+            score_breakdown=self._stage_score_json(
+                scored,
+                best,
+                second_score,
+                delta,
+                reason,
+                needs_review,
+                auto_accept_gate_passed=auto_accept_gate_passed,
+                auto_accept_gate_reason=auto_accept_gate_reason,
+            ),
             normalized_row_role=normalized_role,
         )
         work_type = self.work_type_classifier.classify_row_with_stage_context(
@@ -598,6 +995,7 @@ class StageClassifier:
             best.stage or {},
             preliminary,
             estimate_profile_id=estimate_profile_id,
+            global_result=global_result,
         )
         option = work_type.stage_option or best.stage_option
         return StageMatch(
@@ -611,7 +1009,16 @@ class StageClassifier:
             None,
             reason or (work_type.reason if work_type.needs_review else None),
             occurrence_label=occurrence_label,
-            score_breakdown=self._stage_score_json(scored, best, second_score, delta, reason, needs_review),
+            score_breakdown=self._stage_score_json(
+                scored,
+                best,
+                second_score,
+                delta,
+                reason,
+                needs_review,
+                auto_accept_gate_passed=auto_accept_gate_passed,
+                auto_accept_gate_reason=auto_accept_gate_reason,
+            ),
             work_type_match=work_type,
             normalized_row_role=normalized_role,
         )
@@ -642,7 +1049,7 @@ class StageClassifier:
         best: StageMatch,
         delta: int,
     ) -> bool:
-        if row_role not in INHERIT_ROLES or not previous_context or not previous_context.get("work_stage_number"):
+        if row_role not in CONDITIONAL_INHERIT_ROLES or not previous_context or not previous_context.get("work_stage_number"):
             return False
         if best.score >= self.thresholds["stage_auto_accept_min_score"] and delta >= self.thresholds["stage_min_delta_between_top_two"]:
             return False
@@ -669,6 +1076,7 @@ class StageClassifier:
         }.get(row_role, StageMatchType.CONTEXT_INHERIT.value)
         score = int(self.sequential_policy.get("same_stage_context_boost", 4))
         occurrence_label = previous_context.get("stage_occurrence_label") or stage.get("occurrence_label")
+        reason = "overhead_inherits_stage_only" if row_role == "overhead" else f"{row_role}_inherits_previous_context"
         stage_json = {
             "candidate_scores": [
                 {
@@ -687,7 +1095,8 @@ class StageClassifier:
             "thresholds": self.thresholds,
             "delta_top_1_top_2": score,
             "needs_review": False,
-            "reason": f"{row_role}_inherits_previous_context",
+            "reason": reason,
+            "classify_work_called": False,
         }
         inherited = StageMatch(
             stage,
@@ -703,26 +1112,55 @@ class StageClassifier:
             parent_row_order=previous_context.get("row_order"),
             normalized_row_role=row_role,
         )
-        work_type = WorkTypeMatch(
-            section_id=None,
-            subtype_id=None,
-            confidence="low",
-            needs_review=False,
-            reason="context_inherited_without_subtype_autofill",
-            source="context_inheritance",
-            stage_option=option,
-            score_breakdown={
-                "candidate_scores": [],
-                "winner": None,
-                "thresholds": self.work_type_classifier.thresholds,
-                "delta_top_1_top_2": 0,
-                "needs_review": False,
-                "reason": "context_inherited_without_subtype_autofill",
-            },
-        )
-        return StageMatch(
-            **{**inherited.__dict__, "work_type_match": work_type}
-        )
+
+        if row_role == "overhead":
+            work_type = WorkTypeMatch(
+                section_id=None,
+                subtype_id=None,
+                confidence="low",
+                needs_review=False,
+                reason="overhead_stage_inherited_without_work_subtype",
+                source="context_inheritance",
+                stage_option=None,
+                score_breakdown={
+                    "candidate_scores": [],
+                    "winner": None,
+                    "thresholds": self.work_type_classifier.thresholds,
+                    "delta_top_1_top_2": 0,
+                    "needs_review": False,
+                    "reason": "work_type_not_applicable_for_overhead",
+                },
+            )
+        else:
+            section_id = previous_context.get("section_id") or previous_context.get("work_section_code")
+            subtype_id = previous_context.get("subtype_id")
+            subtype_code = previous_context.get("work_subtype_code") or previous_context.get("subtype_code")
+            if not subtype_id and subtype_code and "/" in str(subtype_code):
+                code_section, code_subtype = str(subtype_code).split("/", 1)
+                section_id = section_id or code_section
+                subtype_id = code_subtype
+            work_type = WorkTypeMatch(
+                section_id=str(section_id) if section_id else None,
+                subtype_id=str(subtype_id) if subtype_id else None,
+                confidence="high" if section_id and subtype_id else "low",
+                needs_review=False,
+                reason="work_type_inherited_from_parent",
+                source="context_inheritance",
+                stage_option=option,
+                score_breakdown={
+                    "candidate_scores": [],
+                    "winner": {
+                        "source": "parent_context",
+                        "parent_row_order": previous_context.get("row_order"),
+                        "work_subtype_code": subtype_code,
+                    },
+                    "thresholds": self.work_type_classifier.thresholds,
+                    "delta_top_1_top_2": 0,
+                    "needs_review": False,
+                    "reason": "work_type_inherited_from_parent",
+                },
+            )
+        return StageMatch(**{**inherited.__dict__, "work_type_match": work_type})
 
     def _score_stage(
         self,
@@ -732,6 +1170,7 @@ class StageClassifier:
         previous_context: dict[str, Any] | None,
         global_section: str | None,
         global_subtype: str | None,
+        primary_type_counts: Counter[tuple[str, str]],
     ) -> StageMatch:
         score = 0
         matched: dict[str, list[str]] = {}
@@ -762,6 +1201,38 @@ class StageClassifier:
             if match_type == StageMatchType.UNMATCHED.value:
                 match_type = StageMatchType.CANONICAL_TITLE_MATCH.value
 
+        detail_terms: list[str] = []
+        exact_detail_matches: list[str] = []
+        for detail_line in stage.get("detail_lines") or []:
+            normalized_detail = normalize_text(detail_line)
+            if not normalized_detail:
+                continue
+            if normalized_detail in text:
+                exact_detail_matches.append(str(detail_line))
+            detail_terms.extend(_important_terms(detail_line))
+        detail_matches = _match_terms(detail_terms, text, text.split())
+        if exact_detail_matches or detail_matches:
+            matched["detail_lines"] = list(dict.fromkeys([*exact_detail_matches, *detail_matches]))
+            detail_score = 40 if exact_detail_matches else min(14, len(detail_matches) * 4)
+            component_scores["detail_line_match"] = detail_score
+            score += detail_score
+            if match_type == StageMatchType.UNMATCHED.value:
+                match_type = StageMatchType.NEAR_STAGE_TITLE_MATCH.value
+
+        stage_is_demolition = "демонтаж" in title or "демонтаж" in normalize_text(canonical_title)
+        if stage_is_demolition and not _has_demolition_action(text):
+            component_scores["missing_demolition_action_penalty"] = -15
+            score -= 15
+        elif not stage_is_demolition and _has_demolition_action(text):
+            component_scores["demolition_action_mismatch_penalty"] = -6
+            score -= 6
+
+        object_priority_score, object_priority_reasons = _object_priority_adjustment(stage, text)
+        if object_priority_score:
+            component_scores["object_priority_score"] = object_priority_score
+            score += object_priority_score
+            matched["object_priority"] = object_priority_reasons
+
         occurrence_label = self._resolve_occurrence_label(stage, text, previous_context)
         if occurrence_label and _match_terms([occurrence_label], text, text.split()):
             matched["occurrence_label"] = [occurrence_label]
@@ -777,10 +1248,15 @@ class StageClassifier:
                 score -= 3
 
         primary = stage.get("primary_work_type") if isinstance(stage.get("primary_work_type"), dict) else {}
+        primary_key = (
+            str(primary.get("section_id") or ""),
+            str(primary.get("subtype_id") or ""),
+        )
+        primary_unique = bool(primary_key[0] and primary_key[1] and primary_type_counts[primary_key] == 1)
         if self._work_type_matches(primary, global_section, global_subtype):
             matched["primary_work_type"] = [_work_type_code(primary)]
-            component_scores["primary_work_type_match"] = 5
-            score += 5
+            component_scores["primary_work_type_match"] = 15
+            score += 15
             if match_type == StageMatchType.UNMATCHED.value:
                 match_type = StageMatchType.PRIMARY_WORK_TYPE_MATCH.value
 
@@ -818,13 +1294,44 @@ class StageClassifier:
 
         explicit_signal_score = score
         sequential_score = self._sequential_score(stage, previous_context)
-        if sequential_score < 0 and explicit_signal_score >= 8:
+        if explicit_signal_score >= self.thresholds["stage_auto_accept_min_score"]:
+            # Strong row/stage evidence must not be displaced by the previous row.
+            sequential_score = 0
+        elif sequential_score < 0 and explicit_signal_score >= 8:
             sequential_score = 0
         if sequential_score:
             component_scores["sequential_score"] = sequential_score
             score += sequential_score
             if match_type == StageMatchType.UNMATCHED.value and sequential_score > 0:
                 match_type = StageMatchType.SEQUENTIAL_CONTEXT_BOOST.value
+
+        explicit_component_names = {
+            "title_match",
+            "canonical_stage_match",
+            "detail_line_match",
+            "occurrence_label",
+            "stage_option_match",
+        }
+        explicit_score = sum(
+            max(0, int(value or 0))
+            for key, value in component_scores.items()
+            if key in explicit_component_names
+        )
+        # Object-priority evidence is explicit only when it distinguishes a
+        # physical object, not when it is a generic electrical compatibility
+        # signal shared by many stages.
+        object_reasons = matched.get("object_priority") or []
+        if object_priority_score > 0 and not set(object_reasons).issubset(
+            {"electrical_installation_match", "lighting_equipment_secondary_match"}
+        ):
+            explicit_score += object_priority_score
+        compatibility_score = int(component_scores.get("primary_work_type_match") or 0) + int(
+            component_scores.get("related_work_type_match") or 0
+        )
+        component_scores["explicit_stage_evidence_score"] = explicit_score
+        component_scores["work_type_compatibility_score"] = compatibility_score
+        component_scores["sequential_context_score"] = int(component_scores.get("sequential_score") or 0)
+        component_scores["primary_work_type_unique_in_variant"] = primary_unique
 
         return StageMatch(
             stage,
@@ -855,6 +1362,8 @@ class StageClassifier:
             return None
         if _has_explicit_phrase(matched.get("canonical_stage") or []):
             return None
+        if _has_explicit_phrase(matched.get("detail_lines") or []):
+            return None
         signal_terms = (
             len(matched.get("stage_option") or [])
             + len(matched.get("stage_title") or [])
@@ -876,6 +1385,9 @@ class StageClassifier:
         delta: int,
         reason: str | None,
         needs_review: bool,
+        *,
+        auto_accept_gate_passed: bool,
+        auto_accept_gate_reason: str | None,
     ) -> dict[str, Any]:
         return {
             "candidate_scores": [
@@ -898,6 +1410,20 @@ class StageClassifier:
                 "second_score": second_score,
                 "match_type": best.match_type,
             },
+            "explicit_stage_evidence_score": int(
+                best.score_breakdown.get("explicit_stage_evidence_score") or 0
+            ),
+            "work_type_compatibility_score": int(
+                best.score_breakdown.get("work_type_compatibility_score") or 0
+            ),
+            "sequential_context_score": int(
+                best.score_breakdown.get("sequential_context_score") or 0
+            ),
+            "primary_work_type_unique_in_variant": bool(
+                best.score_breakdown.get("primary_work_type_unique_in_variant")
+            ),
+            "auto_accept_gate_passed": auto_accept_gate_passed,
+            "auto_accept_gate_reason": auto_accept_gate_reason,
             "thresholds": self.thresholds,
             "delta_top_1_top_2": delta,
             "needs_review": needs_review,
@@ -948,7 +1474,11 @@ class StageClassifier:
             elif matches:
                 score += len(matches) * 5
             if self._work_type_matches(option, global_section, global_subtype):
-                score += 12
+                # Exact scoped subtype is decisive when the option title also
+                # matches the row. Without title/object evidence it is only a
+                # supporting signal, because generic subtypes such as electrical
+                # can legitimately appear in several stages.
+                score += 22 if matches else 10
                 matches.append(_work_type_code(option))
             if score > 0 and (best is None or score > best[1]):
                 best = (option, score, matches)

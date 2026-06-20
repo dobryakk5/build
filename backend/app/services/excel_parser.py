@@ -261,7 +261,31 @@ def is_subtotal_label(text: str | None) -> bool:
 
 
 def is_subtotal_row(row) -> bool:
-    return is_subtotal_label(getattr(row, "work_name", None))
+    """Detect subtotal/total rows without relying on one parser field only.
+
+    Most parsers put the label into ``work_name``. Manual mappings and some
+    source spreadsheets can leave it in a raw ``name``/``label`` field instead.
+    The section is considered only when the work name is empty, so a normal row
+    under a section whose title happens to contain «Итого» is not discarded.
+    """
+    work_name = getattr(row, "work_name", None)
+    if is_subtotal_label(work_name):
+        return True
+    if not str(work_name or "").strip() and is_subtotal_label(getattr(row, "section", None)):
+        return True
+
+    raw_data = getattr(row, "raw_data", None)
+    if not isinstance(raw_data, dict):
+        return False
+    label_keys = {
+        "work_name", "name", "label", "title", "description",
+        "наименование", "наименование работ", "позиция",
+    }
+    for key, value in raw_data.items():
+        normalized_key = re.sub(r"\s+", " ", str(key or "").strip().casefold())
+        if normalized_key in label_keys and is_subtotal_label(value):
+            return True
+    return False
 
 
 def subtotal_row_amount(row) -> Optional[float]:

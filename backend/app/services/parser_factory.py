@@ -11,6 +11,7 @@ from .foundation_parser import FoundationTableParser
 from .materials_labor_pdf_parser import MaterialsLaborPdfParser
 from .excel_typed_journal_parser import ExcelTypedJournalParser
 from .excel_sectioned_parser import ExcelSectionedCostSplitParser, detect as _detect_sectioned
+from .excel_work_material_matrix_parser import ExcelWorkMaterialMatrixParser
 from .excel_parser import ExcelEstimateParser
 
 # Supported format identifiers — PDF
@@ -29,8 +30,8 @@ _EXCEL_EXTENSIONS = (".xlsx", ".xls")
 # ── Parser profiles ───────────────────────────────────────────────────────────
 # The import format the operator explicitly selects (separate from estimate_kind,
 # which is the construction-object type). New behaviour activates ONLY for an
-# explicitly chosen profile — `auto` keeps the legacy detection so existing Excel
-# imports never change silently.
+# explicitly chosen profile. `auto` runs strict format detectors first and then
+# falls back to the legacy Excel/PDF detection.
 PROFILE_AUTO                       = "auto"
 PROFILE_EXCEL_WORK_LIST            = "excel_work_list"
 PROFILE_EXCEL_TYPED_JOURNAL        = "excel_typed_journal"
@@ -48,13 +49,16 @@ VALID_PARSER_PROFILES = {
 # Profiles with a real implementation right now.
 IMPLEMENTED_PROFILES = {
     PROFILE_AUTO, PROFILE_PDF_MATERIALS_LABOR, PROFILE_EXCEL_TYPED_JOURNAL,
-    PROFILE_EXCEL_SECTIONED_COST_SPLIT, PROFILE_MANUAL_MAPPING,
+    PROFILE_EXCEL_WORK_MATERIAL_MATRIX, PROFILE_EXCEL_SECTIONED_COST_SPLIT,
+    PROFILE_MANUAL_MAPPING,
 }
 # Profiles to show in the UI dropdown (only the ready ones), with labels.
 UI_PROFILES = [
     {"value": PROFILE_AUTO,                "label": "Автоопределение"},
     {"value": PROFILE_PDF_MATERIALS_LABOR, "label": "PDF: Материалы / Трудозатраты"},
     {"value": PROFILE_EXCEL_TYPED_JOURNAL, "label": "Excel: колонка «Тип»"},
+    {"value": PROFILE_EXCEL_WORK_MATERIAL_MATRIX,
+     "label": "Excel: работы с материалами по подномерам"},
     {"value": PROFILE_MANUAL_MAPPING,      "label": "Ручное сопоставление колонок"},
 ]
 
@@ -195,7 +199,7 @@ def parse_estimate(
     """
     Unified entry point: parse an estimate file (PDF or Excel) under a profile.
 
-    - ``auto`` keeps the legacy detection (existing Excel/PDF behaviour unchanged).
+    - ``auto`` runs strict profile detectors first, then the legacy detection.
     - An explicit profile forces its parser and never runs silently on the wrong
       file type / on other formats.
     - A known-but-unimplemented profile raises ``ParserProfileNotImplemented``
@@ -235,6 +239,22 @@ def parse_estimate(
         _tag_profile(rows, profile)
         return rows, meta
 
+    if profile == PROFILE_EXCEL_WORK_MATERIAL_MATRIX:
+        if not is_excel:
+            raise ValueError(
+                "Профиль «Excel: работы с материалами по подномерам» применим только к Excel"
+            )
+        try:
+            rows, meta = ExcelWorkMaterialMatrixParser().parse(path)
+        except (ValueError, OSError):
+            if allow_fallback:
+                return parse_estimate(path, parser_profile=PROFILE_AUTO, allow_fallback=False)
+            raise
+        meta["format"] = FORMAT_EXCEL
+        meta["parser_profile"] = profile
+        _tag_profile(rows, profile)
+        return rows, meta
+
     if profile == PROFILE_EXCEL_SECTIONED_COST_SPLIT:
         if not is_excel:
             raise ValueError("Профиль «Excel: блоки РАБОТЫ/МАТЕРИАЛЫ/НАКЛАДНЫЕ» применим только к Excel")
@@ -247,14 +267,23 @@ def parse_estimate(
     # ── auto / manual_mapping → legacy detection ───────────────────────────────
     if is_excel:
         # Operators don't pick a profile — detect the Excel layout here.
-        # 1) blocks РАБОТЫ/МАТЕРИАЛЫ/НАКЛАДНЫЕ + cost-split header.
+        # 1) structural N / N.M matrix with separate work/material costs.
+        matrix_parser = ExcelWorkMaterialMatrixParser()
+        matrix_detection = matrix_parser.detect(path)
+        if matrix_detection.get("confidence", 0.0) >= 0.95:
+            rows, meta = matrix_parser.parse(path)
+            meta["format"] = FORMAT_EXCEL
+            meta["parser_profile"] = PROFILE_EXCEL_WORK_MATERIAL_MATRIX
+            _tag_profile(rows, PROFILE_EXCEL_WORK_MATERIAL_MATRIX)
+            return rows, meta
+        # 2) blocks РАБОТЫ/МАТЕРИАЛЫ/НАКЛАДНЫЕ + cost-split header.
         if _detect_sectioned(path):
             rows, meta = ExcelSectionedCostSplitParser().parse(path)
             meta["format"] = FORMAT_EXCEL
             meta["parser_profile"] = PROFILE_EXCEL_SECTIONED_COST_SPLIT
             _tag_profile(rows, PROFILE_EXCEL_SECTIONED_COST_SPLIT)
             return rows, meta
-        # 2) explicit «Тип» column journal.
+        # 3) explicit «Тип» column journal.
         if _excel_is_typed_journal(path):
             rows, meta = ExcelTypedJournalParser().parse(path)
             meta["format"] = FORMAT_EXCEL
