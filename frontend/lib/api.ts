@@ -65,6 +65,8 @@ const AUTH_REFRESH_SKIP = new Set([
   "/auth/verify-email",
 ]);
 
+let refreshPromise: Promise<boolean> | null = null;
+
 export class ApiError extends Error {
   status: number;
 
@@ -129,14 +131,18 @@ export async function requestQuiet<T>(path: string, options: RequestInit = {}, r
 }
 
 async function tryRefresh(): Promise<boolean> {
-  try {
-    const res = await fetch(`${BASE}/auth/refresh`, {
+  if (!refreshPromise) {
+    refreshPromise = fetch(`${BASE}/auth/refresh`, {
       method: "POST",
       credentials: "include",
-    });
-    if (!res.ok) return false;
-    return true;
-  } catch { return false; }
+    })
+      .then((res) => res.ok)
+      .catch(() => false)
+      .finally(() => {
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
 }
 
 export const auth = {

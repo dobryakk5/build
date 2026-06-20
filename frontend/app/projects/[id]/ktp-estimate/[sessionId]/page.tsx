@@ -106,10 +106,159 @@ function Chevron({ open }: { open: boolean }) {
   );
 }
 
+function ExportIcon() {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 15,
+        height: 15,
+        display: "inline-block",
+        position: "relative",
+        boxSizing: "border-box",
+        border: "1.8px solid currentColor",
+        borderTop: 0,
+        borderRadius: "0 0 3px 3px",
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          left: 6,
+          top: -4,
+          width: 1.8,
+          height: 10,
+          background: "currentColor",
+          borderRadius: 2,
+        }}
+      />
+      <span
+        style={{
+          position: "absolute",
+          left: 3.5,
+          top: 3,
+          width: 7,
+          height: 7,
+          borderRight: "1.8px solid currentColor",
+          borderBottom: "1.8px solid currentColor",
+          transform: "rotate(45deg)",
+        }}
+      />
+    </span>
+  );
+}
+
+function ArrowUpIcon() {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 13,
+        height: 13,
+        display: "inline-block",
+        borderLeft: "2px solid currentColor",
+        borderTop: "2px solid currentColor",
+        transform: "rotate(45deg)",
+        marginTop: 4,
+      }}
+    />
+  );
+}
+
+function xmlEscape(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function confidenceLabel(value: string | number | null | undefined) {
+  if (value == null || value === "") return "";
+  if (typeof value === "number") return `${Math.round(value)}%`;
+  const labels: Record<string, string> = {
+    high: "высокая",
+    medium: "средняя",
+    low: "низкая",
+    manual: "ручная",
+  };
+  return labels[value] ?? value;
+}
+
+function determinedTypeLabel(item: KtpWbsItem) {
+  return (
+    item.work_subtype_name ||
+    item.work_subtype_code ||
+    item.work_section_name ||
+    item.work_section_code ||
+    ""
+  );
+}
+
+function buildStructureExportRows(wbs: KtpWbs) {
+  return wbs.groups.flatMap((group) => {
+    const groupRow = {
+      name: group.title,
+      confidence: confidenceLabel(group.work_type_confidence),
+      type: group.wt_name || group.work_section_name || group.wt_code || group.work_section_code || "",
+    };
+    const itemRows = group.items
+      .filter((item) => item.review_status !== "rejected")
+      .map((item) => ({
+        name: `  ${item.name}`,
+        confidence: confidenceLabel(item.stage_confidence_percent ?? item.work_type_confidence),
+        type: determinedTypeLabel(item),
+      }));
+    return [groupRow, ...itemRows];
+  });
+}
+
+function downloadStructureExcel(wbs: KtpWbs, sessionId: string) {
+  const rows = [
+    ["Наименование", "Уверенность", "Определенный тип"],
+    ...buildStructureExportRows(wbs).map((row) => [row.name, row.confidence, row.type]),
+  ];
+  const xmlRows = rows
+    .map(
+      (row) =>
+        `<Row>${row
+          .map((cell) => `<Cell><Data ss:Type="String">${xmlEscape(cell)}</Data></Cell>`)
+          .join("")}</Row>`,
+    )
+    .join("");
+  const workbook = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:html="http://www.w3.org/TR/REC-html40">
+ <Worksheet ss:Name="Структура работ">
+  <Table>
+   <Column ss:Width="420"/>
+   <Column ss:Width="120"/>
+   <Column ss:Width="260"/>
+   ${xmlRows}
+  </Table>
+ </Worksheet>
+</Workbook>`;
+  const blob = new Blob([workbook], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `ktp-structure-${sessionId}.xls`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export default function KtpEstimateWizardPage() {
   const { id: projectId, sessionId } = useParams<{ id: string; sessionId: string }>();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const pageScrollRef = useRef<HTMLDivElement | null>(null);
 
   const [wbs, setWbs] = useState<KtpWbs | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -391,8 +540,15 @@ export default function KtpEstimateWizardPage() {
     );
   }
 
+  const scrollToTop = () => {
+    pageScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
   return (
-    <div style={{ height: "100%", overflow: "auto", padding: 24, maxWidth: 1080, margin: "0 auto", boxSizing: "border-box" }}>
+    <div
+      ref={pageScrollRef}
+      style={{ height: "100%", overflow: "auto", padding: 24, maxWidth: 1080, margin: "0 auto", boxSizing: "border-box" }}
+    >
       <Steps
         current={stepIndex}
         maxAvailable={actualStepIndex}
@@ -518,6 +674,26 @@ export default function KtpEstimateWizardPage() {
           }}
         />
       )}
+
+      <div style={{ display: "flex", justifyContent: "center", marginTop: 22, paddingBottom: 8 }}>
+        <button
+          type="button"
+          onClick={scrollToTop}
+          aria-label="Вернуться наверх"
+          title="Вернуться наверх"
+          style={{
+            ...buttonStyle("ghost"),
+            width: 34,
+            height: 34,
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <ArrowUpIcon />
+        </button>
+      </div>
     </div>
   );
 }
@@ -763,20 +939,39 @@ function Stage1({
               Вернуться к производительности
             </button>
           ) : (
-            <button
-              style={btn("primary")}
-              disabled={busy || pendingAi > 0 || pendingReview > 0}
-              onClick={onApprove}
-              title={
-                pendingAi > 0
-                  ? `Проверьте ${pendingAi} добавленных ИИ работ`
-                  : pendingReview > 0
-                  ? `Подтвердите ${pendingReview} строк с низкой уверенностью`
-                  : ""
-              }
-            >
-              Утвердить структуру →
-            </button>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                type="button"
+                style={{
+                  ...btn(),
+                  width: 34,
+                  height: 34,
+                  padding: 0,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+                onClick={() => downloadStructureExcel(wbs, sessionId)}
+                title="Экспортировать структуру в Excel"
+                aria-label="Экспортировать структуру в Excel"
+              >
+                <ExportIcon />
+              </button>
+              <button
+                style={btn("primary")}
+                disabled={busy || pendingAi > 0 || pendingReview > 0}
+                onClick={onApprove}
+                title={
+                  pendingAi > 0
+                    ? `Проверьте ${pendingAi} добавленных ИИ работ`
+                    : pendingReview > 0
+                    ? `Подтвердите ${pendingReview} строк с низкой уверенностью`
+                    : ""
+                }
+              >
+                Утвердить структуру →
+              </button>
+            </div>
           )
         }
       />
