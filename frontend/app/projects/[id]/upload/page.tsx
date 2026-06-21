@@ -1088,6 +1088,14 @@ function emptyAddedRow(): PreviewAddedRow {
   return { section: "", name: "", item_type: "work", unit: "", quantity: null, total_price: null };
 }
 
+function sourceParentLines(row: Pick<PreviewRow, "section" | "section_title" | "section_description" | "source_parent">) {
+  const title = (row.source_parent?.title ?? row.section_title ?? "").trim();
+  const description = (row.source_parent?.description ?? row.section_description ?? "").trim();
+  const fallback = (row.section ?? "").trim();
+  const lines = [title, description].filter((value, index, arr) => value && arr.indexOf(value) === index);
+  return lines.length ? lines : fallback ? [fallback] : [];
+}
+
 function EditablePreviewPanel({
   preview,
   confirming,
@@ -1240,7 +1248,14 @@ function EditablePreviewPanel({
                       </select>
                     </td>
                     <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.section ?? "—"}</td>
-                    <td style={{ padding: "6px 8px" }}>{r.name}</td>
+                    <td style={{ padding: "6px 8px" }}>
+                      <div>{r.name}</div>
+                      {sourceParentLines(r).map((line) => (
+                        <div key={line} style={{ marginTop: 2, color: "var(--muted)", fontSize: 11, lineHeight: 1.35 }}>
+                          ↳ {line}
+                        </div>
+                      ))}
+                    </td>
                     <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.unit ?? "—"}</td>
                     <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.quantity ?? "—"}</td>
                     <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.total_price != null ? fmtMoney(r.total_price) : "—"}</td>

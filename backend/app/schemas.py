@@ -1,7 +1,7 @@
 # backend/app/schemas/__init__.py
 
 # ── Общие ─────────────────────────────────────────────────────────────────────
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, computed_field, field_validator
 from datetime import date, datetime
 from typing import Any, Generic, TypeVar
 from uuid import UUID
@@ -235,11 +235,47 @@ class EstimateRow(BaseModel):
     req_hidden_work_act: bool = False
     req_intermediate_act: bool = False
     req_ks2_ks3: bool = False
+    raw_data: dict | None = Field(default=None, exclude=True)
 
     @field_validator("materials", mode="before")
     @classmethod
     def _normalize_materials(cls, value):
         return [] if value is None else value
+
+    def _raw(self) -> dict:
+        return self.raw_data if isinstance(self.raw_data, dict) else {}
+
+    @computed_field
+    @property
+    def section_block_id(self) -> str | None:
+        return self._raw().get("section_block_id")
+
+    @computed_field
+    @property
+    def section_title(self) -> str | None:
+        return self._raw().get("section_title")
+
+    @computed_field
+    @property
+    def section_description(self) -> str | None:
+        return self._raw().get("section_description")
+
+    @computed_field
+    @property
+    def section_parent_context(self) -> str | None:
+        return self._raw().get("section_parent_context")
+
+    @computed_field
+    @property
+    def source_parent(self) -> dict | None:
+        raw = self._raw()
+        if not any(raw.get(key) for key in ("section_block_id", "section_title", "section_description")):
+            return None
+        return {
+            "block_id": raw.get("section_block_id"),
+            "title": raw.get("section_title"),
+            "description": raw.get("section_description"),
+        }
 
 class EstimateSummary(BaseModel):
     total:    float

@@ -228,6 +228,14 @@ function countSelectedActs(row: EstimateRow) {
   return [row.req_hidden_work_act, row.req_intermediate_act, row.req_ks2_ks3].filter(Boolean).length;
 }
 
+function sourceParentLines(row: EstimateRow) {
+  const title = (row.source_parent?.title ?? row.section_title ?? "").trim();
+  const description = (row.source_parent?.description ?? row.section_description ?? "").trim();
+  const fallback = (row.section ?? "").trim();
+  const lines = [title, description].filter((value, index, arr) => value && arr.indexOf(value) === index);
+  return lines.length ? lines : fallback ? [fallback] : [];
+}
+
 function FerIgnoreBadge({
   ignored,
   effectiveIgnored,
@@ -2565,7 +2573,14 @@ export default function EstimatePage() {
                   </tr>,
                   ...sectionRows.map((row, index) => (
                     <tr key={row.id} style={{ background: index % 2 ? "var(--stripe)" : "" }}>
-                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", width: "1%", whiteSpace: "nowrap" }}>{row.work_name}</td>
+                      <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", width: "1%", whiteSpace: "nowrap" }}>
+                        <div>{row.work_name}</div>
+                        {sourceParentLines(row).map((line) => (
+                          <div key={line} style={{ marginTop: 2, color: "var(--muted)", fontSize: 11, lineHeight: 1.35, maxWidth: 420, whiteSpace: "normal" }}>
+                            ↳ {line}
+                          </div>
+                        ))}
+                      </td>
                       <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", color: "var(--muted)", fontFamily: "var(--mono)" }}>{row.unit}</td>
                       <td style={{ padding: "8px 12px", borderBottom: "1px solid var(--border)", textAlign: "right", fontFamily: "var(--mono)", width: ESTIMATE_COLUMN_WIDTHS["Кол-во"], minWidth: ESTIMATE_COLUMN_WIDTHS["Кол-во"] }}>
                         {fmtQuantity(row.quantity)}

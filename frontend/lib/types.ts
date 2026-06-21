@@ -73,10 +73,21 @@ export type ParserProfile =
 
 export type EstimateItemType = "work" | "material" | "mechanism" | "overhead" | "unknown";
 
+export interface EstimateSourceParent {
+  block_id?: string | null;
+  title?: string | null;
+  description?: string | null;
+}
+
 export interface PreviewRow {
   index?: number | null;
   row_order: number | null;
   section: string | null;
+  section_block_id?: string | null;
+  section_title?: string | null;
+  section_description?: string | null;
+  section_parent_context?: string | null;
+  source_parent?: EstimateSourceParent | null;
   item_type: EstimateItemType;
   name: string;
   spec?: string | null;
@@ -220,6 +231,11 @@ export interface EstimateRow {
   estimate_batch_id?: string | null;
   item_type?: "work" | "mechanism";
   section?: string | null;
+  section_block_id?: string | null;
+  section_title?: string | null;
+  section_description?: string | null;
+  section_parent_context?: string | null;
+  source_parent?: EstimateSourceParent | null;
   work_name: string;
   unit?: string | null;
   quantity?: number | null;
