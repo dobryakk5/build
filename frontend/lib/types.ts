@@ -875,6 +875,11 @@ export interface KtpWbsItem {
   work_type_needs_review: boolean;
   work_type_candidates: Array<Record<string, unknown>>;
   work_type_source?: string | null;
+  section_block_id?: string | null;
+  section_title?: string | null;
+  section_description?: string | null;
+  section_parent_context?: string | null;
+  source_parent?: EstimateSourceParent | null;
   stage_needs_review: boolean;
   stage_review_reason?: string | null;
   stage_confidence_percent?: number | null;

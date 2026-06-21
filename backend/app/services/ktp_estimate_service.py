@@ -498,12 +498,20 @@ async def _attach_stage_review_metadata(db: AsyncSession, groups: list[KtpWbsGro
                 setattr(item, "_stage_needs_review", False)
                 setattr(item, "_stage_review_reason", None)
                 setattr(item, "_stage_confidence_percent", None)
+                setattr(item, "_section_block_id", None)
+                setattr(item, "_section_title", None)
+                setattr(item, "_section_description", None)
+                setattr(item, "_section_parent_context", None)
                 continue
             raw = est.raw_data if isinstance(est.raw_data, dict) else {}
             needs_review, reason, percent = _estimate_stage_review_info(est, raw)
             setattr(item, "_stage_needs_review", needs_review)
             setattr(item, "_stage_review_reason", reason)
             setattr(item, "_stage_confidence_percent", percent)
+            setattr(item, "_section_block_id", raw.get("section_block_id"))
+            setattr(item, "_section_title", raw.get("section_title"))
+            setattr(item, "_section_description", raw.get("section_description"))
+            setattr(item, "_section_parent_context", raw.get("section_parent_context"))
             if needs_review and not item.manual_override:
                 item.operator_review_required = True
 

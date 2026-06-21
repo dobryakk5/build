@@ -1224,7 +1224,7 @@ function EditablePreviewPanel({
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ background: "rgba(148,163,184,.08)" }}>
-              {["Тип", "Раздел", "Наименование", "Ед.", "Кол-во", "Сумма"].map((h) => (
+              {["Тип", "Наименование", "Раздел", "Ед.", "Кол-во", "Сумма"].map((h) => (
                 <th key={h} style={{ textAlign: "left", padding: "6px 8px", fontWeight: 600, color: "var(--muted)" }}>{h}</th>
               ))}
             </tr>
@@ -1247,14 +1247,16 @@ function EditablePreviewPanel({
                         ))}
                       </select>
                     </td>
-                    <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.section ?? "—"}</td>
                     <td style={{ padding: "6px 8px" }}>
-                      <div>{r.name}</div>
+                      {r.name}
+                    </td>
+                    <td style={{ padding: "6px 8px", color: "var(--muted)" }}>
                       {sourceParentLines(r).map((line) => (
                         <div key={line} style={{ marginTop: 2, color: "var(--muted)", fontSize: 11, lineHeight: 1.35 }}>
                           ↳ {line}
                         </div>
                       ))}
+                      {sourceParentLines(r).length === 0 ? "—" : null}
                     </td>
                     <td style={{ padding: "6px 8px", color: "var(--muted)" }}>{r.unit ?? "—"}</td>
                     <td style={{ padding: "6px 8px", fontFamily: "var(--mono)" }}>{r.quantity ?? "—"}</td>
@@ -1263,8 +1265,8 @@ function EditablePreviewPanel({
                   {(r.materials ?? []).map((m, j) => (
                     <tr key={`m${r.index}-${j}`} style={{ borderTop: "1px dashed var(--border)", background: "rgba(22,163,74,.04)" }}>
                       <td style={{ padding: "4px 8px", color: ITEM_TYPE_COLORS.material, fontSize: 11 }}>└ материал</td>
-                      <td style={{ padding: "4px 8px" }} />
                       <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.name}</td>
+                      <td style={{ padding: "4px 8px" }} />
                       <td style={{ padding: "4px 8px", color: "var(--muted)" }}>{m.unit ?? "—"}</td>
                       <td style={{ padding: "4px 8px", fontFamily: "var(--mono)" }}>{m.quantity ?? "—"}</td>
                       <td style={{ padding: "4px 8px", fontFamily: "var(--mono)" }}>{m.total_price != null ? fmtMoney(m.total_price) : "—"}</td>
@@ -1289,12 +1291,12 @@ function EditablePreviewPanel({
                   </select>
                 </td>
                 <td style={{ padding: "4px 8px" }}>
-                  <input value={a.section ?? ""} onChange={(e) => updateAdded(i, { section: e.target.value })} placeholder="раздел"
-                    style={{ width: 90, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4 }} />
-                </td>
-                <td style={{ padding: "4px 8px" }}>
                   <input value={a.name} onChange={(e) => updateAdded(i, { name: e.target.value })} placeholder="наименование"
                     style={{ width: "100%", minWidth: 160, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4 }} />
+                </td>
+                <td style={{ padding: "4px 8px" }}>
+                  <input value={a.section ?? ""} onChange={(e) => updateAdded(i, { section: e.target.value })} placeholder="раздел"
+                    style={{ width: 140, fontSize: 12, padding: "3px 6px", border: "1px solid var(--border2)", borderRadius: 4 }} />
                 </td>
                 <td style={{ padding: "4px 8px" }}>
                   <input value={a.unit ?? ""} onChange={(e) => updateAdded(i, { unit: e.target.value })} placeholder="ед."

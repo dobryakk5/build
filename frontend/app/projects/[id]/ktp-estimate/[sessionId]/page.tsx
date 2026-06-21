@@ -134,6 +134,12 @@ function determinedTypeLabel(item: KtpWbsItem) {
   );
 }
 
+function sourceParentLines(item: KtpWbsItem) {
+  const title = (item.source_parent?.title ?? item.section_title ?? "").trim();
+  const description = (item.source_parent?.description ?? item.section_description ?? "").trim();
+  return [title, description].filter((value, index, arr) => value && arr.indexOf(value) === index);
+}
+
 function buildStructureExportRows(wbs: KtpWbs) {
   return wbs.groups.flatMap((group) => {
     const groupRow = {
@@ -145,10 +151,11 @@ function buildStructureExportRows(wbs: KtpWbs) {
       .filter((item) => item.review_status !== "rejected")
       .map((item) => ({
         name: `  ${item.name}`,
+        section: sourceParentLines(item).join(" / "),
         confidence: confidenceLabel(item.stage_confidence_percent ?? item.work_type_confidence),
         type: determinedTypeLabel(item),
       }));
-    return [groupRow, ...itemRows];
+    return [{ ...groupRow, section: "" }, ...itemRows];
   });
 }
 
@@ -175,12 +182,12 @@ function ensureItemVisible(wbs: KtpWbs, groupId: string, item: KtpWbsItem, previ
 async function downloadStructureExcel(wbs: KtpWbs, sessionId: string) {
   const XLSX = await import("xlsx");
   const rows = [
-    ["Наименование", "Уверенность", "Определенный тип"],
-    ...buildStructureExportRows(wbs).map((row) => [row.name, row.confidence, row.type]),
+    ["Наименование", "Раздел", "Уверенность", "Определенный тип"],
+    ...buildStructureExportRows(wbs).map((row) => [row.name, row.section, row.confidence, row.type]),
   ];
   const worksheet = XLSX.utils.aoa_to_sheet(rows);
-  worksheet["!cols"] = [{ wch: 72 }, { wch: 16 }, { wch: 48 }];
-  worksheet["!autofilter"] = { ref: `A1:C${Math.max(rows.length, 1)}` };
+  worksheet["!cols"] = [{ wch: 56 }, { wch: 72 }, { wch: 16 }, { wch: 48 }];
+  worksheet["!autofilter"] = { ref: `A1:D${Math.max(rows.length, 1)}` };
 
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, "Структура работ");
@@ -1028,6 +1035,7 @@ function Stage1Group({
         const pendingAi = it.origin === "ai_added" && it.review_status === "pending";
         const needsReview = it.stage_needs_review || it.operator_review_required || it.work_type_needs_review;
         const reviewReason = it.stage_review_reason || (it.work_type_needs_review ? "Нужно проверить тип работ" : null);
+        const sectionLines = sourceParentLines(it);
         return (
           <div
             key={it.id}
@@ -1042,7 +1050,28 @@ function Stage1Group({
               opacity: rejected ? 0.5 : 1,
             }}
           >
-            <span style={{ flex: 1, fontSize: 13 }}>{it.name}</span>
+            <span style={{ flex: "1 1 260px", minWidth: 220, fontSize: 13 }}>{it.name}</span>
+            <div
+              title={sectionLines.join("\n")}
+              style={{
+                flex: "0 1 340px",
+                minWidth: 190,
+                color: "var(--muted)",
+                fontSize: 11,
+                lineHeight: 1.35,
+              }}
+            >
+              {sectionLines.length ? (
+                sectionLines.map((line, index) => (
+                  <div key={line}>
+                    {index === 0 ? "Раздел: " : "Подраздел: "}
+                    {line}
+                  </div>
+                ))
+              ) : (
+                <span>Раздел: —</span>
+              )}
+            </div>
             {needsReview && (
               <span
                 title={reviewReason || "Требуется проверка"}

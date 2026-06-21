@@ -82,6 +82,11 @@ class ItemOut(BaseModel):
     work_type_needs_review: bool = False
     work_type_candidates: list[dict] = Field(default_factory=list)
     work_type_source: str | None = None
+    section_block_id: str | None = None
+    section_title: str | None = None
+    section_description: str | None = None
+    section_parent_context: str | None = None
+    source_parent: dict | None = None
     stage_needs_review: bool = False
     stage_review_reason: str | None = None
     stage_confidence_percent: int | None = None
@@ -92,6 +97,18 @@ class ItemOut(BaseModel):
 
     @classmethod
     def of(cls, it: KtpWbsItem) -> "ItemOut":
+        section_block_id = getattr(it, "_section_block_id", None)
+        section_title = getattr(it, "_section_title", None)
+        section_description = getattr(it, "_section_description", None)
+        source_parent = (
+            {
+                "block_id": section_block_id,
+                "title": section_title,
+                "description": section_description,
+            }
+            if any((section_block_id, section_title, section_description))
+            else None
+        )
         fer_match_label = None
         if it.fer_match_candidates:
             for candidate in it.fer_match_candidates:
@@ -135,6 +152,11 @@ class ItemOut(BaseModel):
             work_type_needs_review=bool(it.work_type_needs_review),
             work_type_candidates=it.work_type_candidates or [],
             work_type_source=it.work_type_source,
+            section_block_id=section_block_id,
+            section_title=section_title,
+            section_description=section_description,
+            section_parent_context=getattr(it, "_section_parent_context", None),
+            source_parent=source_parent,
             stage_needs_review=bool(getattr(it, "_stage_needs_review", False)),
             stage_review_reason=getattr(it, "_stage_review_reason", None),
             stage_confidence_percent=getattr(it, "_stage_confidence_percent", None),
