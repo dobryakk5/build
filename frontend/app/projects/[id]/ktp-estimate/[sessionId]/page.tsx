@@ -24,6 +24,11 @@ const ORIGIN_BADGE: Record<KtpWbsItem["origin"], { label: string; color: string 
   manual: { label: "вручную", color: "#2563eb" },
 };
 
+function itemSourceBadge(item: KtpWbsItem) {
+  if (item.work_type_source === "manual") return ORIGIN_BADGE.manual;
+  return ORIGIN_BADGE[item.origin];
+}
+
 const card = {
   border: "1px solid var(--border)",
   borderRadius: 8,
@@ -145,6 +150,26 @@ function buildStructureExportRows(wbs: KtpWbs) {
       }));
     return [groupRow, ...itemRows];
   });
+}
+
+function wbsHasItem(wbs: KtpWbs, groupId: string, item: KtpWbsItem, previousMatchingCount = 0) {
+  const group = wbs.groups.find((entry) => entry.id === groupId);
+  if (!group) return false;
+  if (group.items.some((entry) => entry.id === item.id)) return true;
+  const matchingCount = group.items.filter(
+    (entry) => entry.origin === "manual" && entry.name === item.name,
+  ).length;
+  return matchingCount > previousMatchingCount;
+}
+
+function ensureItemVisible(wbs: KtpWbs, groupId: string, item: KtpWbsItem, previousMatchingCount = 0) {
+  if (wbsHasItem(wbs, groupId, item, previousMatchingCount)) return wbs;
+  return {
+    ...wbs,
+    groups: wbs.groups.map((group) =>
+      group.id === groupId ? { ...group, items: [...group.items, item] } : group,
+    ),
+  };
 }
 
 async function downloadStructureExcel(wbs: KtpWbs, sessionId: string) {
@@ -276,6 +301,10 @@ export default function KtpEstimateWizardPage() {
 
   const addItemOptimistic = useCallback(
     async (groupId: string, name: string) => {
+      const previousMatchingCount =
+        wbs?.groups
+          .find((group) => group.id === groupId)
+          ?.items.filter((item) => item.origin === "manual" && item.name === name).length ?? 0;
       const tempId = `tmp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
       const tempItem: KtpWbsItem = {
         id: tempId,
@@ -306,7 +335,11 @@ export default function KtpEstimateWizardPage() {
       );
       setBusy(true);
       try {
-        setWbs(await ktpEstimate.createItem(projectId, groupId, { name }));
+        let nextWbs = await ktpEstimate.createItem(projectId, groupId, { name });
+        if (!wbsHasItem(nextWbs, groupId, tempItem, previousMatchingCount)) {
+          nextWbs = await ktpEstimate.getWbs(projectId, sessionId);
+        }
+        setWbs(ensureItemVisible(nextWbs, groupId, tempItem, previousMatchingCount));
         setError(null);
       } catch (e: any) {
         setWbs((prev) =>
@@ -325,7 +358,7 @@ export default function KtpEstimateWizardPage() {
         setBusy(false);
       }
     },
-    [projectId],
+    [projectId, sessionId, wbs],
   );
 
   const stage1Processing = status === "stage1_processing" || status === "stage1_pending";
@@ -951,6 +984,12 @@ function Stage1Group({
 }) {
   const [title, setTitle] = useState(group.title);
   const [newItem, setNewItem] = useState("");
+  const submitNewItem = () => {
+    const name = newItem.trim();
+    if (!name || busy) return;
+    setNewItem("");
+    void addItemOptimistic(group.id, name);
+  };
 
   return (
     <div style={{ ...card, marginBottom: 12, padding: 14 }}>
@@ -984,7 +1023,7 @@ function Stage1Group({
       </div>
 
       {group.items.map((it) => {
-        const badge = ORIGIN_BADGE[it.origin];
+        const badge = itemSourceBadge(it);
         const rejected = it.review_status === "rejected";
         const pendingAi = it.origin === "ai_added" && it.review_status === "pending";
         const needsReview = it.stage_needs_review || it.operator_review_required || it.work_type_needs_review;
@@ -1077,7 +1116,17 @@ function Stage1Group({
               onChange={(e) =>
                 run(() => ktpEstimate.updateItem(projectId, it.id, { group_id: e.target.value }))
               }
-              style={{ ...inputStyle, padding: "4px 6px", maxWidth: 150 }}
+              style={{
+                ...inputStyle,
+                flex: "0 1 260px",
+                minWidth: 180,
+                maxWidth: 320,
+                boxSizing: "border-box",
+                padding: "4px 28px 4px 8px",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
             >
               {groupOptions.map((o) => (
                 <option key={o.id} value={o.id}>
@@ -1100,20 +1149,21 @@ function Stage1Group({
         <input
           value={newItem}
           onChange={(e) => setNewItem(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submitNewItem();
+            }
+          }}
           placeholder="Добавить работу вручную"
           style={inputStyle}
         />
         <button
           style={btn()}
           disabled={busy || !newItem.trim()}
-          onClick={() => {
-            const name = newItem.trim();
-            if (!name) return;
-            setNewItem("");
-            void addItemOptimistic(group.id, name);
-          }}
+          onClick={submitNewItem}
         >
-          + Работа
+          Добавить работу
         </button>
       </div>
     </div>

@@ -1,0 +1,107 @@
+{
+  "dictionary_version": "construction_work_dictionary_v6_4_10@1.8.0",
+  "pdf": "Ильинские сады 02.04.2026.pdf",
+  "rows_total": 344,
+  "roles": {
+    "work": 114,
+    "material": 134,
+    "mechanism": 4,
+    "logistics": 9,
+    "overhead": 83
+  },
+  "financial_reconciliation": {
+    "declared_total": 12725959.27,
+    "detail_rows_total": 12225959.27,
+    "summary_only_total": 500000.0,
+    "computed_import_total": 12725959.27,
+    "difference": 0.0,
+    "summary_raw_rows_count": 23,
+    "summary_priceable_rows_count": 22,
+    "summary_matched_count": 21,
+    "summary_only_count": 1,
+    "summary_ignored_info_count": 1
+  },
+  "quality": {
+    "physical_work_rows": 114,
+    "unknown_physical_work_rows": 0,
+    "non_work_rows_with_own_subtype": 0,
+    "review_rows_with_high_work_type_confidence": 0
+  },
+  "checks": {
+    "summary_soil_disposal": {
+      "row_order": 343,
+      "section": "Утилизация грунта за пределы участка Утилизация грунта самосвалами. С погрузкой. Коэффициент разрыхления грунта",
+      "work_name": "Утилизация грунта за пределы участка",
+      "item_text": "Утилизация грунта за пределы участка Утилизация грунта самосвалами. С погрузкой. Коэффициент разрыхления грунта",
+      "row_role": "work",
+      "work_stage_number": "9.4.2",
+      "work_subtype_code": "earthworks/soil_disposal",
+      "operation_code": "soil_disposal",
+      "selected_object_scope_code": null,
+      "summary_only": true,
+      "synthetic_parent": null,
+      "gpr_included": true,
+      "parent_work_subtype_code": null
+    },
+    "art_wall_masonry": {
+      "row_order": 255,
+      "section": "Устройство стены для АРТ-объекта Устройство ленточного фундамента для установки стены из блоков",
+      "work_name": "Выполнение кладки",
+      "item_text": "Выполнение кладки Выполнение кладки из керамических блоков",
+      "row_role": "work",
+      "work_stage_number": "9.4.6",
+      "work_subtype_code": "landscape/decorative_block_walls",
+      "operation_code": "block_masonry",
+      "selected_object_scope_code": "decorative_wall",
+      "summary_only": null,
+      "synthetic_parent": null,
+      "gpr_included": true,
+      "parent_work_subtype_code": null
+    },
+    "synthetic_grading": {
+      "row_order": 0,
+      "section": "чистовая планировка Планировка участка спецтехникой (с доставкой)",
+      "work_name": "Планировка участка спецтехникой (с доставкой)",
+      "item_text": "Планировка участка спецтехникой (с доставкой)",
+      "row_role": "work",
+      "work_stage_number": "9.4.11",
+      "work_subtype_code": "landscape/landscape_grading",
+      "operation_code": "grading",
+      "selected_object_scope_code": "landscape_grading",
+      "summary_only": null,
+      "synthetic_parent": true,
+      "gpr_included": true,
+      "parent_work_subtype_code": null
+    },
+    "fence_pile_drilling": {
+      "row_order": 190,
+      "section": "Устройство фундамента забора Устройство ленточного фундамента забора",
+      "work_name": "Бурение",
+      "item_text": "Бурение Выполнение бурения для устройства буронабивных свай",
+      "row_role": "work",
+      "work_stage_number": "9.4.3",
+      "work_subtype_code": "foundation/pile_foundation",
+      "operation_code": "pile_drilling",
+      "selected_object_scope_code": null,
+      "summary_only": null,
+      "synthetic_parent": null,
+      "gpr_included": true,
+      "parent_work_subtype_code": null
+    },
+    "paving_unloading": {
+      "row_order": 299,
+      "section": "Мощение брусчаткой гранитной Брусчатка гранитная (5 см) на растворе",
+      "work_name": "Разгрузка брусчатки вручную",
+      "item_text": "Разгрузка брусчатки вручную 150-180 кг/кв.м",
+      "row_role": "logistics",
+      "work_stage_number": "9.4.5",
+      "work_subtype_code": null,
+      "operation_code": null,
+      "selected_object_scope_code": null,
+      "summary_only": null,
+      "synthetic_parent": null,
+      "gpr_included": false,
+      "parent_work_subtype_code": "landscape/granite_paving"
+    }
+  }
+}

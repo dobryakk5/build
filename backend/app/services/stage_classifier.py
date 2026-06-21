@@ -763,13 +763,30 @@ class StageMatch:
         stage = self.stage or {}
         option = self.stage_option or {}
         work_type = self.work_type_match
-        section_id = work_type.section_id if work_type else None
-        subtype_id = work_type.subtype_id if work_type else None
+        normalized_role = normalize_row_role(row_role or self.normalized_row_role)
+        work_type_applicable = normalized_role == "work"
+
+        inherited_section_id = work_type.section_id if work_type else None
+        inherited_subtype_id = work_type.subtype_id if work_type else None
+        section_id = inherited_section_id if work_type_applicable else None
+        subtype_id = inherited_subtype_id if work_type_applicable else None
+
         stage_number = stage.get("number")
         work_subtype_code = f"{section_id}/{subtype_id}" if section_id and subtype_id else None
-        normalized_role = normalize_row_role(row_role or self.normalized_row_role)
-        stage_needs_review = bool(self.needs_review or (work_type.needs_review if work_type else False))
-        review_reason = self.review_reason or (work_type.reason if work_type and work_type.needs_review else None)
+        parent_work_subtype_code = (
+            f"{inherited_section_id}/{inherited_subtype_id}"
+            if not work_type_applicable and inherited_section_id and inherited_subtype_id
+            else None
+        )
+        stage_needs_review = bool(
+            self.needs_review
+            or (work_type.needs_review if work_type and work_type_applicable else False)
+        )
+        review_reason = self.review_reason or (
+            work_type.reason
+            if work_type and work_type_applicable and work_type.needs_review
+            else None
+        )
         context_inherited = self.inherited_from_row_order is not None
         inheritance_reason = None
         if context_inherited:
@@ -778,6 +795,7 @@ class StageMatch:
                 if normalized_role == "overhead"
                 else f"{normalized_role}_inherits_previous_context"
             )
+
         data = {
             "estimate_type_id": estimate_type_id,
             "estimate_type_number": estimate_type_number,
@@ -799,8 +817,12 @@ class StageMatch:
             "parent_row_order": self.parent_row_order,
             "inherited_from_row_order": self.inherited_from_row_order,
             "stage_confidence": self.confidence,
-            "work_type_confidence": work_type.confidence if work_type else "low",
-            "autofill_enabled": bool(work_subtype_code and not stage_needs_review),
+            "work_type_confidence": (
+                work_type.confidence if work_type and work_type_applicable else None
+            ),
+            "autofill_enabled": bool(
+                work_type_applicable and work_subtype_code and not stage_needs_review
+            ),
             "needs_review": stage_needs_review,
             "review_reason": review_reason,
             "stage_match_type": self.match_type,
@@ -808,15 +830,29 @@ class StageMatch:
                 "score": self.score,
                 "matched_terms": self.matched_terms,
             },
-            "work_type_match_score_json": (work_type.score_breakdown if work_type else {}),
+            "work_type_match_score_json": (
+                work_type.score_breakdown if work_type and work_type_applicable else {}
+            ),
             "dictionary_version": dictionary_version(),
             "prompt_version": PROMPT_VERSION,
             "work_section_code": section_id,
             "work_subtype_code": work_subtype_code,
             "context_inherited": context_inherited,
             "context_inheritance_reason": inheritance_reason,
-            "stage_classification_source": "context_inheritance" if context_inherited else "stage_classifier",
-            "work_type_applicable": normalized_role != "overhead",
+            "stage_classification_source": (
+                "context_inheritance" if context_inherited else "stage_classifier"
+            ),
+            "work_type_applicable": work_type_applicable,
+            "gpr_included": work_type_applicable,
+            "parent_work_stage_number": (
+                stage_number if not work_type_applicable and context_inherited else None
+            ),
+            "parent_work_section_code": (
+                inherited_section_id if not work_type_applicable and context_inherited else None
+            ),
+            "parent_work_subtype_code": (
+                parent_work_subtype_code if context_inherited else None
+            ),
         }
         if context_inherited:
             data["classification_source"] = "context_inheritance"
@@ -1293,6 +1329,10 @@ class StageClassifier:
         allowed_stages: list[dict[str, Any]],
         previous_context: dict[str, Any] | None = None,
         *,
+        section_title: str | None = None,
+        section_description: str | None = None,
+        section_object_candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+        section_block_id: str | None = None,
         estimate_profile_id: str | None = None,
         row_order: int | None = None,
         global_result: ClassificationResult | None = None,
@@ -1356,7 +1396,84 @@ class StageClassifier:
             )
 
         if global_result is None:
-            global_result = classify_work(row_text, row_role="work")
+            global_result = classify_work(
+                row_text,
+                row_role="work",
+                section_title=section_title,
+                section_description=section_description,
+                section_object_candidates=section_object_candidates,
+            )
+
+        # A deterministic operation-object rule can select the exact project
+        # stage before generic title scoring. This is required for mixed-object
+        # blocks where foundation and masonry rows share one PDF section.
+        preferred_stage_number = str(global_result.preferred_stage_number or "")
+        if (
+            normalized_role == "work"
+            and preferred_stage_number
+            and not global_result.needs_review
+            and global_result.subtype_code != UNKNOWN_SUBTYPE_CODE
+        ):
+            preferred_stage = next(
+                (
+                    stage for stage in allowed_stages
+                    if str(stage.get("number") or "") == preferred_stage_number
+                ),
+                None,
+            )
+            if preferred_stage is not None:
+                section_id, subtype_id = self.work_type_classifier._split_subtype_code(
+                    global_result.subtype_code
+                )
+                matching_option = next(
+                    (
+                        option
+                        for option in (preferred_stage.get("stage_options") or [])
+                        if isinstance(option, dict)
+                        and str(option.get("section_id") or "") == str(section_id or "")
+                        and str(option.get("subtype_id") or "") == str(subtype_id or "")
+                    ),
+                    None,
+                )
+                work_type_match = WorkTypeMatch(
+                    section_id=section_id,
+                    subtype_id=subtype_id,
+                    confidence=global_result.confidence,
+                    needs_review=False,
+                    reason=global_result.reason,
+                    source=global_result.source,
+                    stage_option=matching_option,
+                    score_breakdown={
+                        "source": "operation_object_resolution",
+                        "operation_code": global_result.operation_code,
+                        "selected_object_scope_code": global_result.selected_object_scope_code,
+                        "classification_score": global_result.score,
+                    },
+                )
+                return StageMatch(
+                    stage=preferred_stage,
+                    score=max(int(global_result.score or 0), STAGE_AUTO_ACCEPT_MIN_SCORE),
+                    confidence="high",
+                    needs_review=False,
+                    match_type=StageMatchType.STAGE_OPTION_MATCH.value,
+                    matched_terms=global_result.matched_terms,
+                    stage_option=matching_option,
+                    work_type_ref=(
+                        {
+                            "section_id": section_id,
+                            "subtype_id": subtype_id,
+                        }
+                        if section_id and subtype_id
+                        else None
+                    ),
+                    score_breakdown={
+                        "source": "operation_object_resolution",
+                        "preferred_stage_number": preferred_stage_number,
+                        "section_block_id": section_block_id,
+                    },
+                    work_type_match=work_type_match,
+                    normalized_row_role=normalized_role,
+                )
 
         # A weak unknown is not allowed to manufacture a new stage. It either
         # inherits the nearest confident work or remains explicitly unmatched.

@@ -46,6 +46,22 @@ _OVERHEAD_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Standalone domain operations that contain logistics verbs but are physical
+# work and must remain schedulable work rows.
+_DOMAIN_WORK_LOGISTICS_RE = re.compile(
+    r"утилизац(?:ия|ии)?\s+грунт|вывоз\s+грунт|погрузк[^\n]*вывоз\s+грунт|"
+    r"вывоз\s+строительн(?:ого|ый)\s+мусор|удалени[^\n]*строительн(?:ого|ый)\s+мусор",
+    re.IGNORECASE,
+)
+
+# Physical logistics are cost/resource operations, not construction works.
+# They intentionally run before mechanism/work and before MODE_LABOR fallback.
+_PHYSICAL_LOGISTICS_RE = re.compile(
+    r"доставк(?:а|и)\s+(?:материал|спецтехник)|низкорамн(?:ый|ого)\s+трал|"
+    r"разгрузк|погрузк\s+материал|перенос\s+материал|складировани\s+материал",
+    re.IGNORECASE,
+)
+
 # Техника / механизмы — a mechanism even when listed inside a "Материалы" block.
 _MECHANISM_RE = re.compile(
     r"бетононасос|погрузчик|спецтехник|\bтрал\b|самосвал|экскаватор|"
@@ -77,6 +93,7 @@ class ClassificationResult:
     confidence: float
     reason: str
     normalized_name: str
+    row_role_hint: str | None = None
 
 
 def _normalize_mode(current_mode: str | None) -> str:
@@ -107,7 +124,25 @@ def classify_estimate_row(
     if _OVERHEAD_RE.search(full):
         return ClassificationResult(ESTIMATE_ITEM_TYPE_OVERHEAD, 0.9, "overhead_keyword", normalized)
 
-    # 2. Strong unit signals: machine-time → mechanism, labour-time → work.
+    # 2. Explicit physical work exceptions and physical logistics.
+    if _DOMAIN_WORK_LOGISTICS_RE.search(full):
+        return ClassificationResult(
+            ESTIMATE_ITEM_TYPE_WORK,
+            0.98,
+            "domain_work_logistics_exception",
+            normalized,
+            "work",
+        )
+    if _PHYSICAL_LOGISTICS_RE.search(full):
+        return ClassificationResult(
+            ESTIMATE_ITEM_TYPE_OVERHEAD,
+            0.98,
+            "physical_logistics",
+            normalized,
+            "logistics",
+        )
+
+    # 3. Strong unit signals: machine-time → mechanism, labour-time → work.
     #    A bare "смена" deliberately matches neither and falls through to the
     #    keyword/mode logic below.
     if _MECHANISM_UNIT_RE.search(unit_norm):
@@ -115,7 +150,7 @@ def classify_estimate_row(
     if _LABOR_UNIT_RE.search(unit_norm):
         return ClassificationResult(ESTIMATE_ITEM_TYPE_WORK, 0.9, "unit_labor", normalized)
 
-    # 3. Mechanism vs. work when both are mentioned.
+    # 4. Mechanism vs. work when both are mentioned.
     #    "Бурение скважин ямобуром" → work (verb leads) + a mechanism is extracted
     #    separately (see extract_mechanism_token). "Спецтехника для планировки" →
     #    mechanism (the machine leads). The earlier-occurring keyword wins.
@@ -126,19 +161,19 @@ def classify_estimate_row(
     if mech_m:
         return ClassificationResult(ESTIMATE_ITEM_TYPE_MECHANISM, 0.85, "mechanism_keyword", normalized)
 
-    # 4. Structural mode is the strongest remaining signal.
+    # 5. Structural mode is the strongest remaining signal.
     if mode == MODE_LABOR:
         return ClassificationResult(ESTIMATE_ITEM_TYPE_WORK, 0.9, "mode_labor", normalized)
     if mode == MODE_MATERIALS:
         return ClassificationResult(ESTIMATE_ITEM_TYPE_MATERIAL, 0.9, "mode_materials", normalized)
 
-    # 5. No mode (other formats / summary pages) — fall back to keywords.
+    # 6. No mode (other formats / summary pages) — fall back to keywords.
     if _WORK_RE.search(full):
         return ClassificationResult(ESTIMATE_ITEM_TYPE_WORK, 0.7, "work_keyword", normalized)
     if _MATERIAL_RE.search(full):
         return ClassificationResult(ESTIMATE_ITEM_TYPE_MATERIAL, 0.6, "material_keyword", normalized)
 
-    # 6. Nothing matched — leave it for manual review.
+    # 7. Nothing matched — leave it for manual review.
     return ClassificationResult(ESTIMATE_ITEM_TYPE_UNKNOWN, 0.3, "no_signal", normalized)
 
 

@@ -2429,7 +2429,7 @@ def _materialize_wbs(
                 "work_section_name": estimate.work_section_name or raw.get("work_section_name"),
                 "work_subtype_code": estimate.work_subtype_code or raw.get("work_subtype_code") or raw.get("subtype_code"),
                 "work_subtype_name": estimate.work_subtype_name or raw.get("work_subtype_name") or raw.get("subtype_name"),
-                "work_type_confidence": estimate.classification_confidence or raw.get("classification_confidence"),
+                "work_type_confidence": raw.get("work_type_confidence") or estimate.classification_confidence or raw.get("classification_confidence"),
                 "work_type_needs_review": work_type_needs_review,
                 "work_type_candidates": estimate.classification_candidates or raw.get("classification_candidates"),
                 "work_type_source": estimate.classification_source or raw.get("classification_source"),

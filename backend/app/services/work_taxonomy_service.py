@@ -1,6 +1,6 @@
 """Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v6_4_9.json`` is the canonical work
+``construction_work_dictionary_v6_4_10.json`` is the canonical work
 classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
@@ -22,10 +22,10 @@ from app.models import WorkPrecedence, WorkSubtype
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v6_4_9.json"
+    / "construction_work_dictionary_v6_4_10.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_9"
-PROMPT_VERSION = "estimate-v6.4.9"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_10"
+PROMPT_VERSION = "estimate-v6.4.10"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
@@ -144,6 +144,15 @@ class ClassificationResult:
     global_fallback_accept_reason: str | None = None
     object_priority_rule: str | None = None
     object_conflicts: tuple[str, ...] = ()
+    operation_code: str | None = None
+    operation_confidence_score: float | None = None
+    section_object_candidates: tuple[dict[str, Any], ...] = ()
+    selected_object_scope_code: str | None = None
+    object_scope_confidence_score: float | None = None
+    object_scope_source: str | None = None
+    context_override_blocked: bool = False
+    context_override_reason: str | None = None
+    preferred_stage_number: str | None = None
 
     def as_raw_data(self) -> dict[str, Any]:
         return {
@@ -177,6 +186,15 @@ class ClassificationResult:
             "global_fallback_accept_reason": self.global_fallback_accept_reason,
             "object_priority_rule": self.object_priority_rule,
             "object_conflicts": list(self.object_conflicts),
+            "operation_code": self.operation_code,
+            "operation_confidence_score": self.operation_confidence_score,
+            "section_object_candidates": [dict(item) for item in self.section_object_candidates],
+            "selected_object_scope_code": self.selected_object_scope_code,
+            "object_scope_confidence_score": self.object_scope_confidence_score,
+            "object_scope_source": self.object_scope_source,
+            "context_override_blocked": self.context_override_blocked,
+            "context_override_reason": self.context_override_reason,
+            "preferred_stage_number": self.preferred_stage_number,
             # Legacy names kept until the UI/API is fully migrated.
             "subtype_code": self.subtype_code,
             "subtype_name": self.subtype_name,
@@ -194,6 +212,7 @@ class TaxonomyScope:
     allowed_pairs: frozenset[tuple[str, str]]
     stages: tuple[dict[str, Any], ...]
     name: str
+    scope_source: str = "stage_options"
 
 
 
@@ -523,20 +542,46 @@ def _scope_pairs_from_stages(stages: list[dict[str, Any]]) -> frozenset[tuple[st
 
 
 def get_variant_scope(estimate_type_id: str, project_variant_id: str) -> TaxonomyScope:
-    stages = get_project_variant_stages(estimate_type_id, project_variant_id)
+    payload = _load_dictionary()
+    estimate_type = _find_estimate_type(payload, str(estimate_type_id))
+    variant = _find_project_variant(estimate_type, str(project_variant_id))
+    stages = [
+        _public_work_stage(stage)
+        for stage in variant.get("stages") or []
+        if isinstance(stage, dict)
+    ]
     pairs = _scope_pairs_from_stages(stages)
     if not pairs:
         raise RuntimeError(
             f"Taxonomy scope is empty for {estimate_type_id}/{project_variant_id}; "
             "check project_hierarchy mappings"
         )
+    pair_sections = frozenset(section_id for section_id, _ in pairs)
+    explicit_categories = frozenset(
+        str(value).strip()
+        for value in (variant.get("allowed_categories") or [])
+        if str(value).strip()
+    )
+    if explicit_categories:
+        allowed_sections = pair_sections & explicit_categories
+        scope_source = "allowed_categories"
+    else:
+        allowed_sections = pair_sections
+        scope_source = "stage_options"
+    if not allowed_sections:
+        raise RuntimeError(
+            f"Taxonomy category scope is empty for {estimate_type_id}/{project_variant_id}; "
+            "allowed_categories must intersect stage work-type pairs"
+        )
+    scoped_pairs = frozenset(pair for pair in pairs if pair[0] in allowed_sections)
     return TaxonomyScope(
         estimate_type_id=str(estimate_type_id),
         project_variant_id=str(project_variant_id),
-        allowed_sections=frozenset(section_id for section_id, _ in pairs),
-        allowed_pairs=pairs,
+        allowed_sections=allowed_sections,
+        allowed_pairs=scoped_pairs,
         stages=tuple(stages),
         name="variant_scope",
+        scope_source=scope_source,
     )
 
 
@@ -2314,10 +2359,314 @@ def _explicit_object_priority_result(
     )
 
 
+
+def _operation_resolution_policy(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or _load_dictionary()
+    policy = payload.get("operation_object_resolution_policy")
+    return policy if isinstance(policy, dict) else {}
+
+
+def detect_operation(
+    item_text: str | None,
+    payload: dict[str, Any] | None = None,
+) -> tuple[str | None, float | None, list[str]]:
+    """Detect a physical operation from the row text only."""
+    payload = payload or _load_dictionary()
+    policy = _operation_resolution_policy(payload)
+    haystack = normalize_text(item_text or "")
+    hay_tokens = haystack.split()
+    if not haystack:
+        return None, None, []
+
+    matches: list[tuple[int, str, list[str]]] = []
+    for operation_code, terms in (policy.get("operations") or {}).items():
+        if not isinstance(terms, list):
+            continue
+        matched = _match_terms([str(term) for term in terms], haystack, hay_tokens)
+        if matched:
+            specificity = max(len(normalize_text(term)) for term in matched)
+            matches.append((specificity, str(operation_code), matched))
+
+    if not matches:
+        return None, None, []
+    matches.sort(key=lambda item: (item[0], len(item[2])), reverse=True)
+    _, operation_code, matched_terms = matches[0]
+    exact = any(normalize_text(term) == haystack for term in matched_terms)
+    return operation_code, (0.99 if exact else 0.94), matched_terms
+
+
+def _merge_object_candidate(
+    target: dict[str, dict[str, Any]],
+    *,
+    code: str,
+    source: str,
+    matched_terms: list[str],
+    confidence_score: float,
+) -> None:
+    if not code:
+        return
+    current = target.get(code)
+    evidence = {
+        "source": source,
+        "matched_terms": list(matched_terms),
+        "confidence_score": confidence_score,
+    }
+    if current is None:
+        target[code] = {
+            "object_scope_code": code,
+            "source": source,
+            "matched_terms": list(matched_terms),
+            "confidence_score": confidence_score,
+            "evidence": [evidence],
+        }
+        return
+    current.setdefault("evidence", []).append(evidence)
+    current["confidence_score"] = max(float(current.get("confidence_score") or 0), confidence_score)
+    for term in matched_terms:
+        if term not in current.setdefault("matched_terms", []):
+            current["matched_terms"].append(term)
+    if confidence_score >= float(current.get("confidence_score") or 0):
+        current["source"] = source
+
+
+def detect_section_object_candidates(
+    *,
+    item_text: str | None = None,
+    section_title: str | None = None,
+    section_description: str | None = None,
+    supplied_candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Return all object candidates without collapsing a mixed-object block."""
+    payload = payload or _load_dictionary()
+    objects = (_operation_resolution_policy(payload).get("objects") or {})
+    merged: dict[str, dict[str, Any]] = {}
+
+    for candidate in supplied_candidates or ():
+        if not isinstance(candidate, dict):
+            continue
+        code = str(candidate.get("object_scope_code") or "").strip()
+        if not code:
+            continue
+        _merge_object_candidate(
+            merged,
+            code=code,
+            source=str(candidate.get("source") or "supplied"),
+            matched_terms=list(candidate.get("matched_terms") or []),
+            confidence_score=float(candidate.get("confidence_score") or 0.8),
+        )
+
+    sources = (
+        ("explicit_row_object", item_text, "title_terms", 1.0),
+        ("section_title", section_title, "title_terms", 0.96),
+        ("section_description", section_description, "description_terms", 0.92),
+    )
+    for source, raw_text, term_field, confidence in sources:
+        haystack = normalize_text(raw_text or "")
+        if not haystack:
+            continue
+        hay_tokens = haystack.split()
+        for object_code, object_def in objects.items():
+            if not isinstance(object_def, dict):
+                continue
+            terms = [str(term) for term in (object_def.get(term_field) or [])]
+            matched = _match_terms(terms, haystack, hay_tokens)
+            if matched:
+                _merge_object_candidate(
+                    merged,
+                    code=str(object_code),
+                    source=source,
+                    matched_terms=matched,
+                    confidence_score=confidence,
+                )
+    return sorted(
+        merged.values(),
+        key=lambda item: float(item.get("confidence_score") or 0),
+        reverse=True,
+    )
+
+
+def _find_section_and_subtype(
+    payload: dict[str, Any],
+    section_id: str,
+    subtype_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    for section_def in payload.get("sections") or []:
+        if not isinstance(section_def, dict) or str(section_def.get("id") or "") != section_id:
+            continue
+        for subtype_def in section_def.get("subtypes") or []:
+            if isinstance(subtype_def, dict) and str(subtype_def.get("id") or "") == subtype_id:
+                return section_def, subtype_def
+        return section_def, None
+    return None, None
+
+
+def _contextual_resolution_result(
+    *,
+    name: str,
+    section_title: str | None,
+    section_description: str | None,
+    supplied_candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
+    operation_hint: str | None,
+    resolved_role: str,
+    payload: dict[str, Any],
+    normalized_pairs: frozenset[tuple[str, str]] | None,
+    allowed_section_ids: frozenset[str] | None,
+    scope_name: str,
+    scope_fields: dict[str, Any],
+    version: str,
+    thresholds: dict[str, Any],
+) -> ClassificationResult | None:
+    if resolved_role != "work":
+        return None
+
+    detected_operation, operation_confidence, operation_terms = detect_operation(name, payload)
+    operation_code = operation_hint or detected_operation
+    if not operation_code:
+        return None
+
+    object_candidates = detect_section_object_candidates(
+        item_text=name,
+        section_title=section_title,
+        section_description=section_description,
+        supplied_candidates=supplied_candidates,
+        payload=payload,
+    )
+    candidate_codes = {
+        str(item.get("object_scope_code") or "")
+        for item in object_candidates
+        if item.get("object_scope_code")
+    }
+
+    matching_rules: list[dict[str, Any]] = []
+    for rule in (_operation_resolution_policy(payload).get("rules") or []):
+        if not isinstance(rule, dict) or str(rule.get("operation") or "") != operation_code:
+            continue
+        object_code = str(rule.get("object") or "")
+        if object_code != "*" and object_code not in candidate_codes:
+            continue
+        section_id = str(rule.get("section_id") or "")
+        subtype_id = str(rule.get("subtype_id") or "")
+        if not section_id or not subtype_id:
+            continue
+        if allowed_section_ids is not None and section_id not in allowed_section_ids:
+            continue
+        if normalized_pairs is not None and (section_id, subtype_id) not in normalized_pairs:
+            continue
+        matching_rules.append(rule)
+
+    if not matching_rules:
+        return None
+
+    unique_outputs = {
+        (
+            str(rule.get("section_id") or ""),
+            str(rule.get("subtype_id") or ""),
+            str(rule.get("preferred_stage_number") or ""),
+        )
+        for rule in matching_rules
+    }
+    if len(unique_outputs) != 1:
+        return None
+
+    selected_rule = next(
+        (rule for rule in matching_rules if str(rule.get("object") or "") != "*"),
+        matching_rules[0],
+    )
+    section_id = str(selected_rule.get("section_id") or "")
+    subtype_id = str(selected_rule.get("subtype_id") or "")
+    section_def, subtype_def = _find_section_and_subtype(payload, section_id, subtype_id)
+    if section_def is None or subtype_def is None:
+        return None
+
+    selected_object = str(selected_rule.get("object") or "")
+    if selected_object == "*":
+        selected_object = None
+    selected_candidate = next(
+        (
+            item for item in object_candidates
+            if str(item.get("object_scope_code") or "") == selected_object
+        ),
+        None,
+    )
+    explicit_object = bool(
+        selected_candidate and str(selected_candidate.get("source") or "") == "explicit_row_object"
+    )
+    auto_min = int(thresholds.get("auto_accept_min_score", 9))
+    score = auto_min + 10
+    subtype_code = f"{section_id}/{subtype_id}"
+    matched_terms = {
+        "operation": operation_terms or [operation_code],
+        "operation_object_resolution": [
+            f"{operation_code} × {selected_object or '*'} → {subtype_code}"
+        ],
+    }
+    if selected_candidate:
+        matched_terms["object_context"] = list(selected_candidate.get("matched_terms") or [])
+
+    candidate = ClassificationCandidate(
+        rank=1,
+        stage="subtype",
+        section_code=section_id,
+        section_name=str(section_def.get("title") or ""),
+        subtype_code=subtype_code,
+        subtype_name=str(subtype_def.get("title") or subtype_id),
+        score=score,
+        section_score=score,
+        subtype_score=score,
+        delta_to_next=score,
+        confidence="high",
+        needs_review=False,
+        source="operation_object_resolution",
+        matched_terms=matched_terms,
+        reason="deterministic_operation_object_rule",
+    )
+    return ClassificationResult(
+        section_code=section_id,
+        section_name=str(section_def.get("title") or ""),
+        subtype_code=subtype_code,
+        subtype_name=str(subtype_def.get("title") or subtype_id),
+        score=score,
+        confidence="high",
+        needs_review=False,
+        source="operation_object_resolution",
+        matched_terms=matched_terms,
+        candidates=[candidate],
+        related_sections=[],
+        reason="deterministic_operation_object_rule",
+        dictionary_version=version,
+        row_role=resolved_role,
+        operation_code=operation_code,
+        operation_confidence_score=operation_confidence or 0.9,
+        section_object_candidates=tuple(object_candidates),
+        selected_object_scope_code=selected_object,
+        object_scope_confidence_score=(
+            float(selected_candidate.get("confidence_score") or 0)
+            if selected_candidate else None
+        ),
+        object_scope_source=(
+            str(selected_candidate.get("source") or "")
+            if selected_candidate else "wildcard_operation_rule"
+        ),
+        context_override_blocked=explicit_object,
+        context_override_reason=(
+            "explicit_row_object_priority" if explicit_object else None
+        ),
+        preferred_stage_number=(
+            str(selected_rule.get("preferred_stage_number") or "") or None
+        ),
+        **scope_fields,
+    )
+
+
 def classify_work(
     name: str,
     section: str | None = None,
     *,
+    section_title: str | None = None,
+    section_description: str | None = None,
+    section_object_candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    operation_hint: str | None = None,
     row_role: str | None = None,
     candidate_sections: set[str] | frozenset[str] | None = None,
     candidate_pairs: set[tuple[str, str]] | frozenset[tuple[str, str]] | None = None,
@@ -2329,13 +2678,18 @@ def classify_work(
     payload = _load_dictionary()
     weights = (payload.get("scoring") or {}).get("weights") or {}
     thresholds = (payload.get("scoring") or {}).get("decision_thresholds") or {}
-    text = " ".join(part for part in (name, section) if part)
+    effective_title = section_title if section_title is not None else section
+    effective_description = section_description
+    context_text = " ".join(
+        part for part in (effective_title, effective_description) if part
+    )
+    text = " ".join(part for part in (name, context_text) if part)
     item_haystack = normalize_text(name)
-    section_haystack = normalize_text(section)
+    section_haystack = normalize_text(context_text)
     haystack = normalize_text(text)
     hay_tokens = haystack.split()
     version = dictionary_version(payload)
-    resolved_role = row_role or classify_row_role(name, section, payload=payload)
+    resolved_role = row_role or classify_row_role(name, context_text, payload=payload)
 
     normalized_pairs: frozenset[tuple[str, str]] | None = None
     if candidate_pairs is not None:
@@ -2454,6 +2808,24 @@ def classify_work(
             row_role=resolved_role,
             **scope_fields,
         )
+
+    contextual_result = _contextual_resolution_result(
+        name=name,
+        section_title=effective_title,
+        section_description=effective_description,
+        supplied_candidates=section_object_candidates,
+        operation_hint=operation_hint,
+        resolved_role=resolved_role,
+        payload=payload,
+        normalized_pairs=normalized_pairs,
+        allowed_section_ids=allowed_section_ids,
+        scope_name=scope_name,
+        scope_fields=scope_fields,
+        version=version,
+        thresholds=thresholds,
+    )
+    if contextual_result is not None:
+        return contextual_result
 
     object_priority_pair = pre_object_priority_pair
     if object_priority_pair is not None:
@@ -2610,6 +2982,14 @@ def classify_work(
 
     confidence = _confidence(total_score, min(section_delta, subtype_delta), needs_review, thresholds)
     candidates = section_candidates + subtype_candidates
+    detected_operation, detected_operation_confidence, _ = detect_operation(name, payload)
+    detected_objects = detect_section_object_candidates(
+        item_text=name,
+        section_title=effective_title,
+        section_description=effective_description,
+        supplied_candidates=section_object_candidates,
+        payload=payload,
+    )
     return ClassificationResult(
         section_code=winner_id,
         section_name=winning_section.get("title"),
@@ -2625,6 +3005,9 @@ def classify_work(
         reason=reason,
         dictionary_version=version,
         row_role=resolved_role,
+        operation_code=detected_operation,
+        operation_confidence_score=detected_operation_confidence,
+        section_object_candidates=tuple(detected_objects),
         **scope_fields,
     )
 
@@ -2737,6 +3120,10 @@ def classify_work_cascade(
     name: str,
     section: str | None = None,
     *,
+    section_title: str | None = None,
+    section_description: str | None = None,
+    section_object_candidates: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    operation_hint: str | None = None,
     row_role: str | None = None,
     variant_scope: TaxonomyScope | None = None,
     estimate_type_scope: TaxonomyScope | None = None,
@@ -2757,6 +3144,10 @@ def classify_work_cascade(
         result = classify_work(
             name,
             section,
+            section_title=section_title,
+            section_description=section_description,
+            section_object_candidates=section_object_candidates,
+            operation_hint=operation_hint,
             row_role=row_role,
             candidate_sections=scope.allowed_sections,
             candidate_pairs=scope.allowed_pairs,
@@ -2805,6 +3196,10 @@ def classify_work_cascade(
     global_result = classify_work(
         name,
         section,
+        section_title=section_title,
+        section_description=section_description,
+        section_object_candidates=section_object_candidates,
+        operation_hint=operation_hint,
         row_role=row_role,
         scope_name=global_scope_name,
         scope_estimate_type_id=selected_scope.estimate_type_id if selected_scope else None,

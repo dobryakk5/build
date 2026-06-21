@@ -205,6 +205,29 @@ def _row_item_type_confidence(raw: dict) -> float | None:
     return float(value)
 
 
+def _row_item_text(row) -> str:
+    raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+    return str(
+        raw.get("item_text")
+        or raw.get("full_name")
+        or " ".join(
+            str(value).strip()
+            for value in (getattr(row, "work_name", None), raw.get("spec"))
+            if value and str(value).strip()
+        )
+        or ""
+    ).strip()
+
+
+def _row_block_key(row, index: int) -> str:
+    raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+    return str(
+        raw.get("section_block_id")
+        or f"section:{getattr(row, 'section', None) or ''}"
+        or f"row:{index}"
+    )
+
+
 def _resolve_effective_row_role(
     *,
     item_type_role: str | None,
@@ -311,6 +334,20 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
         "needs_review": raw.get("needs_review"),
         "review_reason": raw.get("review_reason"),
         "work_type_confidence": raw.get("work_type_confidence"),
+        "work_type_applicable": raw.get("work_type_applicable"),
+        "gpr_included": raw.get("gpr_included"),
+        "operation_code": raw.get("operation_code"),
+        "operation_confidence_score": raw.get("operation_confidence_score"),
+        "section_object_candidates": raw.get("section_object_candidates"),
+        "selected_object_scope_code": raw.get("selected_object_scope_code"),
+        "object_scope_confidence_score": raw.get("object_scope_confidence_score"),
+        "object_scope_source": raw.get("object_scope_source"),
+        "preferred_stage_number": raw.get("preferred_stage_number"),
+        "parent_work_stage_number": raw.get("parent_work_stage_number"),
+        "parent_work_section_code": raw.get("parent_work_section_code"),
+        "parent_work_subtype_code": raw.get("parent_work_subtype_code"),
+        "context_override_blocked": raw.get("context_override_blocked"),
+        "context_override_reason": raw.get("context_override_reason"),
         "row_hash":    _row_hash(row.section, row.work_name, row.unit, row.quantity, row.total_price),
     }
     materials = getattr(row, "materials", None) or []
@@ -455,7 +492,7 @@ def _enrich_work_subtypes_sync(
     rows: list,
     hierarchy_selection: dict | None = None,
 ) -> dict[int, object]:
-    """Classify active rows once and return reusable results by row index."""
+    """Classify physical work rows and keep resource rows subtype-free."""
     from app.services.work_taxonomy_service import (
         UNKNOWN_SUBTYPE_CODE,
         _load_dictionary,
@@ -463,8 +500,6 @@ def _enrich_work_subtypes_sync(
         classify_work_cascade,
         get_estimate_type_scope,
         get_variant_scope,
-        inherited_context_raw,
-        should_inherit_parent_context,
     )
 
     variant_scope = None
@@ -509,6 +544,15 @@ def _enrich_work_subtypes_sync(
         "global_fallback_accept_reason",
         "object_priority_rule",
         "object_conflicts",
+        "operation_code",
+        "operation_confidence_score",
+        "section_object_candidates",
+        "selected_object_scope_code",
+        "object_scope_confidence_score",
+        "object_scope_source",
+        "context_override_blocked",
+        "context_override_reason",
+        "preferred_stage_number",
         "operator_review_required",
         "operator_review_status",
         "operator_review_reason",
@@ -518,13 +562,18 @@ def _enrich_work_subtypes_sync(
         "context_inherited",
         "context_inheritance_reason",
         "work_type_applicable",
+        "gpr_included",
+        "parent_work_stage_number",
+        "parent_work_section_code",
+        "parent_work_subtype_code",
     )
-    parent_context: dict | None = None
     preclassified_results: dict[int, object] = {}
 
     for index, row in enumerate(rows):
         raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
         row.raw_data = raw
+        raw["row_order"] = index
+
         if is_subtotal_row(row):
             raw.update(
                 {
@@ -534,194 +583,99 @@ def _enrich_work_subtypes_sync(
                     "classification_source": "subtotal_filter",
                     "classification_reason": "subtotal_or_total_row",
                     "operator_review_required": False,
+                    "work_type_applicable": False,
+                    "gpr_included": False,
                 }
             )
             continue
+        if raw.get("skip_taxonomy"):
+            raw.setdefault("row_role", "inactive_catalog_row")
+            raw.setdefault("work_type_applicable", False)
+            raw.setdefault("gpr_included", False)
+            continue
+
+        item_text = _row_item_text(row)
+        item_type = resolve_item_type(row)
         item_type_confidence = _row_item_type_confidence(raw)
         if item_type_confidence is not None:
             raw["item_type_confidence"] = item_type_confidence
-        if raw.get("skip_taxonomy"):
-            raw.setdefault("row_role", "inactive_catalog_row")
-            continue
 
-        item_type = resolve_item_type(row)
         item_type_role = _row_role_from_item_type(item_type, row.work_name)
         detected_role = classify_row_role(
-            row.work_name or "",
-            row.section,
+            item_text,
+            raw.get("section_parent_context") or row.section,
             row.unit,
             row.quantity,
             allow_absent_header=True,
         )
-        row_role, override_reason = _resolve_effective_row_role(
-            item_type_role=item_type_role,
-            detected_role=detected_role,
-            item_type_confidence=item_type_confidence,
-        )
-        role_diagnostics = {
-            "source_item_type": item_type,
-            "source_item_type_confidence": item_type_confidence,
-            "detected_row_role": detected_role,
-            "source_row_role": item_type_role or "unknown",
-            "row_role": row_role,
-        }
-        if override_reason:
-            role_diagnostics["row_role_override_reason"] = override_reason
-        raw.update(role_diagnostics)
+        explicit_role = str(raw.get("row_role_hint") or "").strip()
+        if raw.get("classification_reason") in {"unit_percent", "overhead_keyword"}:
+            explicit_role = "overhead"
+        row_role = explicit_role or item_type_role or detected_role or "unknown"
 
-        if row_role == "header":
-            context_result = classify_work_cascade(
-                row.work_name or "",
-                row.section,
-                row_role="work",
-                variant_scope=variant_scope,
-                estimate_type_scope=estimate_type_scope,
-            )
-            preclassified_results[index] = context_result
-            if not context_result.needs_review and context_result.subtype_code != UNKNOWN_SUBTYPE_CODE:
-                context_raw = context_result.as_raw_data()
-                context_raw["parent_context_source"] = "header"
-                context_raw["context_inherited"] = False
-                parent_context = context_raw
+        raw.update(
+            {
+                "source_item_type": item_type,
+                "source_item_type_confidence": item_type_confidence,
+                "detected_row_role": detected_role,
+                "source_row_role": explicit_role or item_type_role or "unknown",
+                "row_role": row_role,
+                "section_block_id": _row_block_key(row, index),
+            }
+        )
+
+        if row_role != "work":
             for key in taxonomy_keys:
-                raw.pop(key, None)
-            raw.update(role_diagnostics)
+                if key not in {
+                    "classification_source",
+                    "classification_reason",
+                    "row_role",
+                    "section_object_candidates",
+                }:
+                    raw.pop(key, None)
             raw.update(
                 {
-                    "classification_source": "row_role_header",
-                    "classification_reason": "set_context_only",
+                    "classification_source": f"row_role_{row_role}",
+                    "classification_reason": f"work_type_not_applicable_for_{row_role}",
                     "operator_review_required": False,
                     "operator_review_status": None,
                     "operator_review_reason": None,
                     "context_inherited": False,
+                    "work_type_applicable": False,
+                    "gpr_included": False,
+                    "work_section_code": None,
+                    "work_subtype_code": None,
+                    "work_subtype_name": None,
+                    "section_id": None,
+                    "subtype_id": None,
                 }
             )
             continue
 
-        # Correctly typed flat resource rows never enter work taxonomy.
-        if row_role in EARLY_INHERIT_ROLES:
-            if row_role == "overhead":
-                for key in taxonomy_keys:
-                    raw.pop(key, None)
-                raw.update(role_diagnostics)
-                raw.update(
-                    {
-                        "classification_source": "row_role_overhead",
-                        "classification_reason": "work_type_not_applicable_for_overhead",
-                        "operator_review_required": False,
-                        "operator_review_status": None,
-                        "operator_review_reason": None,
-                        "context_inherited": False,
-                        "work_type_applicable": False,
-                    }
-                )
-                continue
-
-            if parent_context and should_inherit_parent_context(row_role, row.work_name or ""):
-                raw.update(
-                    inherited_context_raw(
-                        parent_context,
-                        row_role=row_role,
-                        reason=f"{row_role}_inherits_parent_context",
-                    )
-                )
-                raw.update(role_diagnostics)
-                raw["operator_review_required"] = False
-                raw["operator_review_status"] = None
-                raw["operator_review_reason"] = None
-                raw["work_type_applicable"] = True
-                continue
-
-            for key in taxonomy_keys:
-                raw.pop(key, None)
-            raw.update(role_diagnostics)
-            raw["context_inherited"] = False
-            raw["classification_reason"] = "resource_row_without_parent_context"
-            raw["operator_review_required"] = True
-            continue
-
-        if row_role == "unknown":
-            result = classify_work_cascade(
-                row.work_name or "",
-                row.section,
-                row_role="unknown",
-                variant_scope=variant_scope,
-                estimate_type_scope=estimate_type_scope,
-                allow_global_fallback=not has_hierarchy_scope,
-            )
-            preclassified_results[index] = result
-            if _is_confident_work_result(result, auto_accept_min_score, UNKNOWN_SUBTYPE_CODE):
-                raw.update(result.as_raw_data())
-                raw.update(role_diagnostics)
-                raw["source_row_role"] = "unknown"
-                raw["row_role"] = "work"
-                raw["row_role_promoted_from"] = "unknown"
-                raw["operator_review_required"] = False
-                raw["operator_review_status"] = None
-                raw["operator_review_reason"] = None
-                parent_context = dict(raw)
-            elif parent_context:
-                raw.update(
-                    inherited_context_raw(
-                        parent_context,
-                        row_role="unknown",
-                        reason="unknown_low_confidence_inherits_parent",
-                    )
-                )
-                raw.update(role_diagnostics)
-                raw["source_row_role"] = "unknown"
-                raw["row_role"] = "unknown"
-                raw["operator_review_required"] = False
-                raw["operator_review_status"] = None
-                raw["operator_review_reason"] = None
-            else:
-                raw.update(result.as_raw_data())
-                raw.update(role_diagnostics)
-                raw["source_row_role"] = "unknown"
-                raw["row_role"] = "unknown"
-                raw["operator_review_required"] = True
-                raw["operator_review_status"] = None
-                raw["operator_review_reason"] = "unknown_row_without_confident_match_or_parent"
-            continue
-
-        if row_role == "work":
-            result = classify_work_cascade(
-                row.work_name or "",
-                row.section,
-                row_role="work",
-                variant_scope=variant_scope,
-                estimate_type_scope=estimate_type_scope,
-            )
-            preclassified_results[index] = result
-            inherited = False
-            if (
-                parent_context
-                and should_inherit_parent_context(result.row_role, row.work_name or "", result)
-                and (result.needs_review or result.subtype_code == UNKNOWN_SUBTYPE_CODE)
-            ):
-                raw.update(
-                    inherited_context_raw(
-                        parent_context,
-                        row_role=result.row_role,
-                        reason="generic_or_low_confidence_work_row",
-                    )
-                )
-                inherited = True
-            else:
-                raw.update(result.as_raw_data())
-            raw.update(role_diagnostics)
-            raw["row_role"] = "work"
-            raw["operator_review_required"] = False if inherited else bool(result.needs_review)
-            raw["operator_review_status"] = None
-            raw["operator_review_reason"] = None if inherited else (result.reason if result.needs_review else None)
-            if raw.get("work_subtype_code") and raw.get("work_subtype_code") != UNKNOWN_SUBTYPE_CODE:
-                parent_context = dict(raw)
-            continue
-
-        for key in taxonomy_keys:
-            raw.pop(key, None)
-        raw.update(role_diagnostics)
-        raw["context_inherited"] = False
+        result = classify_work_cascade(
+            item_text,
+            raw.get("section_parent_context") or row.section,
+            section_title=raw.get("section_title"),
+            section_description=raw.get("section_description"),
+            section_object_candidates=raw.get("section_object_candidates"),
+            row_role="work",
+            variant_scope=variant_scope,
+            estimate_type_scope=estimate_type_scope,
+            allow_global_fallback=not has_hierarchy_scope or True,
+        )
+        preclassified_results[index] = result
+        raw.update(result.as_raw_data())
+        raw["row_role"] = "work"
+        raw["work_type_applicable"] = True
+        raw["gpr_included"] = True
+        raw["operator_review_required"] = bool(
+            result.needs_review
+            or result.subtype_code == UNKNOWN_SUBTYPE_CODE
+            or int(result.score or 0) < auto_accept_min_score
+        )
+        raw["operator_review_reason"] = (
+            result.reason if raw["operator_review_required"] else None
+        )
 
     return preclassified_results
 
@@ -746,64 +700,65 @@ def _enrich_work_stages_sync(
 
     stages = get_project_variant_stages(str(estimate_type_id), str(project_variant_id))
     classifier = StageClassifier(get_sequential_scoring_policy())
-    estimate_profile_id = hierarchy_selection.get("estimate_profile_id") or hierarchy_selection.get("estimate_type_id")
-    previous_context: dict | None = None
+    estimate_profile_id = (
+        hierarchy_selection.get("estimate_profile_id")
+        or hierarchy_selection.get("estimate_type_id")
+    )
     preclassified_results = preclassified_results or {}
+    previous_work_by_block: dict[str, dict] = {}
+    confident_work_rows_by_block: dict[str, list[tuple[int, dict]]] = {}
+
+    # Pass 1: classify only physical work rows. A mixed PDF block may produce
+    # several object scopes and several project stages.
     for index, row in enumerate(rows):
         raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
         row.raw_data = raw
         raw["row_order"] = index
-        if is_subtotal_row(row):
-            raw.update(
-                {
-                    "row_role": "total",
-                    "skip_taxonomy": True,
-                    "skip_stage_classifier": True,
-                    "classification_source": "subtotal_filter",
-                    "classification_reason": "subtotal_or_total_row",
-                    "operator_review_required": False,
-                }
-            )
+        if is_subtotal_row(row) or raw.get("skip_stage_classifier"):
             continue
-        if raw.get("skip_stage_classifier"):
+        row_role = str(raw.get("row_role") or "unknown")
+        if row_role != "work":
             continue
-        row_role = raw.get("row_role") or "unknown"
+
+        block_key = _row_block_key(row, index)
         match = classifier.classify_row_to_stage(
-            " ".join(str(part or "") for part in (row.section, row.work_name)),
-            str(row_role),
+            _row_item_text(row),
+            row_role,
             stages,
-            previous_context,
+            previous_work_by_block.get(block_key),
+            section_title=raw.get("section_title"),
+            section_description=raw.get("section_description"),
+            section_object_candidates=raw.get("section_object_candidates"),
+            section_block_id=block_key,
             estimate_profile_id=str(estimate_profile_id) if estimate_profile_id else None,
             row_order=index,
             global_result=preclassified_results.get(index),
         )
         if not match.stage:
-            raw.setdefault("row_role", str(row_role))
-            raw.setdefault("needs_review", match.needs_review)
-            raw.setdefault("review_reason", match.review_reason)
-            raw.setdefault("stage_match_type", match.match_type)
-            raw.setdefault("stage_match_score_json", match.score_breakdown)
+            raw.update(
+                {
+                    "needs_review": match.needs_review,
+                    "review_reason": match.review_reason,
+                    "stage_match_type": match.match_type,
+                    "stage_match_score_json": match.score_breakdown,
+                }
+            )
             continue
+
         stage_raw = match.as_raw_data(
             estimate_type_id=hierarchy_selection.get("estimate_type_id"),
             estimate_type_number=hierarchy_selection.get("estimate_type_number"),
             project_variant_id=hierarchy_selection.get("project_variant_id"),
             project_variant_number=hierarchy_selection.get("project_variant_number"),
-            row_role=str(row_role),
+            row_role=row_role,
         )
         base_result = preclassified_results.get(index)
-        preserve_base = bool(
+        if (
             base_result
             and getattr(base_result, "subtype_code", None)
             and getattr(base_result, "subtype_code", None) != "unknown/needs_review"
             and not bool(getattr(base_result, "needs_review", True))
-            and (
-                match.needs_review
-                or match.work_type_match is None
-                or match.work_type_match.needs_review
-            )
-        )
-        if preserve_base:
+        ):
             base_section, base_subtype = str(base_result.subtype_code).split("/", 1)
             stage_raw.update(
                 {
@@ -811,26 +766,78 @@ def _enrich_work_stages_sync(
                     "subtype_id": base_subtype,
                     "work_section_code": base_section,
                     "work_subtype_code": base_result.subtype_code,
+                    "work_subtype_name": getattr(base_result, "subtype_name", None),
                     "work_type_confidence": base_result.confidence,
+                    "operation_code": getattr(base_result, "operation_code", None),
+                    "selected_object_scope_code": getattr(
+                        base_result, "selected_object_scope_code", None
+                    ),
+                    "section_object_candidates": [
+                        dict(item)
+                        for item in getattr(base_result, "section_object_candidates", ())
+                    ],
                 }
             )
-            stage_raw.setdefault("work_type_match_score_json", {})["preserved_preclassified_result"] = {
-                "subtype_code": base_result.subtype_code,
-                "source": base_result.source,
-                "score": base_result.score,
-                "reason": "stage_or_stage_work_type_requires_review",
-            }
         raw.update(stage_raw)
+        raw["row_role"] = "work"
+        raw["work_type_applicable"] = True
+        raw["gpr_included"] = True
         if raw.get("section_id"):
             raw["work_section_code"] = raw.get("section_id")
         if raw.get("section_id") and raw.get("subtype_id"):
             raw["work_subtype_code"] = f"{raw['section_id']}/{raw['subtype_id']}"
-        if (
-            not match.needs_review
-            and raw.get("work_stage_number")
-            and raw.get("row_role") in {"work", "header"}
-        ):
-            previous_context = dict(raw)
+
+        if not match.needs_review and raw.get("work_stage_number"):
+            previous_work_by_block[block_key] = dict(raw)
+            confident_work_rows_by_block.setdefault(block_key, []).append((index, dict(raw)))
+
+    # Pass 2: attach materials, mechanisms, logistics and overhead to the
+    # nearest confident work in the same block. They inherit stage context for
+    # finance only and never receive their own subtype.
+    for index, row in enumerate(rows):
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        row_role = str(raw.get("row_role") or "unknown")
+        if row_role == "work" or raw.get("skip_stage_classifier"):
+            continue
+        raw["work_type_applicable"] = False
+        raw["gpr_included"] = False
+        raw["work_section_code"] = None
+        raw["work_subtype_code"] = None
+        raw["work_subtype_name"] = None
+        raw["section_id"] = None
+        raw["subtype_id"] = None
+        raw["work_type_confidence"] = None
+
+        block_key = _row_block_key(row, index)
+        candidates = confident_work_rows_by_block.get(block_key) or []
+        if not candidates:
+            continue
+        parent_index, parent_raw = min(
+            candidates,
+            key=lambda pair: (abs(pair[0] - index), 0 if pair[0] <= index else 1),
+        )
+        raw.update(
+            {
+                "work_stage_number": parent_raw.get("work_stage_number"),
+                "work_stage_title": parent_raw.get("work_stage_title"),
+                "canonical_stage_id": parent_raw.get("canonical_stage_id"),
+                "stage_occurrence_index": parent_raw.get("stage_occurrence_index"),
+                "stage_occurrence_label": parent_raw.get("stage_occurrence_label"),
+                "stage_confidence": parent_raw.get("stage_confidence"),
+                "stage_match_type": "context_inherit",
+                "stage_classification_source": "context_inheritance",
+                "context_inherited": True,
+                "context_inheritance_reason": f"{row_role}_inherits_parent_stage_only",
+                "parent_row_order": parent_index,
+                "inherited_from_row_order": parent_index,
+                "parent_work_stage_number": parent_raw.get("work_stage_number"),
+                "parent_work_section_code": parent_raw.get("work_section_code"),
+                "parent_work_subtype_code": parent_raw.get("work_subtype_code"),
+                "operator_review_required": False,
+                "needs_review": False,
+                "review_reason": None,
+            }
+        )
 
 
 async def _enrich_work_subtypes(rows: list, db: AsyncSession, hierarchy_selection: dict | None = None) -> None:
