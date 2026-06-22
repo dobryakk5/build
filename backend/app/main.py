@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -25,8 +26,16 @@ from app.api.routes.ktp_estimate  import router as ktp_estimate_router
 from app.api.routes.nw            import router as nw_router
 from app.api.routes.work_plan     import router as work_plan_router
 from app.api.routes.work_taxonomy import router as work_taxonomy_router
+from app.api.routes.work_rates    import create_work_rate_router
 from app.api.routes.activity      import router as activity_router
 from app.services.work_taxonomy_service import assert_project_hierarchy_compatible
+
+
+_APP_DIR = Path(__file__).resolve().parent
+work_rates_router = create_work_rate_router(
+    catalog_path=_APP_DIR / "data" / "work_rate_catalog_v1.json",
+    taxonomy_path=_APP_DIR / "data" / "construction_work_dictionary_v6_4_11.json",
+)
 
 
 @asynccontextmanager
@@ -75,6 +84,7 @@ app.include_router(ktp_estimate_router)
 app.include_router(nw_router)
 app.include_router(work_plan_router)
 app.include_router(work_taxonomy_router)
+app.include_router(work_rates_router)
 app.include_router(activity_router)
 
 

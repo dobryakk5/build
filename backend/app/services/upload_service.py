@@ -32,6 +32,7 @@ import re
 import tempfile
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import UploadFile, HTTPException
@@ -58,6 +59,13 @@ _parser = ExcelEstimateParser()
 # Сколько времени (сек) храним tmp-файл в ожидании подтверждения маппинга
 # (после этого времени файл не будет найден и вернётся 404)
 TMP_TTL_SECONDS = 3600
+
+# Initial auditable work-rate catalogue. Production can override the path with
+# WORK_RATE_CATALOG_FILE or replace the JSON adapter with the SQL repository.
+DEFAULT_WORK_RATE_CATALOG_FILE = (
+    Path(__file__).resolve().parents[1] / "data" / "work_rate_catalog_v1.json"
+)
+
 
 
 def _estimate_item_type(estimate: Estimate) -> str:
@@ -294,15 +302,6 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
         "index":       index,
         "row_order":   getattr(row, "row_order", 0),
         "section":     row.section,
-        "section_block_id": raw.get("section_block_id"),
-        "section_title": raw.get("section_title"),
-        "section_description": raw.get("section_description"),
-        "section_parent_context": raw.get("section_parent_context"),
-        "source_parent": {
-            "block_id": raw.get("section_block_id"),
-            "title": raw.get("section_title"),
-            "description": raw.get("section_description"),
-        },
         "item_type":   resolve_item_type(row),
         "name":        row.work_name,
         "spec":        raw.get("spec"),
@@ -849,6 +848,144 @@ def _enrich_work_stages_sync(
         )
 
 
+
+def _work_rate_catalog_path() -> Path:
+    configured = str(os.getenv("WORK_RATE_CATALOG_FILE") or "").strip()
+    return Path(configured) if configured else DEFAULT_WORK_RATE_CATALOG_FILE
+
+
+def _enrich_work_rates_sync(
+    rows: list,
+    hierarchy_selection: dict | None = None,
+    *,
+    project_id: str | None = None,
+) -> None:
+    """Attach an approved compatible rate and resolved labour to work rows.
+
+    The rate layer never changes stage/subtype classification and never blocks
+    estimate import. Unapproved observations are excluded by the selection
+    service. Missing or ambiguous rates are stored as review diagnostics.
+    """
+    catalog_path = _work_rate_catalog_path()
+    if not catalog_path.exists():
+        return
+
+    from app.services.work_rate_catalog_service import WorkRateCatalog
+    from app.services.work_rate_import_service import normalize_unit
+    from app.services.work_rate_ktp_integration import (
+        apply_rate_to_raw_data,
+        build_calculation_group_key,
+    )
+    from app.services.work_rate_models import WorkRateCalculationRow
+    from app.services.work_rate_selection_service import WorkRateSelectionService
+    from app.services.work_taxonomy_service import _load_dictionary
+
+    catalog = WorkRateCatalog.load(catalog_path)
+    if not catalog.items or not catalog.mappings:
+        return
+
+    policy = (_load_dictionary().get("operation_object_resolution_policy") or {})
+    selector = WorkRateSelectionService(policy.get("operation_packages") or {})
+    item_by_id = {item.id: item for item in catalog.items if item.is_active}
+    selection_mode = str(
+        (hierarchy_selection or {}).get("labor_source_mode")
+        or os.getenv("WORK_RATE_LABOR_SOURCE_MODE")
+        or "hybrid"
+    )
+    project_key = str(project_id or (hierarchy_selection or {}).get("project_id") or "preview")
+
+    calculation_rows: list[WorkRateCalculationRow] = []
+    raw_by_group: dict[str, list[dict]] = {}
+
+    for index, row in enumerate(rows):
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        row.raw_data = raw
+        if raw.get("row_role") != "work" or not raw.get("work_type_applicable", True):
+            continue
+
+        taxonomy_code = str(raw.get("work_subtype_code") or "").strip()
+        operation_code = str(raw.get("operation_code") or "").strip()
+        if not taxonomy_code or taxonomy_code == "unknown/needs_review" or not operation_code:
+            raw.setdefault("rate_needs_review", True)
+            raw.setdefault("rate_review_reason", "taxonomy_or_operation_missing")
+            continue
+
+        unit_code, _dimension, _factor = normalize_unit(getattr(row, "unit", None))
+        quantity = getattr(row, "quantity", None)
+        object_scope_code = raw.get("selected_object_scope_code")
+
+        selection = selector.select_rate(
+            taxonomy_code=taxonomy_code,
+            operation_code=operation_code,
+            object_scope_code=object_scope_code,
+            quantity=quantity,
+            unit_code=unit_code,
+            items=catalog.items,
+            mappings=catalog.mappings,
+            sources=catalog.sources,
+        )
+        rate_item = item_by_id.get(selection.rate_item_id) if selection.rate_item_id else None
+        group_key = build_calculation_group_key(
+            project_id=project_key,
+            parent_work_id=str(raw.get("parent_work_id") or "") or None,
+            section_block_id=str(raw.get("section_block_id") or "") or None,
+            taxonomy_code=taxonomy_code,
+            object_scope_code=str(object_scope_code or "") or None,
+            volume_scope=str(raw.get("volume_scope") or "") or None,
+        )
+
+        manual_labor = raw.get("manual_labor_hours")
+        if manual_labor is None and raw.get("labor_value_source") == "manual":
+            manual_labor = raw.get("resolved_labor_hours") or raw.get("labor_hours")
+
+        row.raw_data = apply_rate_to_raw_data(
+            raw,
+            selection=selection,
+            rate_item=rate_item,
+            quantity=quantity,
+            quantity_unit=unit_code,
+            labor_source_mode=selection_mode,
+            manual_labor_hours=manual_labor,
+            project_specific_labor_hours=raw.get("project_specific_labor_hours"),
+            fer_labor_hours=raw.get("fer_labor_hours"),
+            calculation_group_key=group_key,
+        )
+        raw = row.raw_data
+        raw["rate_catalog_version"] = str(
+            catalog.metadata.get("rate_catalog_version")
+            or catalog.metadata.get("catalog_version")
+            or WorkRateCatalog.FORMAT_VERSION
+        )
+        raw["rate_catalog_file"] = catalog_path.name
+        raw_by_group.setdefault(group_key, []).append(raw)
+        calculation_rows.append(
+            WorkRateCalculationRow(
+                row_id=str(getattr(row, "id", None) or index),
+                calculation_group_key=group_key,
+                operation_code=operation_code,
+                rate_item_id=selection.rate_item_id,
+                rate_mapping_id=selection.rate_mapping_id,
+                package_resolution_mode=raw.get("package_resolution_mode"),
+                taxonomy_code=taxonomy_code,
+                object_scope_code=object_scope_code,
+            )
+        )
+
+    for conflict in selector.detect_package_conflicts(calculation_rows):
+        diagnostics = conflict.as_dict()
+        for raw in raw_by_group.get(conflict.calculation_group_key, []):
+            raw.update(
+                {
+                    "package_conflict": True,
+                    "package_conflict_diagnostics": diagnostics,
+                    "package_resolution_mode": raw.get("package_resolution_mode") or "manual_split",
+                    "rate_auto_applicable": False,
+                    "rate_needs_review": True,
+                    "rate_review_reason": "package_conflict",
+                }
+            )
+
+
 async def _enrich_work_subtypes(rows: list, db: AsyncSession, hierarchy_selection: dict | None = None) -> None:
     preclassified_results = await run_in_threadpool(
         _enrich_work_subtypes_sync,
@@ -860,6 +997,11 @@ async def _enrich_work_subtypes(rows: list, db: AsyncSession, hierarchy_selectio
         rows,
         hierarchy_selection,
         preclassified_results,
+    )
+    await run_in_threadpool(
+        _enrich_work_rates_sync,
+        rows,
+        hierarchy_selection,
     )
 
 
@@ -1018,6 +1160,7 @@ def _parse_upload_rows_for_import(
     preclassified_results = _enrich_work_subtypes_sync(rows, hierarchy_selection)
     _enrich_work_stages_sync(rows, hierarchy_selection, preclassified_results)
     _apply_stage_operator_overrides(rows, edits)
+    _enrich_work_rates_sync(rows, hierarchy_selection)
     return rows, subtotal_rows, meta
 
 

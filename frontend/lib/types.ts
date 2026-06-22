@@ -925,10 +925,31 @@ export interface KtpSessionSubtype {
   output_per_day?: number | null;
   crew_size?: number | null;
   lag_after_days: number;
-  output_source: "default" | "manual";
+  output_source: "catalog" | "manual" | "none" | "default";
   // "estimate" — размер бригады взят из загрузки сметы (workers_count)
-  crew_source: "default" | "manual" | "estimate";
+  crew_source: "default" | "manual" | "estimate" | "none";
   lag_source: "default" | "manual";
+  selected_rate_item_id?: string | null;
+  selected_rate_mapping_id?: string | null;
+  rate_unit_code?: string | null;
+  item_unit_code?: string | null;
+  unit_conversion_factor?: number | null;
+  labor_hours_per_unit_min?: number | null;
+  labor_hours_per_unit_avg?: number | null;
+  labor_hours_per_unit_max?: number | null;
+  effective_labor_hours_per_unit_min?: number | null;
+  effective_labor_hours_per_unit_avg?: number | null;
+  effective_labor_hours_per_unit_max?: number | null;
+  session_calculated_labor_hours_min?: number | null;
+  session_calculated_labor_hours_avg?: number | null;
+  session_calculated_labor_hours_max?: number | null;
+  rate_auto_applicable?: boolean;
+  rate_needs_review?: boolean;
+  rate_review_reason?: string | null;
+  resolved_labor_source?: string | null;
+  resolved_labor_hours?: number | null;
+  rate_catalog_version?: string | null;
+  rate_catalog_file?: string | null;
 }
 
 export interface KtpWbs {

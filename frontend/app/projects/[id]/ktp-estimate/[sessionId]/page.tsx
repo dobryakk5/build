@@ -1723,6 +1723,38 @@ function CardView({
 
 // ── ЭТАП 2.5 ───────────────────────────────────────────────────────────────
 
+function fmtMetric(value: number | null | undefined): string | null {
+  if (value == null || !Number.isFinite(value)) return null;
+  const abs = Math.abs(value);
+  return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: abs > 0 && abs < 1 ? 4 : 2 }).format(value);
+}
+
+function fmtMetricRange(
+  min: number | null | undefined,
+  avg: number | null | undefined,
+  max: number | null | undefined,
+): string | null {
+  const values = [fmtMetric(min), fmtMetric(avg), fmtMetric(max)];
+  if (!values.some(Boolean)) return null;
+  return `${values[0] ?? "—"} / ${values[1] ?? "—"} / ${values[2] ?? "—"}`;
+}
+
+const RATE_REVIEW_REASON_LABELS: Record<string, string> = {
+  no_approved_compatible_rate: "нет утверждённой совместимой расценки",
+  multiple_equivalent_rate_candidates: "несколько равнозначных расценок",
+  unit_incompatible: "несовместимые единицы измерения",
+  operation_unit_conflict: "конфликт операции и единицы",
+  package_conflict: "конфликт пакетной расценки",
+  taxonomy_or_operation_missing: "нет таксономии или операции",
+  rate_not_approved: "расценка не утверждена",
+  catalog_labor_not_available: "нет каталожной трудоёмкости",
+};
+
+function rateReviewLabel(reason: string | null | undefined): string {
+  if (!reason) return "нет применимой каталожной нормы";
+  return RATE_REVIEW_REASON_LABELS[reason] || reason;
+}
+
 function StageProductivity({
   wbs,
   projectId,
@@ -1926,7 +1958,7 @@ function StageProductivity({
     return `/projects/${projectId}/types?${params.toString()}`;
   }
 
-  const cols = "minmax(220px, 1fr) 150px 150px 110px 130px";
+  const cols = "minmax(260px, 1fr) 145px 150px 110px 120px";
 
   return (
     <div>
@@ -1949,7 +1981,7 @@ function StageProductivity({
         <span>Видов работ: <b>{subtypes.length}</b></span>
         <span>Заполнено: <b>{filled}</b></span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--muted)" }}>
-          <span style={{ color: "#b45309", fontWeight: 700 }}>≈</span> примерное (из справочника)
+          <span style={{ color: "var(--blue-dark)", fontWeight: 700 }}>к</span> из каталога
         </span>
         <span style={{ display: "inline-flex", alignItems: "center", gap: 5, color: "var(--muted)" }}>
           <span style={{ width: 11, height: 11, borderRadius: 3, background: "#22c55e22", border: "1px solid #16a34a55", display: "inline-block" }} /> задано оператором
@@ -2013,6 +2045,18 @@ function StageProductivity({
                   Boolean(sourceItem?.manual_override) &&
                   sourceItem?.work_type_source === "manual";
                 const selectorOpen = selectingSubtypeId === s.id;
+                const unitLabel = s.item_unit_code || s.unit || "ед.";
+                const laborPerUnit = fmtMetricRange(
+                  s.effective_labor_hours_per_unit_min ?? s.labor_hours_per_unit_min,
+                  s.effective_labor_hours_per_unit_avg ?? s.labor_hours_per_unit_avg,
+                  s.effective_labor_hours_per_unit_max ?? s.labor_hours_per_unit_max,
+                );
+                const sessionLabor = fmtMetricRange(
+                  s.session_calculated_labor_hours_min,
+                  s.session_calculated_labor_hours_avg,
+                  s.session_calculated_labor_hours_max,
+                );
+                const catalogWarning = s.rate_auto_applicable === false ? rateReviewLabel(s.rate_review_reason) : null;
                 return (
                   <div
                     key={s.id}
@@ -2096,6 +2140,22 @@ function StageProductivity({
                       {sourceItem && (
                         <div style={{ marginTop: 3, color: "var(--muted)", fontSize: 11, lineHeight: 1.35 }}>
                           Работа: {sourceItem.name}
+                        </div>
+                      )}
+                      {(laborPerUnit || sessionLabor || catalogWarning) && (
+                        <div style={{ marginTop: 5, color: "var(--muted)", fontSize: 11, lineHeight: 1.35 }}>
+                          {laborPerUnit ? (
+                            <div>
+                              Трудоёмкость: {laborPerUnit} чел-ч/{unitLabel}
+                              {s.rate_unit_code && s.rate_unit_code !== unitLabel ? ` (расценка: ${s.rate_unit_code}, коэф. ${fmtMetric(s.unit_conversion_factor) ?? "—"})` : ""}
+                            </div>
+                          ) : null}
+                          {sessionLabor ? <div>По объёму: {sessionLabor} чел-ч</div> : null}
+                          {catalogWarning ? (
+                            <div style={{ color: "var(--red)", fontWeight: 600 }}>
+                              Каталог не применён: {catalogWarning}
+                            </div>
+                          ) : null}
                         </div>
                       )}
                       {(unknown || selectorOpen) && (
@@ -2205,9 +2265,7 @@ function NumCell({
   value: number | null | undefined;
   suffix?: string;
   disabled?: boolean;
-  // 'manual' — задано оператором (зелёное); 'default' с значением — примерное из
-  // справочника (≈); 'estimate' — взято из загрузки сметы (нейтральное)
-  source?: "default" | "manual" | "estimate";
+  source?: "catalog" | "manual" | "none" | "default" | "estimate";
   allowZero?: boolean;
   onSave: (v: number | null) => void;
 }) {
@@ -2239,18 +2297,37 @@ function NumCell({
   }
 
   const isManual = source === "manual";
+  const isCatalog = source === "catalog" && value != null;
   const isApprox = source === "default" && value != null;
   const isFromEstimate = source === "estimate";
-  const border = isManual ? "#16a34a55" : isApprox ? "#f59e0b66" : "var(--border2)";
-  const bg = isManual ? "#22c55e0d" : isApprox ? "#f59e0b0f" : "var(--bg)";
+  const isMissing = source === "none" && value == null;
+  const border = isManual
+    ? "#16a34a55"
+    : isCatalog
+      ? "#2563eb66"
+      : isApprox
+        ? "#f59e0b66"
+        : isMissing
+          ? "#ef444466"
+          : "var(--border2)";
+  const bg = isManual
+    ? "#22c55e0d"
+    : isCatalog
+      ? "#2563eb0f"
+      : isApprox
+        ? "#f59e0b0f"
+        : isMissing
+          ? "#ef44440a"
+          : "var(--bg)";
+  const indicator = isCatalog ? "к" : isApprox ? "≈" : "";
 
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
       <span
-        title={isApprox ? "Примерное значение из справочника" : undefined}
-        style={{ width: 9, fontSize: 12, fontWeight: 700, color: "#b45309", textAlign: "center" }}
+        title={isCatalog ? "Рассчитано из каталога расценок" : isApprox ? "Legacy-значение из старого справочника" : undefined}
+        style={{ width: 9, fontSize: 12, fontWeight: 700, color: isCatalog ? "var(--blue-dark)" : "#b45309", textAlign: "center" }}
       >
-        {isApprox ? "≈" : ""}
+        {indicator}
       </span>
       <input
         value={text}
@@ -2263,12 +2340,16 @@ function NumCell({
         inputMode="decimal"
         placeholder="—"
         title={
-          isApprox
-            ? "Примерное значение — измените, чтобы зафиксировать своё"
+          isCatalog
+            ? "Рассчитано из каталога расценок — измените, чтобы зафиксировать вручную"
+            : isApprox
+            ? "Legacy-значение — измените, чтобы зафиксировать вручную"
             : isManual
             ? "Задано оператором"
             : isFromEstimate
             ? "Размер бригады из загрузки сметы — можно изменить"
+            : isMissing
+            ? "Нет применимой каталожной нормы — заполните вручную"
             : undefined
         }
         style={{

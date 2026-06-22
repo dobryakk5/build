@@ -62,6 +62,8 @@ class RegisterRequest(BaseModel):
     name: str = Field(min_length=2, max_length=255)
     password: str = Field(min_length=8)
     org_name: str | None = None
+    privacy_policy_accepted: bool = False
+    personal_data_policy_accepted: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -192,6 +194,9 @@ async def register(
         settings.RATE_LIMIT_REGISTER_WINDOW_SECONDS,
         "Слишком много попыток регистрации. Повторите позже.",
     )
+
+    if not body.privacy_policy_accepted or not body.personal_data_policy_accepted:
+        raise HTTPException(400, "Для регистрации необходимо принять оба согласия")
 
     if await db.scalar(select(User).where(User.email == body.email)):
         raise HTTPException(400, "Email уже зарегистрирован")

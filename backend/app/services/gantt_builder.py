@@ -212,10 +212,24 @@ class GanttBuilder:
     ) -> float:
         """Рассчитывает плановую трудоёмкость задачи в человеко-часах."""
         quantity = getattr(estimate, "quantity", None)
+        raw_data = getattr(estimate, "raw_data", None)
+        raw_data = raw_data if isinstance(raw_data, dict) else {}
 
-        # Ручная норма трудоёмкости (чел-ч/ед.) приоритетнее ФЕР, если задана.
+        # Неразрешённый package conflict нельзя молча превращать в задачу ГПР.
+        if raw_data.get("package_conflict") and raw_data.get("package_resolution_mode") not in {"package_only", "atomic_only"}:
+            raise ValueError(
+                f"Package conflict is not resolved for estimate {getattr(estimate, 'id', '')}"
+            )
+
+        # Ручная норма трудоёмкости (чел-ч/ед.) всегда имеет высший приоритет.
         if estimate.labor_hours and estimate.quantity:
             return round(float(estimate.labor_hours) * float(estimate.quantity), 2)
+
+        # Каталог/FER/manual resolver уже определил итоговый источник. Gantt не
+        # меняет порядок приоритетов самостоятельно.
+        resolved_labor = raw_data.get("resolved_labor_hours")
+        if resolved_labor is not None and float(resolved_labor) > 0:
+            return round(float(resolved_labor), 2)
 
         # Норма из сопоставленной таблицы ФЕР × множитель.
         fer_table_id = getattr(estimate, "fer_table_id", None)

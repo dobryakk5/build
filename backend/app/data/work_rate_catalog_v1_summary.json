@@ -1,0 +1,27 @@
+{
+  "rate_catalog_version": "work_rate_catalog_v1@1.2.0",
+  "taxonomy_version": "construction_work_dictionary_v6_4_11@1.8.0",
+  "operation_policy_version": "1.2.0",
+  "normalized_items": 280,
+  "observation_items": 16,
+  "mapping_status_counts": {
+    "partially_mapped": 81,
+    "mapped": 62,
+    "unmapped": 135,
+    "excluded": 8,
+    "observation": 10
+  },
+  "review_status_counts": {
+    "needs_review": 226,
+    "auto_mapped": 70
+  },
+  "row_role_counts": {
+    "work": 288,
+    "logistics": 4,
+    "overhead": 4
+  },
+  "operation_detected_count": 114,
+  "operation_undetected_count": 182,
+  "auto_applicable_work_items": 62,
+  "mappings_count": 307
+}

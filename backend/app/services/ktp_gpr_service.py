@@ -229,13 +229,20 @@ def _apply_subtype_norm(
     duration = max(1, math.ceil(quantity / output_per_day))
 
     it.brigade_size = brigade
-    it.norm_source = "manual"
+    it.norm_source = "catalog" if spec.output_source == "catalog" else "manual"
     it.norm_kind = "vyrabotka"
     it.norm_value = round(output_per_day, 4)
     it.norm_unit = (it.unit or spec.unit or "")[:32] or None
     from app.services.ktp_estimate_service import base_subtype_code
 
-    it.norm_ref = f"подтип {base_subtype_code(spec.subtype_code)}"[:64]
+    if spec.output_source == "catalog":
+        rate_item_id = getattr(spec, "selected_rate_item_id", None)
+        mapping_id = getattr(spec, "selected_rate_mapping_id", None)
+        catalog_version = getattr(spec, "rate_catalog_version", None)
+        ref_parts = [part for part in (rate_item_id, mapping_id, catalog_version) if part]
+        it.norm_ref = ("catalog " + " ".join(ref_parts))[:64] if ref_parts else "catalog"
+    else:
+        it.norm_ref = f"подтип {base_subtype_code(spec.subtype_code)}"[:64]
     it.duration_days = max(1, min(MAX_DURATION_DAYS, int(duration)))
     it.labor_hours = float(calculate_labor_hours(it.duration_days, brigade, hours_per_day))
     return True
@@ -247,7 +254,11 @@ async def _load_subtype_specs(
     rows = await db.scalars(
         select(KtpSessionSubtype).where(KtpSessionSubtype.session_id == session_id)
     )
-    return {(r.subtype_code, r.unit): r for r in rows}
+    result = list(rows)
+    from app.services.ktp_estimate_service import enrich_session_subtypes_with_rate_data
+
+    await enrich_session_subtypes_with_rate_data(db, result)
+    return {(r.subtype_code, r.unit): r for r in result}
 
 
 async def _compute_durations(

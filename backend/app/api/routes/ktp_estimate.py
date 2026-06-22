@@ -221,12 +221,37 @@ class SessionSubtypeOut(BaseModel):
     output_per_day: float | None = None
     crew_size: int | None = None
     lag_after_days: int = 0
-    output_source: str = "default"
-    crew_source: str = "default"
+    output_source: str = "none"
+    crew_source: str = "none"
     lag_source: str = "default"
+    selected_rate_item_id: str | None = None
+    selected_rate_mapping_id: str | None = None
+    rate_unit_code: str | None = None
+    item_unit_code: str | None = None
+    unit_conversion_factor: float | None = None
+    labor_hours_per_unit_min: float | None = None
+    labor_hours_per_unit_avg: float | None = None
+    labor_hours_per_unit_max: float | None = None
+    effective_labor_hours_per_unit_min: float | None = None
+    effective_labor_hours_per_unit_avg: float | None = None
+    effective_labor_hours_per_unit_max: float | None = None
+    session_calculated_labor_hours_min: float | None = None
+    session_calculated_labor_hours_avg: float | None = None
+    session_calculated_labor_hours_max: float | None = None
+    rate_auto_applicable: bool = False
+    rate_needs_review: bool = False
+    rate_review_reason: str | None = None
+    resolved_labor_source: str | None = None
+    resolved_labor_hours: float | None = None
+    rate_catalog_version: str | None = None
+    rate_catalog_file: str | None = None
 
     @classmethod
     def of(cls, s) -> "SessionSubtypeOut":
+        def _float_attr(name: str) -> float | None:
+            value = getattr(s, name, None)
+            return float(value) if value is not None else None
+
         return cls(
             id=s.id,
             # на фронт отдаём чистый код подтипа (без per-item суффикса)
@@ -245,9 +270,30 @@ class SessionSubtypeOut(BaseModel):
             output_per_day=float(s.output_per_day) if s.output_per_day is not None else None,
             crew_size=s.crew_size,
             lag_after_days=int(s.lag_after_days or 0),
-            output_source=s.output_source,
-            crew_source=s.crew_source,
+            output_source=s.output_source or "none",
+            crew_source=s.crew_source or "none",
             lag_source=s.lag_source,
+            selected_rate_item_id=getattr(s, "selected_rate_item_id", None),
+            selected_rate_mapping_id=getattr(s, "selected_rate_mapping_id", None),
+            rate_unit_code=getattr(s, "rate_unit_code", None),
+            item_unit_code=getattr(s, "item_unit_code", None),
+            unit_conversion_factor=_float_attr("unit_conversion_factor"),
+            labor_hours_per_unit_min=_float_attr("labor_hours_per_unit_min"),
+            labor_hours_per_unit_avg=_float_attr("labor_hours_per_unit_avg"),
+            labor_hours_per_unit_max=_float_attr("labor_hours_per_unit_max"),
+            effective_labor_hours_per_unit_min=_float_attr("effective_labor_hours_per_unit_min"),
+            effective_labor_hours_per_unit_avg=_float_attr("effective_labor_hours_per_unit_avg"),
+            effective_labor_hours_per_unit_max=_float_attr("effective_labor_hours_per_unit_max"),
+            session_calculated_labor_hours_min=_float_attr("session_calculated_labor_hours_min"),
+            session_calculated_labor_hours_avg=_float_attr("session_calculated_labor_hours_avg"),
+            session_calculated_labor_hours_max=_float_attr("session_calculated_labor_hours_max"),
+            rate_auto_applicable=bool(getattr(s, "rate_auto_applicable", False)),
+            rate_needs_review=bool(getattr(s, "rate_needs_review", False)),
+            rate_review_reason=getattr(s, "rate_review_reason", None),
+            resolved_labor_source=getattr(s, "resolved_labor_source", None),
+            resolved_labor_hours=_float_attr("resolved_labor_hours"),
+            rate_catalog_version=getattr(s, "rate_catalog_version", None),
+            rate_catalog_file=getattr(s, "rate_catalog_file", None),
         )
 
 

@@ -469,6 +469,7 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
             await build_session_subtypes(db, session)
             await db.commit()
             subtypes = await _load_session_subtypes(db, session_id)
+        await enrich_session_subtypes_with_rate_data(db, subtypes)
 
     return {
         "session": session,
@@ -3487,6 +3488,83 @@ async def approve_stage2(
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 _DEFAULT_VOLUME = 100.0
+_DEFAULT_HOURS_PER_DAY = 8.0
+_OUTPUT_SOURCE_CATALOG = "catalog"
+_OUTPUT_SOURCE_MANUAL = "manual"
+_OUTPUT_SOURCE_NONE = "none"
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        if value is None or value == "":
+            return None
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result
+
+
+def _as_positive_float(value: Any) -> float | None:
+    result = _as_float(value)
+    return result if result is not None and result > 0 else None
+
+
+def _rate_raw(estimate: Estimate | None) -> dict[str, Any]:
+    raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
+    if raw.get("resolved_labor_source") == "subtype_output_per_day":
+        raw = dict(raw)
+        raw["resolved_labor_hours"] = None
+        raw["resolved_labor_source"] = None
+        raw["rate_needs_review"] = True
+        raw["rate_review_reason"] = "catalog_labor_not_available"
+    return raw
+
+
+def _effective_labor(raw: dict[str, Any], suffix: str) -> float | None:
+    effective = _as_positive_float(raw.get(f"effective_labor_hours_per_unit_{suffix}"))
+    if effective is not None:
+        return effective
+    labor = _as_positive_float(raw.get(f"labor_hours_per_unit_{suffix}"))
+    factor = _as_positive_float(raw.get("unit_conversion_factor"))
+    if labor is None or factor is None:
+        return None
+    return labor * factor
+
+
+def _rate_auto_applicable(raw: dict[str, Any]) -> bool:
+    if not raw.get("selected_rate_item_id"):
+        return False
+    if raw.get("rate_auto_applicable") is True:
+        return True
+    reason = raw.get("rate_review_reason")
+    return reason in (None, "", "quantity_missing") and _effective_labor(raw, "avg") is not None
+
+
+def _catalog_output_per_day(
+    raw: dict[str, Any],
+    *,
+    crew_size: int | None,
+    hours_per_day: float,
+) -> tuple[float | None, str]:
+    effective_avg = _effective_labor(raw, "avg")
+    if (
+        not _rate_auto_applicable(raw)
+        or effective_avg is None
+        or not crew_size
+        or crew_size <= 0
+        or hours_per_day <= 0
+    ):
+        return None, _OUTPUT_SOURCE_NONE
+    return round(float(crew_size) * float(hours_per_day) / effective_avg, 4), _OUTPUT_SOURCE_CATALOG
+
+
+def _session_labor_totals(raw: dict[str, Any], volume: float | None) -> dict[str, float | None]:
+    qty = _as_positive_float(volume)
+    totals: dict[str, float | None] = {}
+    for suffix in ("min", "avg", "max"):
+        labor = _effective_labor(raw, suffix)
+        totals[suffix] = round(qty * labor, 4) if qty is not None and labor is not None else None
+    return totals
 
 
 SESSION_SUBTYPE_ITEM_SEP = "::"
@@ -3575,17 +3653,65 @@ async def _load_session_subtypes(
     )
 
 
+async def enrich_session_subtypes_with_rate_data(
+    db: AsyncSession,
+    rows: list[KtpSessionSubtype],
+) -> None:
+    """Attach transient catalog-rate fields to subtype rows for API DTOs."""
+    item_ids = [row.item_id for row in rows if row.item_id]
+    if not item_ids:
+        return
+    items = {
+        item.id: item
+        for item in await db.scalars(select(KtpWbsItem).where(KtpWbsItem.id.in_(item_ids)))
+    }
+    estimate_ids = [item.estimate_id for item in items.values() if item.estimate_id]
+    estimates = (
+        {
+            estimate.id: estimate
+            for estimate in await db.scalars(select(Estimate).where(Estimate.id.in_(estimate_ids)))
+        }
+        if estimate_ids
+        else {}
+    )
+
+    for row in rows:
+        item = items.get(row.item_id) if row.item_id else None
+        estimate = estimates.get(item.estimate_id) if item and item.estimate_id else None
+        raw = _rate_raw(estimate)
+        totals = _session_labor_totals(raw, _as_float(row.volume))
+        item_unit_code = raw.get("item_unit_code") or (item.unit if item else None) or row.unit
+        rate_review_reason = raw.get("rate_review_reason")
+        if not raw.get("selected_rate_item_id") and not rate_review_reason:
+            rate_review_reason = "catalog_labor_not_available"
+
+        setattr(row, "selected_rate_item_id", raw.get("selected_rate_item_id"))
+        setattr(row, "selected_rate_mapping_id", raw.get("selected_rate_mapping_id"))
+        setattr(row, "rate_unit_code", raw.get("rate_unit_code") or raw.get("rate_unit"))
+        setattr(row, "item_unit_code", item_unit_code)
+        setattr(row, "unit_conversion_factor", _as_float(raw.get("unit_conversion_factor")))
+        setattr(row, "rate_auto_applicable", _rate_auto_applicable(raw))
+        setattr(row, "rate_needs_review", bool(raw.get("rate_needs_review") or not _rate_auto_applicable(raw)))
+        setattr(row, "rate_review_reason", rate_review_reason)
+        setattr(row, "resolved_labor_source", raw.get("resolved_labor_source"))
+        setattr(row, "resolved_labor_hours", _as_float(raw.get("resolved_labor_hours")))
+        setattr(row, "rate_catalog_version", raw.get("rate_catalog_version"))
+        setattr(row, "rate_catalog_file", raw.get("rate_catalog_file"))
+        for suffix in ("min", "avg", "max"):
+            setattr(row, f"labor_hours_per_unit_{suffix}", _as_float(raw.get(f"labor_hours_per_unit_{suffix}")))
+            setattr(row, f"effective_labor_hours_per_unit_{suffix}", _effective_labor(raw, suffix))
+            setattr(row, f"session_calculated_labor_hours_{suffix}", totals[suffix])
+
+
 async def build_session_subtypes(
     db: AsyncSession, session: KtpEstimateSession
 ) -> list[KtpSessionSubtype]:
     """Построить/обновить таблицу производительности сессии из принятых работ КТП.
 
-    Одна строка = одна работа (``item``) «как есть» — ничего не схлопываем, чтобы
-    разные работы одного грубого подтипа не сливались и не терялись. Подтип из
-    справочника читается с ``KtpWbsItem.work_subtype_code``; он даёт дефолты
-    (производительность/бригада/пауза) и контекст (код, macro). ``volume``
-    берётся из объёма работы; правки оператора (``*_source='manual'``) не
-    перезатираются. Исчезнувшие работы удаляются.
+    Автозаполнение производительности строится только из каталога расценок
+    v1.2 (трудоёмкость чел-ч/ед. + бригада + часы смены). Старые дефолты
+    ``WorkSubtype.output_per_day`` и ``WorkSubtype.crew_size`` не используются.
+    Ручные правки оператора не перезатираются.
     """
     from app.services.work_taxonomy_service import load_taxonomy
 
@@ -3621,22 +3747,19 @@ async def build_session_subtypes(
     # Размер бригады задаётся при загрузке сметы (EstimateBatch.workers_count) —
     # берём его как дефолт вместо справочника.
     batch = await db.get(EstimateBatch, session.estimate_batch_id)
-    batch_crew = (
-        int(batch.workers_count)
-        if batch and batch.workers_count
-        else None
-    )
+    batch_crew = int(batch.workers_count) if batch and batch.workers_count else None
+    batch_hours_per_day = float(batch.hours_per_day or _DEFAULT_HOURS_PER_DAY) if batch else _DEFAULT_HOURS_PER_DAY
 
     existing = {
         (s.subtype_code, s.unit): s
         for s in await _load_session_subtypes(db, session.id)
     }
 
-    # Бригада: приоритет — значение из загрузки сметы; иначе справочник.
-    def _crew_default(ref: WorkSubtype | None) -> tuple[int | None, str]:
+    # Бригада: приоритет — значение из загрузки сметы; иначе ручное заполнение.
+    def _crew_default() -> tuple[int | None, str]:
         if batch_crew is not None:
             return batch_crew, "estimate"
-        return (ref.crew_size if ref else None), "default"
+        return None, _OUTPUT_SOURCE_NONE
 
     # Одна строка = одна работа. Ключ уникален по item.id (закодирован в
     # subtype_code), поэтому разные работы не сливаются.
@@ -3654,11 +3777,17 @@ async def build_session_subtypes(
             if it.quantity is not None and float(it.quantity) > 0
             else _DEFAULT_VOLUME
         )
-        crew_value, crew_src = _crew_default(ref)
+        raw = _rate_raw(est)
+        crew_value, crew_src = _crew_default()
         key = (stored_code, unit)
         kept_keys.add(key)
         row = existing.get(key)
         if row is None:
+            output_value, output_source = _catalog_output_per_day(
+                raw,
+                crew_size=crew_value,
+                hours_per_day=batch_hours_per_day,
+            )
             row = KtpSessionSubtype(
                 id=_uuid(),
                 session_id=session.id,
@@ -3671,10 +3800,10 @@ async def build_session_subtypes(
                 macro_name=macro_name,
                 unit=unit,
                 volume=volume,
-                output_per_day=ref.output_per_day if ref else None,
+                output_per_day=output_value,
                 crew_size=crew_value,
                 lag_after_days=int(ref.lag_after_days) if ref else 0,
-                output_source="default",
+                output_source=output_source,
                 crew_source=crew_src,
                 lag_source="default",
             )
@@ -3689,11 +3818,17 @@ async def build_session_subtypes(
             row.macro_name = macro_name
             row.volume = volume
             # дефолтные поля обновляем из источника, ручные правки не трогаем
-            if row.output_source == "default" and ref is not None:
-                row.output_per_day = ref.output_per_day
             if row.crew_source != "manual":
                 row.crew_size = crew_value
                 row.crew_source = crew_src
+            if row.output_source != _OUTPUT_SOURCE_MANUAL:
+                output_value, output_source = _catalog_output_per_day(
+                    raw,
+                    crew_size=row.crew_size,
+                    hours_per_day=batch_hours_per_day,
+                )
+                row.output_per_day = output_value
+                row.output_source = output_source
             if row.lag_source == "default" and ref is not None:
                 row.lag_after_days = int(ref.lag_after_days)
 
@@ -3715,6 +3850,37 @@ async def rebuild_session_subtypes(
     await build_session_subtypes(db, session)
     await db.commit()
     return await get_wbs(db, project_id, session_id)
+
+
+async def _refresh_session_subtype_catalog_output(
+    db: AsyncSession,
+    row: KtpSessionSubtype,
+) -> None:
+    """Recalculate non-manual productivity from the selected catalog rate."""
+    if row.output_source == _OUTPUT_SOURCE_MANUAL:
+        return
+
+    session = await db.get(KtpEstimateSession, row.session_id)
+    batch = await db.get(EstimateBatch, session.estimate_batch_id) if session else None
+    hours_per_day = (
+        float(batch.hours_per_day or _DEFAULT_HOURS_PER_DAY)
+        if batch
+        else _DEFAULT_HOURS_PER_DAY
+    )
+
+    estimate: Estimate | None = None
+    if row.item_id:
+        item = await db.get(KtpWbsItem, row.item_id)
+        if item and item.estimate_id:
+            estimate = await db.get(Estimate, item.estimate_id)
+
+    output_value, output_source = _catalog_output_per_day(
+        _rate_raw(estimate),
+        crew_size=row.crew_size,
+        hours_per_day=hours_per_day,
+    )
+    row.output_per_day = output_value
+    row.output_source = output_source
 
 
 async def update_session_subtype(
@@ -3753,6 +3919,8 @@ async def update_session_subtype(
             raise ValueError("Размер бригады должен быть больше нуля")
         row.crew_size = int(v) if v is not None else None
         row.crew_source = "manual"
+        if row.output_source != _OUTPUT_SOURCE_MANUAL:
+            await _refresh_session_subtype_catalog_output(db, row)
     if "lag_after_days" in patch:
         v = patch["lag_after_days"]
         if v is None or int(v) < 0:

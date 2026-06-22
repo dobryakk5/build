@@ -1,6 +1,6 @@
 """Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v6_4_10.json`` is the canonical work
+``construction_work_dictionary_v6_4_11.json`` is the canonical work
 classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
@@ -22,10 +22,10 @@ from app.models import WorkPrecedence, WorkSubtype
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v6_4_10.json"
+    / "construction_work_dictionary_v6_4_11.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_10"
-PROMPT_VERSION = "estimate-v6.4.10"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_11"
+PROMPT_VERSION = "estimate-v6.4.11"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
@@ -364,6 +364,44 @@ def validate_dictionary_payload(payload: dict[str, Any]) -> None:
                     subtype_id = option.get("subtype_id")
                     if section_id and subtype_id and (str(section_id), str(subtype_id)) not in subtypes_by_section:
                         errors.append(f"stage {stage_number} option {option.get('id')} invalid subtype {section_id}/{subtype_id}")
+
+    operation_policy = payload.get("operation_object_resolution_policy")
+    if isinstance(operation_policy, dict):
+        operations = operation_policy.get("operations") or {}
+        metadata = operation_policy.get("operation_metadata") or {}
+        packages = operation_policy.get("operation_packages") or {}
+        if not isinstance(operations, dict):
+            errors.append("operation policy operations must be dict")
+            operations = {}
+        if not isinstance(metadata, dict):
+            errors.append("operation policy operation_metadata must be dict")
+            metadata = {}
+        if not isinstance(packages, dict):
+            errors.append("operation policy operation_packages must be dict")
+            packages = {}
+        for operation_code in operations:
+            if operation_code not in metadata:
+                errors.append(f"operation {operation_code} missing metadata")
+        for package_code, package in packages.items():
+            if package_code not in operations:
+                errors.append(f"package {package_code} missing operation terms")
+                continue
+            package_meta = metadata.get(package_code) or {}
+            if package_meta.get("kind") != "package":
+                errors.append(f"package {package_code} metadata kind must be package")
+            for atomic_code in (package or {}).get("included_operations") or []:
+                if atomic_code not in operations:
+                    errors.append(f"package {package_code} has missing component {atomic_code}")
+                    continue
+                atomic_meta = metadata.get(atomic_code) or {}
+                if atomic_meta.get("kind") != "atomic":
+                    errors.append(f"package {package_code} component {atomic_code} must be atomic")
+        for raw_rule in operation_policy.get("rules") or []:
+            if not isinstance(raw_rule, dict):
+                continue
+            operation_code = raw_rule.get("operation_code") or raw_rule.get("operation")
+            if operation_code and operation_code not in operations:
+                errors.append(f"operation rule references unknown operation {operation_code}")
     if errors:
         raise RuntimeError("Runtime work dictionary failed validation gates: " + "; ".join(errors[:20]))
 
@@ -864,6 +902,84 @@ def get_sequential_scoring_policy() -> dict[str, Any]:
     payload = _load_dictionary()
     policy = payload.get("sequential_scoring_policy")
     return policy if isinstance(policy, dict) else {}
+
+
+def get_operation_registry() -> dict[str, Any]:
+    """Return the additive operation registry used by rate mapping services."""
+    policy = _operation_resolution_policy()
+    return {
+        "version": policy.get("version"),
+        "operations": deepcopy(policy.get("operations") or {}),
+        "operation_metadata": deepcopy(policy.get("operation_metadata") or {}),
+        "operation_packages": deepcopy(policy.get("operation_packages") or {}),
+        "objects": deepcopy(policy.get("objects") or {}),
+        "rules": deepcopy(policy.get("rules") or []),
+    }
+
+
+def validate_taxonomy_code(code: str | None) -> bool:
+    if not code or "/" not in str(code):
+        return False
+    section_id, subtype_id = str(code).split("/", 1)
+    payload = _load_dictionary()
+    for section in payload.get("sections") or []:
+        if not isinstance(section, dict) or str(section.get("id") or "") != section_id:
+            continue
+        return any(
+            isinstance(subtype, dict) and str(subtype.get("id") or "") == subtype_id
+            for subtype in section.get("subtypes") or []
+        )
+    return False
+
+
+def get_subtype_context(code: str) -> dict[str, Any] | None:
+    if not validate_taxonomy_code(code):
+        return None
+    section_id, subtype_id = code.split("/", 1)
+    payload = _load_dictionary()
+    for section in payload.get("sections") or []:
+        if not isinstance(section, dict) or str(section.get("id") or "") != section_id:
+            continue
+        for subtype in section.get("subtypes") or []:
+            if isinstance(subtype, dict) and str(subtype.get("id") or "") == subtype_id:
+                return {
+                    "taxonomy_code": code,
+                    "section_id": section_id,
+                    "section_title": section.get("title"),
+                    "subtype_id": subtype_id,
+                    "subtype_title": subtype.get("title"),
+                    "terms": deepcopy(subtype.get("terms") or {}),
+                    "dictionary_version": dictionary_version(payload),
+                }
+    return None
+
+
+def get_operation_object_candidates(
+    operation_code: str,
+    object_scope_code: str | None = None,
+) -> list[dict[str, Any]]:
+    policy = _operation_resolution_policy()
+    candidates: list[dict[str, Any]] = []
+    for raw_rule in policy.get("rules") or []:
+        if not isinstance(raw_rule, dict):
+            continue
+        rule_operation = raw_rule.get("operation_code") or raw_rule.get("operation")
+        rule_object = raw_rule.get("object_scope_code") or raw_rule.get("object")
+        if rule_operation != operation_code:
+            continue
+        if object_scope_code and rule_object != object_scope_code:
+            continue
+        section_id = raw_rule.get("section_id")
+        subtype_id = raw_rule.get("subtype_id")
+        candidates.append({
+            "operation_code": rule_operation,
+            "object_scope_code": rule_object,
+            "section_id": section_id,
+            "subtype_id": subtype_id,
+            "taxonomy_code": f"{section_id}/{subtype_id}" if section_id and subtype_id else None,
+            "preferred_stage_number": raw_rule.get("preferred_stage_number"),
+        })
+    return candidates
 
 
 def validate_project_hierarchy_selection(
