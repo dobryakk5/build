@@ -854,6 +854,48 @@ def _work_rate_catalog_path() -> Path:
     return Path(configured) if configured else DEFAULT_WORK_RATE_CATALOG_FILE
 
 
+def _infer_operation_from_catalog_mapping(
+    *,
+    taxonomy_code: str,
+    unit_code: str | None,
+    object_scope_code: str | None,
+    mappings: list,
+    item_by_id: dict,
+) -> tuple[str | None, str | None]:
+    """Infer operation only when catalog has one safe auto-applicable option."""
+    from app.services.work_rate_models import (
+        MAPPING_EXCLUDED,
+        MAPPING_OBSERVATION,
+        MAPPING_UNMAPPED,
+    )
+    from app.services.work_rate_selection_service import WorkRateSelectionService
+
+    candidates = []
+    for mapping in mappings:
+        if not mapping.is_active or mapping.taxonomy_code != taxonomy_code:
+            continue
+        if mapping.mapping_mode in {MAPPING_EXCLUDED, MAPPING_OBSERVATION, MAPPING_UNMAPPED}:
+            continue
+        if not mapping.operation_code:
+            continue
+        if object_scope_code and mapping.object_scope_code and mapping.object_scope_code != object_scope_code:
+            continue
+        item = item_by_id.get(mapping.rate_item_id)
+        if item is None or not item.is_active or not item.has_active_mapping:
+            continue
+        if not item.auto_applicable or item.labor_avg is None or float(item.labor_avg) <= 0:
+            continue
+        if WorkRateSelectionService.unit_conversion_factor(unit_code, item.unit_code) is None:
+            continue
+        candidates.append(mapping)
+
+    operation_codes = sorted({str(mapping.operation_code) for mapping in candidates if mapping.operation_code})
+    if len(operation_codes) != 1:
+        return None, None
+    object_codes = sorted({str(mapping.object_scope_code) for mapping in candidates if mapping.object_scope_code})
+    return operation_codes[0], object_codes[0] if len(object_codes) == 1 else None
+
+
 def _enrich_work_rates_sync(
     rows: list,
     hierarchy_selection: dict | None = None,
@@ -904,15 +946,52 @@ def _enrich_work_rates_sync(
             continue
 
         taxonomy_code = str(raw.get("work_subtype_code") or "").strip()
+        unit_code, _dimension, _factor = normalize_unit(getattr(row, "unit", None))
         operation_code = str(raw.get("operation_code") or "").strip()
+        object_scope_code = raw.get("selected_object_scope_code")
+        if taxonomy_code and taxonomy_code != "unknown/needs_review" and not operation_code:
+            inferred_operation, inferred_object = _infer_operation_from_catalog_mapping(
+                taxonomy_code=taxonomy_code,
+                unit_code=unit_code,
+                object_scope_code=str(object_scope_code or "") or None,
+                mappings=catalog.mappings,
+                item_by_id=item_by_id,
+            )
+            if inferred_operation:
+                operation_code = inferred_operation
+                raw["operation_code"] = inferred_operation
+                raw["operation_source"] = "catalog_taxonomy_unit_fallback"
+                raw["operation_confidence_score"] = 0.86
+                if inferred_object and not object_scope_code:
+                    object_scope_code = inferred_object
+                    raw["selected_object_scope_code"] = inferred_object
         if not taxonomy_code or taxonomy_code == "unknown/needs_review" or not operation_code:
-            raw.setdefault("rate_needs_review", True)
-            raw.setdefault("rate_review_reason", "taxonomy_or_operation_missing")
+            raw.update(
+                {
+                    "selected_rate_item_id": None,
+                    "selected_rate_mapping_id": None,
+                    "rate_selection_source": None,
+                    "rate_confidence": None,
+                    "rate_auto_applicable": False,
+                    "rate_needs_review": True,
+                    "rate_review_reason": (
+                        "taxonomy_or_operation_missing"
+                        if not taxonomy_code or taxonomy_code == "unknown/needs_review"
+                        else "operation_missing"
+                    ),
+                    "labor_hours_per_unit_min": None,
+                    "labor_hours_per_unit_avg": None,
+                    "labor_hours_per_unit_max": None,
+                    "effective_labor_hours_per_unit_min": None,
+                    "effective_labor_hours_per_unit_avg": None,
+                    "effective_labor_hours_per_unit_max": None,
+                    "resolved_labor_hours": None,
+                    "resolved_labor_source": None,
+                }
+            )
             continue
 
-        unit_code, _dimension, _factor = normalize_unit(getattr(row, "unit", None))
         quantity = getattr(row, "quantity", None)
-        object_scope_code = raw.get("selected_object_scope_code")
 
         selection = selector.select_rate(
             taxonomy_code=taxonomy_code,

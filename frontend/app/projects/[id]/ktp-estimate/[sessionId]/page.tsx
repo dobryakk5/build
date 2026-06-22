@@ -26,6 +26,7 @@ const ORIGIN_BADGE: Record<KtpWbsItem["origin"], { label: string; color: string 
 
 function itemSourceBadge(item: KtpWbsItem) {
   if (item.work_type_source === "manual") return ORIGIN_BADGE.manual;
+  if (item.manual_override) return { label: "Утверждено", color: "#15803d" };
   return ORIGIN_BADGE[item.origin];
 }
 
@@ -61,10 +62,22 @@ function buttonStyle(
   variant: "primary" | "ghost" | "danger" = "ghost",
   disabled = false,
 ): React.CSSProperties {
+  const base = btn(variant);
+  if (disabled) {
+    return {
+      ...base,
+      border: "1px solid var(--border2)",
+      background: "#e5e7eb",
+      color: "#64748b",
+      opacity: 1,
+      cursor: "not-allowed",
+      boxShadow: "none",
+    };
+  }
   return {
-    ...btn(variant),
-    opacity: disabled ? 0.65 : 1,
-    cursor: disabled ? "not-allowed" : "pointer",
+    ...base,
+    opacity: 1,
+    cursor: "pointer",
   };
 }
 
@@ -874,6 +887,8 @@ function Stage1({
       ).length,
     0,
   );
+  const unresolvedDisputes = pendingAi + pendingReview;
+  const approveDisabled = busy || unresolvedDisputes > 0;
   const groupOptions = wbs.groups.map((g) => ({ id: g.id, title: g.title }));
 
   return (
@@ -906,8 +921,8 @@ function Stage1({
                 <Download size={16} strokeWidth={2.2} aria-hidden="true" />
               </button>
               <button
-                style={btn("primary")}
-                disabled={busy || pendingAi > 0 || pendingReview > 0}
+                style={buttonStyle("primary", approveDisabled)}
+                disabled={approveDisabled}
                 onClick={onApprove}
                 title={
                   pendingAi > 0
@@ -931,9 +946,11 @@ function Stage1({
           projectId={projectId}
         />
       )}
-      {pendingReview > 0 && (
+      {unresolvedDisputes > 0 && (
         <div style={{ ...feedbackStyle, marginBottom: 14 }}>
-          Требуют проверки строки структуры: {pendingReview}. Подтвердите выбранный этап кнопкой «Проверено» или перенесите строку в другую группу.
+          До утверждения структуры закройте все спорные строки: {unresolvedDisputes}.
+          {pendingReview > 0 ? " Подтвердите выбранный этап кнопкой «Утвердить» или перенесите строку в другую группу." : ""}
+          {pendingAi > 0 ? " Добавленные ИИ работы нужно принять или отклонить." : ""}
         </div>
       )}
 
@@ -1136,7 +1153,7 @@ function Stage1Group({
                 onClick={() => run(() => ktpEstimate.updateItem(projectId, it.id, { manual_override: true }))}
                 title="Подтвердить выбранный этап и тип"
               >
-                Проверено
+                Утвердить
               </button>
             )}
             <select
@@ -1743,6 +1760,7 @@ const RATE_REVIEW_REASON_LABELS: Record<string, string> = {
   no_approved_compatible_rate: "нет утверждённой совместимой расценки",
   multiple_equivalent_rate_candidates: "несколько равнозначных расценок",
   unit_incompatible: "несовместимые единицы измерения",
+  operation_missing: "не определена операция для подбора расценки",
   operation_unit_conflict: "конфликт операции и единицы",
   package_conflict: "конфликт пакетной расценки",
   taxonomy_or_operation_missing: "нет таксономии или операции",

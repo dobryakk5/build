@@ -166,6 +166,16 @@ class WorkRateSelectionService:
             source.source_kind == SOURCE_MANUAL
             or (source.source_kind == SOURCE_OBSERVATION and top_item.approved_as_rate)
         ) else source.source_kind
+        rate_auto_applicable = bool(
+            top_item.auto_applicable
+            and top_item.labor_avg is not None
+            and float(top_item.labor_avg) > 0
+        )
+        needs_review = quantity is None or quantity <= 0 or not rate_auto_applicable
+        review_reason = "quantity_missing" if quantity is None or quantity <= 0 else None
+        if not rate_auto_applicable:
+            review_reason = top_item.review_reason or "rate_not_approved"
+
         return RateSelectionResult(
             rate_item_id=top_item.id,
             rate_mapping_id=top_mapping.id,
@@ -185,9 +195,9 @@ class WorkRateSelectionService:
             labor_max=top_item.labor_max,
             labor_avg=top_item.labor_avg,
             labor_basis=top_item.labor_basis,
-            rate_auto_applicable=top_item.labor_avg is not None and float(top_item.labor_avg) > 0,
-            needs_review=quantity is None or quantity <= 0,
-            review_reason="quantity_missing" if quantity is None or quantity <= 0 else None,
+            rate_auto_applicable=rate_auto_applicable,
+            needs_review=needs_review,
+            review_reason=review_reason,
             candidates=candidates,
         )
 

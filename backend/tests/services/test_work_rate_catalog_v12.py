@@ -16,6 +16,7 @@ from app.services.work_rate_import_service import (
     clean_reference_markers,
     normalize_unit,
 )
+from app.services.upload_service import _infer_operation_from_catalog_mapping
 from app.services.work_rate_mapping_service import WorkRateMappingService, adapt_rule
 from app.services.work_rate_models import (
     MAPPING_DIRECT,
@@ -251,6 +252,7 @@ def test_rate_selection_exposes_unit_conversion_for_kg_to_t():
         labor_avg=10,
         labor_max=12,
         has_active_mapping=True,
+        auto_applicable=True,
         row_content_hash="metal",
     )
     mapping = WorkRateMapping(
@@ -275,6 +277,87 @@ def test_rate_selection_exposes_unit_conversion_for_kg_to_t():
     assert result.rate_unit_code == "t"
     assert result.unit_conversion_factor == pytest.approx(0.001)
     assert result.rate_auto_applicable is True
+
+
+def test_rate_selection_blocks_not_auto_applicable_rate_for_productivity():
+    selector = WorkRateSelectionService()
+    source = WorkRateSource(source_file="catalog.xlsx")
+    item = WorkRateItem(
+        source_id=source.id,
+        name="Контекстная расценка",
+        normalized_name="контекстная расценка",
+        unit_code="m2",
+        labor_avg=1.5,
+        has_active_mapping=True,
+        auto_applicable=False,
+        review_reason="contextual_mapping_requires_object",
+        row_content_hash="contextual",
+    )
+    mapping = WorkRateMapping(
+        rate_item_id=item.id,
+        operation_code="painting",
+        taxonomy_code="interior_finishing/painting",
+        mapping_mode=MAPPING_DIRECT,
+        confidence=0.99,
+    )
+    result = selector.select_rate(
+        taxonomy_code="interior_finishing/painting",
+        operation_code="painting",
+        object_scope_code=None,
+        quantity=100,
+        unit_code="m2",
+        items=[item],
+        mappings=[mapping],
+        sources=[source],
+    )
+    assert result.rate_item_id == item.id
+    assert result.rate_auto_applicable is False
+    assert result.needs_review is True
+    assert result.review_reason == "contextual_mapping_requires_object"
+
+
+def test_infer_operation_from_catalog_mapping_requires_single_auto_applicable_operation():
+    auto_item = WorkRateItem(
+        name="Укладка труб тёплого пола",
+        unit_code="m2",
+        labor_avg=0.69,
+        has_active_mapping=True,
+        auto_applicable=True,
+        row_content_hash="heating",
+    )
+    blocked_item = WorkRateItem(
+        name="Контекстная расценка",
+        unit_code="m2",
+        labor_avg=1.0,
+        has_active_mapping=True,
+        auto_applicable=False,
+        row_content_hash="blocked",
+    )
+    mappings = [
+        WorkRateMapping(
+            rate_item_id=auto_item.id,
+            operation_code="underfloor_heating_pipe_installation",
+            taxonomy_code="mep_internal/heating",
+            mapping_mode=MAPPING_DIRECT,
+            confidence=0.99,
+        ),
+        WorkRateMapping(
+            rate_item_id=blocked_item.id,
+            operation_code="radiator_installation",
+            taxonomy_code="mep_internal/heating",
+            mapping_mode=MAPPING_DIRECT,
+            confidence=0.99,
+        ),
+    ]
+    operation_code, object_scope_code = _infer_operation_from_catalog_mapping(
+        taxonomy_code="mep_internal/heating",
+        unit_code="m2",
+        object_scope_code=None,
+        mappings=mappings,
+        item_by_id={auto_item.id: auto_item, blocked_item.id: blocked_item},
+    )
+    assert operation_code == "underfloor_heating_pipe_installation"
+    assert object_scope_code is None
 
 
 def test_catalog_output_uses_effective_labor_hours_per_item_unit():
