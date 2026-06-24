@@ -1,7 +1,7 @@
 from datetime import datetime, date
 import uuid
 from sqlalchemy import String, Text, Date, Integer, SmallInteger, Boolean, Numeric, ForeignKey, text
-from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy import TIMESTAMP
 TIMESTAMPTZ = TIMESTAMP(timezone=True)
@@ -36,6 +36,27 @@ class GanttTask(Base, TimestampMixin, SoftDeleteMixin):
     act_signed:   Mapped[bool]      = mapped_column(Boolean, default=False)
     # Fix 7: NUMERIC позволяет midpoint-вставку без UPDATE соседей
     row_order:    Mapped[float]     = mapped_column(Numeric(20, 10), default=1000)
+    task_kind: Mapped[str | None] = mapped_column(String(32))
+    source_row_key: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False))
+    projection_id: Mapped[str | None] = mapped_column(String(96))
+    stage_instance_id: Mapped[str | None] = mapped_column(String(255))
+    template_stage_number: Mapped[str | None] = mapped_column(String(64))
+    stage_number: Mapped[str | None] = mapped_column(String(64))
+    canonical_stage_id: Mapped[str | None] = mapped_column(String(255))
+    floor_number: Mapped[int | None] = mapped_column(Integer)
+    floor_kind: Mapped[str | None] = mapped_column(String(32))
+    floor_label: Mapped[str | None] = mapped_column(String(128))
+    floor_component: Mapped[str | None] = mapped_column(String(64))
+    component_role: Mapped[str | None] = mapped_column(String(128))
+    operation_code: Mapped[str | None] = mapped_column(String(128))
+    operation_package_code: Mapped[str | None] = mapped_column(String(128))
+    semantic_stage_option_id: Mapped[str | None] = mapped_column(String(128))
+    stage_option_source: Mapped[str | None] = mapped_column(String(64))
+    work_scope_key: Mapped[str | None] = mapped_column(String(255))
+    applicability_hash: Mapped[str | None] = mapped_column(String(64))
+    applicability_hash_version: Mapped[int | None] = mapped_column(SmallInteger)
+    applicability_schema_version: Mapped[str | None] = mapped_column(String(64))
+    projection_metadata: Mapped[dict | None] = mapped_column(JSONB)
 
     project:        Mapped["Project"]             = relationship(back_populates="gantt_tasks")
     estimate_batch: Mapped["EstimateBatch|None"]  = relationship(back_populates="gantt_tasks")

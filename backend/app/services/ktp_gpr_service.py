@@ -12,7 +12,7 @@ import asyncio
 import logging
 import math
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
 from sqlalchemy import delete, or_, select
@@ -41,6 +41,7 @@ from app.services.gantt_calculations import (
     calculate_labor_hours,
     calculate_working_days,
 )
+from app.services.ktp_estimate_service import gpr_blocker
 from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
 
 logger = logging.getLogger(__name__)
@@ -126,7 +127,7 @@ async def _process_gpr(job_id: str) -> None:
             return
 
         job.status = "processing"
-        job.started_at = datetime.utcnow()
+        job.started_at = datetime.now(timezone.utc)
         session.status = "gpr_processing"
         await db.commit()
 
@@ -154,6 +155,16 @@ async def _process_gpr(job_id: str) -> None:
             groups = [g for g in groups if g.accepted_items]
             if not groups:
                 raise ValueError("В КТП нет принятых работ для построения ГПР")
+
+            blocked = [
+                it for g in groups for it in g.accepted_items if gpr_blocker(it)
+            ]
+            if blocked:
+                examples = ", ".join(str(it.name) for it in blocked[:5])
+                raise ValueError(
+                    "ГПР нельзя построить: есть неподтверждённые этапы, типы работ "
+                    "или нормы трудоёмкости. Подтвердите позиции КТП: " + examples
+                )
 
             hours_per_day = float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY)
             default_brigade = max(1, int(batch.workers_count or DEFAULT_BRIGADE_SIZE))
@@ -199,7 +210,7 @@ async def _process_gpr(job_id: str) -> None:
             job.status = "failed"
             job.result = {"error": str(exc), "warnings": warnings}
         finally:
-            job.finished_at = datetime.utcnow()
+            job.finished_at = datetime.now(timezone.utc)
             await db.commit()
 
 
@@ -229,22 +240,44 @@ def _apply_subtype_norm(
     duration = max(1, math.ceil(quantity / output_per_day))
 
     it.brigade_size = brigade
-    it.norm_source = "catalog" if spec.output_source == "catalog" else "manual"
+    it.norm_source = "manual"
     it.norm_kind = "vyrabotka"
     it.norm_value = round(output_per_day, 4)
     it.norm_unit = (it.unit or spec.unit or "")[:32] or None
     from app.services.ktp_estimate_service import base_subtype_code
 
-    if spec.output_source == "catalog":
-        rate_item_id = getattr(spec, "selected_rate_item_id", None)
-        mapping_id = getattr(spec, "selected_rate_mapping_id", None)
-        catalog_version = getattr(spec, "rate_catalog_version", None)
-        ref_parts = [part for part in (rate_item_id, mapping_id, catalog_version) if part]
-        it.norm_ref = ("catalog " + " ".join(ref_parts))[:64] if ref_parts else "catalog"
-    else:
-        it.norm_ref = f"подтип {base_subtype_code(spec.subtype_code)}"[:64]
+    it.norm_ref = f"подтип {base_subtype_code(spec.subtype_code)}"[:64]
     it.duration_days = max(1, min(MAX_DURATION_DAYS, int(duration)))
     it.labor_hours = float(calculate_labor_hours(it.duration_days, brigade, hours_per_day))
+    return True
+
+
+def _apply_precalculated_labor(
+    it: KtpWbsItem,
+    hours_per_day: float,
+    default_brigade: int,
+) -> bool:
+    """Ground duration from projection-specific catalog/user labour.
+
+    Stage 8 stores a rate per normalized base quantity.  Stage 10 calculates
+    labour for every floor projection during KTP materialization.  When that
+    value is present it is more reliable than subtype output or an AI estimate.
+    """
+    labor = getattr(it, "labor_hours", None)
+    try:
+        labor_value = float(labor)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(labor_value) or labor_value <= 0:
+        return False
+    brigade = max(1, int(getattr(it, "brigade_size", None) or default_brigade or DEFAULT_BRIGADE_SIZE))
+    duration = calculate_working_days(labor_value, brigade, hours_per_day) or 1
+    it.brigade_size = brigade
+    it.duration_days = max(1, min(MAX_DURATION_DAYS, int(duration)))
+    if not getattr(it, "norm_source", None):
+        it.norm_source = "rate_catalog"
+    if not getattr(it, "norm_kind", None):
+        it.norm_kind = "norm_time"
     return True
 
 
@@ -254,11 +287,7 @@ async def _load_subtype_specs(
     rows = await db.scalars(
         select(KtpSessionSubtype).where(KtpSessionSubtype.session_id == session_id)
     )
-    result = list(rows)
-    from app.services.ktp_estimate_service import enrich_session_subtypes_with_rate_data
-
-    await enrich_session_subtypes_with_rate_data(db, result)
-    return {(r.subtype_code, r.unit): r for r in result}
+    return {(r.subtype_code, r.unit): r for r in rows}
 
 
 async def _compute_durations(
@@ -306,7 +335,9 @@ async def _compute_durations(
             spec = specs.get((session_subtype_code(it, code), unit))
             if spec is not None:
                 g.prod_lag_after = max(g.prod_lag_after, int(spec.lag_after_days or 0))
-            if _apply_subtype_norm(it, spec, hours_per_day, default_brigade):
+            if _apply_precalculated_labor(it, hours_per_day, default_brigade):
+                grounded.add(it.id)
+            elif _apply_subtype_norm(it, spec, hours_per_day, default_brigade):
                 grounded.add(it.id)
     if grounded and on_progress:
         await on_progress(
@@ -616,6 +647,27 @@ async def _resolve_group_dependencies(
     """
     if len(groups) < 2:
         return []
+
+    # Variant 2.7 uses deterministic stage-instance dependencies.  AI remains
+    # the fallback for all other project variants and legacy sessions.
+    from app.services.ktp_floor_sequence_service import (
+        build_brick_house_floor_dependencies,
+        sequence_is_acyclic,
+    )
+
+    floor_report = build_brick_house_floor_dependencies(groups)
+    if floor_report.applicable:
+        if floor_report.unresolved_group_ids:
+            warnings.append(
+                "Не удалось однозначно включить в поэтажный граф группы: "
+                + ", ".join(group_id[:8] for group_id in floor_report.unresolved_group_ids)
+            )
+        edges = list(floor_report.edges)
+        if not sequence_is_acyclic(groups, edges):
+            warnings.append("Поэтажная схема зависимостей содержала цикл; циклические рёбра удалены")
+            return _drop_cycles(groups, edges, warnings)
+        return edges
+
     fallback_ids = {g.id for g in groups if _is_fallback_group(g.title)}
 
     lines = "\n".join(
@@ -780,13 +832,29 @@ async def _write_gantt(
         await db.execute(
             GanttTask.__table__.update()
             .where(GanttTask.id.in_(existing_ids))
-            .values(deleted_at=datetime.utcnow())
+            .values(deleted_at=datetime.now(timezone.utc))
         )
         await db.flush()
 
     hours_per_day = float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY)
     row_order = await _get_row_order_offset(project_id, db)
     start_default = batch.start_date or date.today()
+
+    def _copy_stage_metadata(target, source) -> None:
+        for field in (
+            "stage_instance_id", "template_stage_number", "stage_number",
+            "canonical_stage_id", "floor_number", "floor_kind", "floor_label",
+            "floor_component", "component_role", "source_row_key", "projection_id",
+            "operation_code", "operation_package_code", "semantic_stage_option_id",
+            "stage_option_source", "work_scope_key", "applicability_hash",
+            "applicability_hash_version", "applicability_schema_version",
+        ):
+            value = getattr(source, field, None)
+            if value is not None:
+                try:
+                    setattr(target, field, value)
+                except Exception:  # noqa: BLE001 - optional ORM extension fields
+                    logger.debug("Cannot copy Gantt metadata %s", field)
 
     # корневая задача батча
     max_end = max(
@@ -813,6 +881,7 @@ async def _write_gantt(
 
     tasks = 1
     group_task_id: dict[str, str] = {}
+    leaf_task_ids_by_group: dict[str, list[str]] = {}
     for g in groups:
         g_task = GanttTask(
             id=_uuid(),
@@ -828,6 +897,7 @@ async def _write_gantt(
             type="project",
             row_order=row_order,
         )
+        _copy_stage_metadata(g_task, g)
         db.add(g_task)
         g.gantt_task_id = g_task.id
         group_task_id[g.id] = g_task.id
@@ -852,8 +922,10 @@ async def _write_gantt(
                 type="task",
                 row_order=row_order,
             )
+            _copy_stage_metadata(i_task, it)
             db.add(i_task)
             it.gantt_task_id = i_task.id
+            leaf_task_ids_by_group.setdefault(g.id, []).append(i_task.id)
             row_order += 1.0
             tasks += 1
 
@@ -869,6 +941,54 @@ async def _write_gantt(
             lag = int(getattr(group_by_id.get(dep_gid), "prod_lag_after", 0) or 0)
             db.add(TaskDependency(task_id=t1, depends_on=t2, lag_days=lag))
             deps += 1
+
+    # Synthetic milestone joins the last-floor partitions branch and the roof
+    # branch. It is deliberately not used as an automatic predecessor for the
+    # facade contour (2.7.13/2.7.15/2.7.16).
+    from app.services.ktp_floor_sequence_service import (
+        STRUCTURAL_COMPLETION_STAGE_INSTANCE_ID,
+        build_brick_house_floor_dependencies,
+    )
+
+    floor_report = build_brick_house_floor_dependencies(groups)
+    milestone = floor_report.milestone
+    if milestone is not None:
+        wait_leaf_ids: list[str] = []
+        for group_id in milestone.wait_group_ids:
+            leaf_ids = leaf_task_ids_by_group.get(group_id) or []
+            if leaf_ids:
+                wait_leaf_ids.append(leaf_ids[-1])
+            elif group_task_id.get(group_id):
+                wait_leaf_ids.append(group_task_id[group_id])
+        if wait_leaf_ids:
+            wait_groups = [group_by_id[group_id] for group_id in milestone.wait_group_ids if group_id in group_by_id]
+            milestone_start = max(
+                task_end_date(group.start_date or start_default, group.duration_days or 1)
+                for group in wait_groups
+            ) if wait_groups else start_default
+            milestone_task = GanttTask(
+                id=_uuid(),
+                project_id=project_id,
+                estimate_batch_id=batch_id,
+                parent_id=root.id,
+                name="Завершение конструктивного блока",
+                start_date=milestone_start,
+                working_days=0,
+                hours_per_day=hours_per_day,
+                progress=0,
+                is_group=False,
+                type="task",
+                row_order=row_order,
+            )
+            setattr(milestone_task, "task_kind", "milestone")
+            setattr(milestone_task, "stage_instance_id", STRUCTURAL_COMPLETION_STAGE_INSTANCE_ID)
+            db.add(milestone_task)
+            row_order += 1.0
+            tasks += 1
+            await db.flush()
+            for wait_task_id in wait_leaf_ids:
+                db.add(TaskDependency(task_id=milestone_task.id, depends_on=wait_task_id, lag_days=0))
+                deps += 1
 
     batch.start_date = start_default
     await db.flush()

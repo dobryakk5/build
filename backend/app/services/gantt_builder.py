@@ -141,6 +141,10 @@ class GanttBuilder:
         group_stack: list[tuple[str, GanttTaskDTO]] = []
 
         for est in ordered_estimates:
+            raw_data = getattr(est, "raw_data", None)
+            raw_data = raw_data if isinstance(raw_data, dict) else {}
+            if raw_data.get("calculation_suppressed"):
+                continue
             group_path = self._estimate_group_path(est)
             color = self._section_color(group_path[0])
 

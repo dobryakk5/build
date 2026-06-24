@@ -2,15 +2,18 @@
 
 Production installations should replace the JSON repository with the SQL
 schema from migrations/057_work_rate_catalog.sql while preserving endpoints.
+Personal override endpoints are fail-closed: the router factory requires an
+authentication dependency and never trusts a client-supplied user_id.
 """
 from __future__ import annotations
 
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.services.work_rate_catalog_service import WorkRateCatalog
@@ -18,6 +21,7 @@ from app.services.work_rate_import_service import WorkRateImportService
 from app.services.work_rate_mapping_service import WorkRateMappingService
 from app.services.work_rate_selection_service import WorkRateSelectionService
 from app.services.work_rate_models import MAPPING_MODES, WorkRateMapping
+from app.services.user_work_rate_override_service import UserWorkRateOverrideRepository
 
 
 class CalculatePreviewRequest(BaseModel):
@@ -44,12 +48,27 @@ class UpdateRateRequest(BaseModel):
     labor_avg: float | None = Field(default=None, ge=0)
     review_status: str | None = None
     is_active: bool | None = None
+    approved_as_rate: bool | None = None
+    auto_applicable: bool | None = None
+    resolution_status: str | None = None
+
+
+class UpsertUserRateOverrideRequest(BaseModel):
+    source_rate_id: str
+    selected_target_code: str
+    unit_code: str
+    norm_base_quantity: float = Field(gt=0)
+    applicability: dict[str, Any] = Field(default_factory=dict)
+    input_value: float = Field(gt=0)
+    input_unit: str
+    shift_duration_hours: float = Field(default=8.0, gt=0)
 
 
 class CreateMappingRequest(BaseModel):
     operation_code: str | None = None
     taxonomy_code: str | None = None
     object_scope_code: str | None = None
+    rate_context_code: str | None = None
     mapping_mode: str
     priority: int = 100
     confidence: float = Field(default=1.0, ge=0, le=1)
@@ -61,6 +80,7 @@ class UpdateMappingRequest(BaseModel):
     operation_code: str | None = None
     taxonomy_code: str | None = None
     object_scope_code: str | None = None
+    rate_context_code: str | None = None
     mapping_mode: str | None = None
     priority: int | None = None
     confidence: float | None = Field(default=None, ge=0, le=1)
@@ -83,11 +103,19 @@ def create_work_rate_router(
     *,
     catalog_path: str | Path,
     taxonomy_path: str | Path,
+    authenticated_user_dependency: Callable[..., Any],
 ) -> APIRouter:
     router = APIRouter(prefix="/api/work-rates", tags=["work-rates"])
     catalog_file = Path(catalog_path)
     taxonomy_file = Path(taxonomy_path)
     lock = threading.RLock()
+
+    def authenticated_user_id(authenticated_user: Any) -> str:
+        raw_user_id = getattr(authenticated_user, "id", authenticated_user)
+        user_id = str(raw_user_id or "").strip()
+        if not user_id:
+            raise HTTPException(401, "authentication_required")
+        return user_id
 
     def load() -> WorkRateCatalog:
         return WorkRateCatalog.load(catalog_file)
@@ -124,6 +152,44 @@ def create_work_rate_router(
             raise HTTPException(404, "Import run not found")
         return run.as_dict()
 
+    @router.get("/user-overrides")
+    def list_user_rate_overrides(
+        authenticated_user: Any = Depends(authenticated_user_dependency),
+    ) -> list[dict[str, Any]]:
+        user_id = authenticated_user_id(authenticated_user)
+        return [
+            row.as_dict()
+            for row in UserWorkRateOverrideRepository().list(user_id=user_id)
+        ]
+
+    @router.put("/user-overrides")
+    def upsert_user_rate_override(
+        body: UpsertUserRateOverrideRequest,
+        authenticated_user: Any = Depends(authenticated_user_dependency),
+    ) -> dict[str, Any]:
+        user_id = authenticated_user_id(authenticated_user)
+        try:
+            row = UserWorkRateOverrideRepository().upsert(
+                user_id=user_id,
+                **_body_dict(body),
+            )
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return row.as_dict()
+
+    @router.delete("/user-overrides/{override_id}")
+    def deactivate_user_rate_override(
+        override_id: str,
+        authenticated_user: Any = Depends(authenticated_user_dependency),
+    ) -> dict[str, Any]:
+        user_id = authenticated_user_id(authenticated_user)
+        if not UserWorkRateOverrideRepository().deactivate(
+            override_id,
+            user_id=user_id,
+        ):
+            raise HTTPException(404, "User rate override not found")
+        return {"id": override_id, "is_active": False}
+
     @router.get("")
     def list_rates(
         review_status: str | None = None,
@@ -148,6 +214,10 @@ def create_work_rate_router(
                 continue
             row = item.as_dict()
             row["operation_code"] = operation_by_item.get(item.id)
+            row["rate_context_code"] = next((
+                mapping.rate_context_code for mapping in catalog.mappings
+                if mapping.rate_item_id == item.id and mapping.is_active and mapping.is_primary
+            ), None)
             result.append(row)
         return result
 
@@ -226,6 +296,7 @@ def create_work_rate_router(
                 taxonomy_subtype_id=subtype_id,
                 taxonomy_code=body.taxonomy_code,
                 object_scope_code=body.object_scope_code,
+                rate_context_code=body.rate_context_code,
                 mapping_mode=body.mapping_mode,
                 priority=body.priority,
                 confidence=body.confidence,

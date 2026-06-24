@@ -15,6 +15,9 @@ class Action(str, Enum):
     REPORT_DELAY     = "report_delay"
 
 
+REVALIDATE_BLOCKED_BATCH_PERMISSION = "estimate_batch.revalidate_blocked"
+
+
 ROLE_PERMISSIONS: dict[str, set[Action]] = {
     "owner": {
         Action.VIEW, Action.EDIT, Action.DELETE, Action.COMMENT,
@@ -43,3 +46,13 @@ ROLE_PERMISSIONS: dict[str, set[Action]] = {
 
 def can(role: str, action: Action) -> bool:
     return action in ROLE_PERMISSIONS.get(role, set())
+
+
+def project_permission_codes(role: str) -> set[str]:
+    if role in {"owner", "pm"}:
+        return {REVALIDATE_BLOCKED_BATCH_PERMISSION}
+    return set()
+
+
+def has_project_permission(role: str, permission_code: str) -> bool:
+    return permission_code in project_permission_codes(role)

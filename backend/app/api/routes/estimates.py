@@ -54,8 +54,16 @@ from app.services.preview_session import (
     try_consume_preview_session,
     update_preview_session,
 )
+from app.services.estimate_batch_revalidation_service import BlockedBatchGuard, RevalidationDomainError
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
+
+
+def _raise_batch_guard(exc: RevalidationDomainError) -> None:
+    detail = {"code": exc.code}
+    if exc.details:
+        detail["details"] = exc.details
+    raise HTTPException(exc.http_status, detail=detail) from exc
 
 from app.core.estimate_types import (
     ESTIMATE_ITEM_TYPE_WORK,
@@ -165,6 +173,18 @@ def _parse_clarification_answers(raw: str | None) -> dict | None:
     return _normalize_clarification_payload(parsed)
 
 
+def _parse_building_params(raw: str | None) -> dict | None:
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Некорректный JSON параметров здания")
+    if not isinstance(parsed, dict):
+        raise HTTPException(400, "Параметры здания должны быть JSON-объектом")
+    return parsed
+
+
 def _public_clarification_answers(value: dict | None) -> dict | None:
     if not isinstance(value, dict):
         return None
@@ -245,6 +265,7 @@ async def upload_estimate(
     project_id:       UUID,
     file:             UploadFile = File(...),
     clarification_answers: str | None = Form(default=None),
+    building_params: str | None = Form(default=None),
     start_date:       date       = Query(default_factory=date.today),
     workers:          int        = Query(default=3, ge=1, le=20),
     estimate_kind:    int | None = Query(default=None, ge=1, le=9),
@@ -261,6 +282,7 @@ async def upload_estimate(
     Клиент опрашивает GET /jobs/{job_id} каждые 1-2 секунды.
     """
     parsed_clarification_answers = _parse_clarification_answers(clarification_answers)
+    parsed_building_params = _parse_building_params(building_params)
     resolved_estimate_kind, hierarchy_selection = _resolve_upload_hierarchy_selection(
         estimate_type_id,
         project_variant_id,
@@ -277,6 +299,7 @@ async def upload_estimate(
         complex_mode     = complex_mode,
         clarification_answers = parsed_clarification_answers,
         hierarchy_selection = hierarchy_selection,
+        building_params = parsed_building_params,
         db               = db,
     )
     return UploadStartResponse(job_id=job.id)
@@ -298,6 +321,7 @@ class ConfirmMappingRequest(BaseModel):
     project_variant_id: str | None = None
     complex_mode: bool = False
     clarification_answers: dict | None = None
+    building_params: dict | None = None
     parser_profile: str = "manual_mapping"
 
 
@@ -330,6 +354,7 @@ async def confirm_mapping(
         complex_mode  = body.complex_mode,
         clarification_answers = _normalize_clarification_payload(body.clarification_answers),
         hierarchy_selection = hierarchy_selection,
+        building_params = body.building_params,
         db          = db,
     )
     return UploadStartResponse(job_id=job.id)
@@ -352,6 +377,7 @@ async def preview_estimate(
     project_id:       UUID,
     file:             UploadFile = File(...),
     clarification_answers: str | None = Form(default=None),
+    building_params: str | None = Form(default=None),
     start_date:       date       = Query(default_factory=date.today),
     workers:          int        = Query(default=3, ge=1, le=20),
     estimate_kind:    int | None = Query(default=None, ge=1, le=9),
@@ -377,6 +403,7 @@ async def preview_estimate(
         project_variant_id,
         estimate_kind,
     )
+    parsed_building_params = _parse_building_params(building_params)
 
     try:
         return await preview_upload_job(
@@ -391,6 +418,7 @@ async def preview_estimate(
             build_gantt      = build_gantt,
             clarification_answers = _parse_clarification_answers(clarification_answers),
             hierarchy_selection = hierarchy_selection,
+            building_params = parsed_building_params,
             hierarchy_suggestions = suggest_project_hierarchy_variants,
             suggestion_estimate_type_id = estimate_type_id,
             db               = db,
@@ -804,6 +832,10 @@ async def build_estimate_batch_gantt(
     member: ProjectMember = Depends(require_action(Action.EDIT)),
     db: AsyncSession = Depends(get_db),
 ):
+    try:
+        await BlockedBatchGuard(db).ensure_operation_allowed(str(estimate_batch_id), "recalculate")
+    except RevalidationDomainError as exc:
+        _raise_batch_guard(exc)
     result = await build_gantt_for_estimate_batch(
         project_id=str(project_id),
         estimate_batch_id=str(estimate_batch_id),

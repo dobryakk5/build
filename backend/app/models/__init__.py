@@ -19,6 +19,17 @@ from .ktp_estimate import (
     KtpWbsGroupDependency,
     KtpSessionSubtype,
 )
+from .stage10 import (
+    EstimatePreviewSession,
+    EstimatePreviewRow,
+    TransactionalOutbox,
+    EstimateImportJob,
+    EstimateQuantityProjection,
+    EstimatePackageResolution,
+    StageInstanceProjectionSummary,
+    LegacyScopeMigrationRun,
+    EstimateBatchRevalidationRun,
+)
 from .foreman_task_report import ForemanTaskReport
 from .other        import (
     Comment,
@@ -83,6 +94,11 @@ __all__ = [
     "KtpGroup", "KtpCard",
     "KtpEstimateSession", "KtpWbsGroup", "KtpWbsItem", "KtpWbsGroupDependency",
     "KtpSessionSubtype",
+    "EstimatePreviewSession", "EstimatePreviewRow",
+    "TransactionalOutbox", "EstimateImportJob",
+    "EstimateQuantityProjection", "EstimatePackageResolution",
+    "StageInstanceProjectionSummary", "LegacyScopeMigrationRun",
+    "EstimateBatchRevalidationRun",
     "ForemanTaskReport",
     "Comment", "TaskHistory", "Job",
     "DailyReport", "DailyReportItem",

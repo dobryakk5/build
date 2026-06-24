@@ -51,6 +51,12 @@ from app.services.work_taxonomy_service import (
     get_project_variant_stages,
     normalize_text,
 )
+from app.services.taxonomy_compatibility_service import (
+    assert_reclassification_allowed,
+    batch_uses_legacy_taxonomy,
+    build_persisted_stage_catalog,
+    resolved_stage_title,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +133,13 @@ def _uuid() -> str:
 
 
 def gpr_blocker(item: KtpWbsItem) -> bool:
-    """Computed GPR blocker, not stored in DB."""
+    """Computed GPR blocker, not stored in DB.
+
+    A missing personal rate is a hard duration blocker and cannot be bypassed by
+    manually confirming an otherwise reviewable KTP row.
+    """
+    if getattr(item, "duration_block_reason", None) == "user_rate_input_required":
+        return True
     return bool(
         (item.operator_review_required or item.work_type_needs_review)
         and not item.gpr_confirmed
@@ -469,7 +481,6 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
             await build_session_subtypes(db, session)
             await db.commit()
             subtypes = await _load_session_subtypes(db, session_id)
-        await enrich_session_subtypes_with_rate_data(db, subtypes)
 
     return {
         "session": session,
@@ -499,20 +510,12 @@ async def _attach_stage_review_metadata(db: AsyncSession, groups: list[KtpWbsGro
                 setattr(item, "_stage_needs_review", False)
                 setattr(item, "_stage_review_reason", None)
                 setattr(item, "_stage_confidence_percent", None)
-                setattr(item, "_section_block_id", None)
-                setattr(item, "_section_title", None)
-                setattr(item, "_section_description", None)
-                setattr(item, "_section_parent_context", None)
                 continue
             raw = est.raw_data if isinstance(est.raw_data, dict) else {}
             needs_review, reason, percent = _estimate_stage_review_info(est, raw)
             setattr(item, "_stage_needs_review", needs_review)
             setattr(item, "_stage_review_reason", reason)
             setattr(item, "_stage_confidence_percent", percent)
-            setattr(item, "_section_block_id", raw.get("section_block_id"))
-            setattr(item, "_section_title", raw.get("section_title"))
-            setattr(item, "_section_description", raw.get("section_description"))
-            setattr(item, "_section_parent_context", raw.get("section_parent_context"))
             if needs_review and not item.manual_override:
                 item.operator_review_required = True
 
@@ -748,7 +751,7 @@ async def _process_stage1(job_id: str) -> None:
 
             await _progress("Сохраняем структуру работ…")
             groups, items, coverage_warnings = _materialize_wbs(
-                session, raw_groups, row_keys
+                session, raw_groups, row_keys, owner_user_id=job.created_by
             )
             for g in groups:
                 db.add(g)
@@ -1002,10 +1005,7 @@ def _estimate_stage_number(est: Estimate) -> str | None:
 
 
 def _estimate_stage_title(est: Estimate) -> str | None:
-    raw = est.raw_data if isinstance(est.raw_data, dict) else {}
-    value = est.work_stage_title or raw.get("work_stage_title")
-    value = str(value).strip() if value is not None else ""
-    return value or None
+    return resolved_stage_title(est)
 
 
 _WEAK_STAGE_TEXT_MATCH_TYPES = {
@@ -1159,15 +1159,24 @@ def _build_stage_aware_groups(
             "Для новой структуры работ нужен выбранный тип сметы и вариант объекта. "
             "Выберите тип/подтип на шаге загрузки или включите «Оставить структуру сметы»."
         )
-    try:
-        allowed_stages = get_project_variant_stages(
-            str(batch.estimate_type_id),
-            str(batch.project_variant_id),
-        )
-    except ValueError as exc:
-        raise ValueError(
-            "Выбранный тип сметы/вариант объекта не найден в справочнике JSON v6"
-        ) from exc
+    legacy_taxonomy = batch_uses_legacy_taxonomy(batch, estimates)
+    if legacy_taxonomy:
+        allowed_stages = build_persisted_stage_catalog(estimates)
+        if not allowed_stages:
+            raise ValueError(
+                "В старой смете не сохранены названия этапов. "
+                "Автоматически разрешать её через новый справочник запрещено."
+            )
+    else:
+        try:
+            allowed_stages = get_project_variant_stages(
+                str(batch.estimate_type_id),
+                str(batch.project_variant_id),
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Выбранный тип сметы/вариант объекта не найден в справочнике JSON v6"
+            ) from exc
 
     stage_by_number = {
         str(stage.get("number") or ""): stage
@@ -1185,6 +1194,8 @@ def _build_stage_aware_groups(
             "mode": GROUPING_MODE_STAGE_AWARE,
             "estimate_type_id": batch.estimate_type_id,
             "project_variant_id": batch.project_variant_id,
+            "taxonomy_source": "persisted_snapshot" if legacy_taxonomy else "runtime_dictionary",
+            "legacy_taxonomy": legacy_taxonomy,
             "fallback_rows": [],
             "invalid_stage_rows": [],
             "review_rows": [],
@@ -2418,12 +2429,101 @@ def _materialize_wbs(
     session: KtpEstimateSession,
     raw_groups: list[dict[str, Any]],
     row_keys: dict[str, Estimate],
+    *,
+    owner_user_id: str | None = None,
 ) -> tuple[list[KtpWbsGroup], list[KtpWbsItem], list[str]]:
-    """Создаёт ORM-объекты + валидирует инвариант покрытия (без сирот)."""
+    """Create WBS objects and expand one Estimate into stage-instance KTP items.
+
+    Dynamic-floor projections are grouped by ``stage_instance_id``.  This is
+    essential for GPR: walls/slab of floor 1 and floor 2 must be distinct groups
+    even though they originate from the same stage template and financial row.
+    """
+    from app.services.ktp_floor_sequence_service import (
+        catalog_labor_for_projection,
+        projection_group_descriptor,
+        projection_metadata,
+    )
+
     groups: list[KtpWbsGroup] = []
     items: list[KtpWbsItem] = []
     warnings: list[str] = []
     seen_estimate_ids: set[str] = set()
+    groups_by_key: dict[str, KtpWbsGroup] = {}
+    session_owner_user_id = (
+        owner_user_id
+        or getattr(session, "owner_user_id", None)
+        or getattr(session, "created_by", None)
+        or getattr(session, "user_id", None)
+    )
+
+    def _set_metadata(target: Any, values: dict[str, Any]) -> None:
+        # The delivery archive does not contain real ORM models.  Setting the
+        # attributes after construction keeps backward compatibility; once the
+        # stage-10 ORM migration is applied these fields are persisted.
+        for key, value in values.items():
+            try:
+                setattr(target, key, value)
+            except Exception:  # noqa: BLE001 - optional compatibility metadata
+                logger.debug("Cannot set KTP metadata %s on %r", key, target)
+
+    def _ensure_group(
+        raw_group: dict[str, Any],
+        group_index: int,
+        projection: dict[str, Any] | None,
+    ) -> KtpWbsGroup:
+        descriptor = projection_group_descriptor(
+            raw_group, projection, fallback_index=group_index
+        )
+        existing = groups_by_key.get(descriptor.key)
+        if existing is not None:
+            return existing
+
+        wt_code = raw_group.get("wt_code")
+        wt_code = (
+            str(wt_code).strip().upper()
+            if isinstance(wt_code, str) and str(wt_code).strip()
+            else None
+        )
+        raw_section_code = raw_group.get("work_section_code")
+        work_section_code = (
+            str(raw_section_code).strip()
+            if isinstance(raw_section_code, str) and str(raw_section_code).strip()
+            else None
+        )
+        raw_section_name = raw_group.get("work_section_name")
+        work_section_name = (
+            str(raw_section_name).strip()
+            if isinstance(raw_section_name, str) and str(raw_section_name).strip()
+            else None
+        )
+        group = KtpWbsGroup(
+            id=_uuid(),
+            session_id=session.id,
+            project_id=session.project_id,
+            title=descriptor.title,
+            sort_order=descriptor.sort_order,
+            wt_code=wt_code,
+            work_section_code=work_section_code,
+            work_section_name=work_section_name,
+            status="draft",
+        )
+        _set_metadata(
+            group,
+            {
+                "stage_instance_id": descriptor.stage_instance_id,
+                "template_stage_number": descriptor.template_stage_number,
+                "stage_number": descriptor.stage_number,
+                "canonical_stage_id": descriptor.canonical_stage_id,
+                "floor_number": descriptor.floor_number,
+                "floor_kind": descriptor.floor_kind,
+                "floor_label": descriptor.floor_label,
+                "floor_component": descriptor.floor_component,
+                "component_role": descriptor.component_role,
+            },
+        )
+        groups_by_key[descriptor.key] = group
+        groups.append(group)
+        return group
 
     def _work_type_fields(name: str, estimate: Estimate | None) -> dict[str, Any]:
         raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
@@ -2485,41 +2585,78 @@ def _materialize_wbs(
             "manual_override": False,
         }
 
-    for g_idx, raw_g in enumerate(raw_groups, start=1):
-        title = str(raw_g.get("title") or "").strip() or f"Группа {g_idx}"
-        try:
-            sort_order = float(raw_g.get("sort_order") or g_idx)
-        except (TypeError, ValueError):
-            sort_order = float(g_idx)
-        wt_code = raw_g.get("wt_code")
-        wt_code = str(wt_code).strip().upper() if isinstance(wt_code, str) and wt_code.strip() else None
-        raw_section_code = raw_g.get("work_section_code")
-        work_section_code = (
-            str(raw_section_code).strip()
-            if isinstance(raw_section_code, str) and raw_section_code.strip()
-            else None
+    def _append_item(
+        *,
+        raw_group: dict[str, Any],
+        group_index: int,
+        item_index: int,
+        projection_index: int,
+        projection: dict[str, Any],
+        raw_item: dict[str, Any],
+        estimate: Estimate | None,
+        origin: str,
+        fallback_name: str,
+    ) -> None:
+        group = _ensure_group(raw_group, group_index, projection)
+        projected_name = str(projection.get("name") or fallback_name).strip() or fallback_name
+        work_type_fields = _work_type_fields(projected_name, estimate)
+        labor = (
+            catalog_labor_for_projection(
+                estimate, projection, owner_user_id=session_owner_user_id
+            )
+            if estimate else {}
         )
-        raw_section_name = raw_g.get("work_section_name")
-        work_section_name = (
-            str(raw_section_name).strip()
-            if isinstance(raw_section_name, str) and raw_section_name.strip()
-            else None
-        )
+        if projection.get("needs_review") or labor.get("needs_review"):
+            work_type_fields["operator_review_required"] = True
 
-        group = KtpWbsGroup(
+        item = KtpWbsItem(
             id=_uuid(),
+            group_id=group.id,
             session_id=session.id,
-            project_id=session.project_id,
-            title=title,
-            sort_order=sort_order,
-            wt_code=wt_code,
-            work_section_code=work_section_code,
-            work_section_name=work_section_name,
-            status="draft",
+            name=projected_name,
+            sort_order=float(item_index) * 1000.0 + projection_index / 1000.0,
+            origin=origin,
+            estimate_id=estimate.id if estimate else None,
+            unit=projection.get("unit") if estimate else None,
+            quantity=projection.get("quantity") if estimate else None,
+            quantity_source=(projection.get("quantity_source") if estimate else None),
+            review_status=(
+                "pending"
+                if origin == "ai_added"
+                or projection.get("needs_review")
+                or labor.get("needs_review")
+                else "accepted"
+            ),
+            ai_reason=(
+                str(raw_item.get("ai_reason")).strip()
+                if raw_item.get("ai_reason")
+                else projection.get("review_reason") or labor.get("review_reason")
+            ),
+            **work_type_fields,
         )
-        groups.append(group)
+        _set_metadata(item, projection_metadata(projection))
+        if labor:
+            _set_metadata(
+                item,
+                {
+                    "labor_hours": labor.get("labor_hours"),
+                    "norm_source": labor.get("norm_source"),
+                    "norm_kind": labor.get("norm_kind"),
+                    "norm_value": labor.get("norm_value"),
+                    "norm_unit": labor.get("norm_unit"),
+                    "norm_ref": labor.get("norm_ref"),
+                    "duration_block_reason": (
+                        labor.get("review_reason")
+                        if labor.get("review_reason") == "user_rate_input_required"
+                        else None
+                    ),
+                },
+            )
+        items.append(item)
 
+    for g_idx, raw_g in enumerate(raw_groups, start=1):
         raw_items = raw_g.get("items") or []
+        ai_item_counter = 0
         for i_idx, raw_it in enumerate(raw_items, start=1):
             if not isinstance(raw_it, dict):
                 continue
@@ -2532,76 +2669,75 @@ def _materialize_wbs(
             if origin == "from_estimate" and isinstance(row_key, str):
                 estimate = row_keys.get(row_key.strip())
             if origin == "from_estimate" and estimate is None:
-                # неизвестный row_key — считаем добавленной работой
                 origin = "ai_added"
 
             if estimate is not None:
                 if estimate.id in seen_estimate_ids:
                     warnings.append(
-                        f"Позиция «{estimate.work_name}» продублирована ИИ — "
-                        f"оставлена одна копия"
+                        f"Позиция «{estimate.work_name}» продублирована ИИ — оставлена одна копия"
                     )
                     continue
                 seen_estimate_ids.add(estimate.id)
-
-            items.append(
-                KtpWbsItem(
-                    id=_uuid(),
-                    group_id=group.id,
-                    session_id=session.id,
-                    name=name,
-                    sort_order=float(i_idx) * 1000.0,
-                    origin=origin,
-                    estimate_id=estimate.id if estimate else None,
-                    unit=estimate.unit if estimate else None,
-                    quantity=estimate.quantity if estimate else None,
-                    quantity_source="estimate" if estimate else None,
-                    review_status="accepted" if origin != "ai_added" else "pending",
-                    ai_reason=(
-                        str(raw_it.get("ai_reason")).strip()
-                        if raw_it.get("ai_reason")
-                        else None
-                    ),
-                    **_work_type_fields(name, estimate),
+                from app.services.quantity_projection_service import (
+                    ktp_projection_payloads_for_estimate,
                 )
-            )
+                projection_payloads = ktp_projection_payloads_for_estimate(estimate)
+            else:
+                ai_item_counter += 1
+                projection_payloads = [{
+                    "name": name,
+                    "quantity": None,
+                    "unit": None,
+                    "quantity_source": None,
+                    "needs_review": False,
+                }]
 
-    # Инвариант покрытия: каждая work-строка должна попасть ровно в один item.
-    missing = [
-        est for est in row_keys.values() if est.id not in seen_estimate_ids
-    ]
+            for projection_index, projection in enumerate(projection_payloads, start=1):
+                _append_item(
+                    raw_group=raw_g,
+                    group_index=g_idx,
+                    item_index=i_idx if estimate else ai_item_counter,
+                    projection_index=projection_index,
+                    projection=projection,
+                    raw_item=raw_it,
+                    estimate=estimate,
+                    origin=origin,
+                    fallback_name=name,
+                )
+
+    # Coverage invariant: every Estimate row is consumed once.  It may produce
+    # zero calculable KTP items only when package resolution explicitly
+    # suppressed all its projections.
+    missing = [est for est in row_keys.values() if est.id not in seen_estimate_ids]
     if missing:
         warnings.append(
-            f"{len(missing)} позиций сметы не распределены ИИ — добавлены в "
-            f"группу «{FALLBACK_GROUP_TITLE}»"
+            f"{len(missing)} позиций сметы не распределены ИИ — добавлены в группу «{FALLBACK_GROUP_TITLE}»"
         )
-        fallback = KtpWbsGroup(
-            id=_uuid(),
-            session_id=session.id,
-            project_id=session.project_id,
-            title=FALLBACK_GROUP_TITLE,
-            sort_order=float(len(raw_groups) + 1),
-            status="draft",
+        fallback_raw = {
+            "title": FALLBACK_GROUP_TITLE,
+            "sort_order": float(len(raw_groups) + 1),
+            "section_key": FALLBACK_SECTION_KEY,
+        }
+        from app.services.quantity_projection_service import (
+            ktp_projection_payloads_for_estimate,
         )
-        groups.append(fallback)
         for i_idx, est in enumerate(missing, start=1):
-            items.append(
-                KtpWbsItem(
-                    id=_uuid(),
-                    group_id=fallback.id,
-                    session_id=session.id,
-                    name=est.work_name,
-                    sort_order=float(i_idx) * 1000.0,
+            for projection_index, projection in enumerate(
+                ktp_projection_payloads_for_estimate(est), start=1
+            ):
+                _append_item(
+                    raw_group=fallback_raw,
+                    group_index=len(raw_groups) + 1,
+                    item_index=i_idx,
+                    projection_index=projection_index,
+                    projection=projection,
+                    raw_item={},
+                    estimate=est,
                     origin="from_estimate",
-                    estimate_id=est.id,
-                    unit=est.unit,
-                    quantity=est.quantity,
-                    quantity_source="estimate",
-                    review_status="accepted",
-                    **_work_type_fields(est.work_name, est),
+                    fallback_name=est.work_name,
                 )
-            )
 
+    groups.sort(key=lambda group: (float(group.sort_order or 0), str(group.title or ""), str(group.id)))
     return groups, items, warnings
 
 
@@ -2675,10 +2811,17 @@ async def _apply_manual_work_subtype(
 async def _reset_item_work_type(
     db: AsyncSession,
     item: KtpWbsItem,
+    *,
+    force_taxonomy_migration: bool = False,
 ) -> None:
     from app.services.work_taxonomy_service import classify_work
 
     estimate = await db.get(Estimate, item.estimate_id) if item.estimate_id else None
+    if estimate is not None:
+        assert_reclassification_allowed(
+            estimate,
+            force_migrate=force_taxonomy_migration,
+        )
     name = (estimate.work_name if estimate else item.name) or item.name
     section = estimate.section if estimate else None
     result = classify_work(name or "", section)
@@ -2806,7 +2949,11 @@ async def update_item(
     if "sort_order" in patch and patch["sort_order"] is not None:
         item.sort_order = float(patch["sort_order"])
     if patch.get("manual_override") is False and patch.get("reclassify"):
-        await _reset_item_work_type(db, item)
+        await _reset_item_work_type(
+            db,
+            item,
+            force_taxonomy_migration=bool(patch.get("force_taxonomy_migration")),
+        )
         work_type_changed = True
     elif "work_subtype_code" in patch and patch["work_subtype_code"]:
         await _apply_manual_work_subtype(db, item, str(patch["work_subtype_code"]))
@@ -3485,86 +3632,8 @@ async def approve_stage2(
 # ЭТАП 4 — ПРОИЗВОДИТЕЛЬНОСТЬ ПО ПОДТИПАМ РАБОТ
 # ─────────────────────────────────────────────────────────────────────────────
 
-UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 _DEFAULT_VOLUME = 100.0
-_DEFAULT_HOURS_PER_DAY = 8.0
-_OUTPUT_SOURCE_CATALOG = "catalog"
-_OUTPUT_SOURCE_MANUAL = "manual"
-_OUTPUT_SOURCE_NONE = "none"
-
-
-def _as_float(value: Any) -> float | None:
-    try:
-        if value is None or value == "":
-            return None
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result
-
-
-def _as_positive_float(value: Any) -> float | None:
-    result = _as_float(value)
-    return result if result is not None and result > 0 else None
-
-
-def _rate_raw(estimate: Estimate | None) -> dict[str, Any]:
-    raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
-    if raw.get("resolved_labor_source") == "subtype_output_per_day":
-        raw = dict(raw)
-        raw["resolved_labor_hours"] = None
-        raw["resolved_labor_source"] = None
-        raw["rate_needs_review"] = True
-        raw["rate_review_reason"] = "catalog_labor_not_available"
-    return raw
-
-
-def _effective_labor(raw: dict[str, Any], suffix: str) -> float | None:
-    effective = _as_positive_float(raw.get(f"effective_labor_hours_per_unit_{suffix}"))
-    if effective is not None:
-        return effective
-    labor = _as_positive_float(raw.get(f"labor_hours_per_unit_{suffix}"))
-    factor = _as_positive_float(raw.get("unit_conversion_factor"))
-    if labor is None or factor is None:
-        return None
-    return labor * factor
-
-
-def _rate_auto_applicable(raw: dict[str, Any]) -> bool:
-    if not raw.get("selected_rate_item_id"):
-        return False
-    if raw.get("rate_auto_applicable") is True:
-        return True
-    reason = raw.get("rate_review_reason")
-    return reason in (None, "", "quantity_missing") and _effective_labor(raw, "avg") is not None
-
-
-def _catalog_output_per_day(
-    raw: dict[str, Any],
-    *,
-    crew_size: int | None,
-    hours_per_day: float,
-) -> tuple[float | None, str]:
-    effective_avg = _effective_labor(raw, "avg")
-    if (
-        not _rate_auto_applicable(raw)
-        or effective_avg is None
-        or not crew_size
-        or crew_size <= 0
-        or hours_per_day <= 0
-    ):
-        return None, _OUTPUT_SOURCE_NONE
-    return round(float(crew_size) * float(hours_per_day) / effective_avg, 4), _OUTPUT_SOURCE_CATALOG
-
-
-def _session_labor_totals(raw: dict[str, Any], volume: float | None) -> dict[str, float | None]:
-    qty = _as_positive_float(volume)
-    totals: dict[str, float | None] = {}
-    for suffix in ("min", "avg", "max"):
-        labor = _effective_labor(raw, suffix)
-        totals[suffix] = round(qty * labor, 4) if qty is not None and labor is not None else None
-    return totals
 
 
 SESSION_SUBTYPE_ITEM_SEP = "::"
@@ -3598,7 +3667,7 @@ def _resolve_item_subtype(
     Порядок: item.work_subtype_code → Estimate.work_subtype_code → raw_data
     сметы → классификация по имени → ``unknown/needs_review``.
     """
-    from app.services.work_taxonomy_service import UNKNOWN_SUBTYPE_CODE, classify_work
+    from app.services.work_taxonomy_service import classify_work
 
     code: str | None = None
     name: str | None = None
@@ -3653,65 +3722,17 @@ async def _load_session_subtypes(
     )
 
 
-async def enrich_session_subtypes_with_rate_data(
-    db: AsyncSession,
-    rows: list[KtpSessionSubtype],
-) -> None:
-    """Attach transient catalog-rate fields to subtype rows for API DTOs."""
-    item_ids = [row.item_id for row in rows if row.item_id]
-    if not item_ids:
-        return
-    items = {
-        item.id: item
-        for item in await db.scalars(select(KtpWbsItem).where(KtpWbsItem.id.in_(item_ids)))
-    }
-    estimate_ids = [item.estimate_id for item in items.values() if item.estimate_id]
-    estimates = (
-        {
-            estimate.id: estimate
-            for estimate in await db.scalars(select(Estimate).where(Estimate.id.in_(estimate_ids)))
-        }
-        if estimate_ids
-        else {}
-    )
-
-    for row in rows:
-        item = items.get(row.item_id) if row.item_id else None
-        estimate = estimates.get(item.estimate_id) if item and item.estimate_id else None
-        raw = _rate_raw(estimate)
-        totals = _session_labor_totals(raw, _as_float(row.volume))
-        item_unit_code = raw.get("item_unit_code") or (item.unit if item else None) or row.unit
-        rate_review_reason = raw.get("rate_review_reason")
-        if not raw.get("selected_rate_item_id") and not rate_review_reason:
-            rate_review_reason = "catalog_labor_not_available"
-
-        setattr(row, "selected_rate_item_id", raw.get("selected_rate_item_id"))
-        setattr(row, "selected_rate_mapping_id", raw.get("selected_rate_mapping_id"))
-        setattr(row, "rate_unit_code", raw.get("rate_unit_code") or raw.get("rate_unit"))
-        setattr(row, "item_unit_code", item_unit_code)
-        setattr(row, "unit_conversion_factor", _as_float(raw.get("unit_conversion_factor")))
-        setattr(row, "rate_auto_applicable", _rate_auto_applicable(raw))
-        setattr(row, "rate_needs_review", bool(raw.get("rate_needs_review") or not _rate_auto_applicable(raw)))
-        setattr(row, "rate_review_reason", rate_review_reason)
-        setattr(row, "resolved_labor_source", raw.get("resolved_labor_source"))
-        setattr(row, "resolved_labor_hours", _as_float(raw.get("resolved_labor_hours")))
-        setattr(row, "rate_catalog_version", raw.get("rate_catalog_version"))
-        setattr(row, "rate_catalog_file", raw.get("rate_catalog_file"))
-        for suffix in ("min", "avg", "max"):
-            setattr(row, f"labor_hours_per_unit_{suffix}", _as_float(raw.get(f"labor_hours_per_unit_{suffix}")))
-            setattr(row, f"effective_labor_hours_per_unit_{suffix}", _effective_labor(raw, suffix))
-            setattr(row, f"session_calculated_labor_hours_{suffix}", totals[suffix])
-
-
 async def build_session_subtypes(
     db: AsyncSession, session: KtpEstimateSession
 ) -> list[KtpSessionSubtype]:
     """Построить/обновить таблицу производительности сессии из принятых работ КТП.
 
-    Автозаполнение производительности строится только из каталога расценок
-    v1.2 (трудоёмкость чел-ч/ед. + бригада + часы смены). Старые дефолты
-    ``WorkSubtype.output_per_day`` и ``WorkSubtype.crew_size`` не используются.
-    Ручные правки оператора не перезатираются.
+    Одна строка = одна работа (``item``) «как есть» — ничего не схлопываем, чтобы
+    разные работы одного грубого подтипа не сливались и не терялись. Подтип из
+    справочника читается с ``KtpWbsItem.work_subtype_code``; он даёт дефолты
+    (производительность/бригада/пауза) и контекст (код, macro). ``volume``
+    берётся из объёма работы; правки оператора (``*_source='manual'``) не
+    перезатираются. Исчезнувшие работы удаляются.
     """
     from app.services.work_taxonomy_service import load_taxonomy
 
@@ -3747,19 +3768,22 @@ async def build_session_subtypes(
     # Размер бригады задаётся при загрузке сметы (EstimateBatch.workers_count) —
     # берём его как дефолт вместо справочника.
     batch = await db.get(EstimateBatch, session.estimate_batch_id)
-    batch_crew = int(batch.workers_count) if batch and batch.workers_count else None
-    batch_hours_per_day = float(batch.hours_per_day or _DEFAULT_HOURS_PER_DAY) if batch else _DEFAULT_HOURS_PER_DAY
+    batch_crew = (
+        int(batch.workers_count)
+        if batch and batch.workers_count
+        else None
+    )
 
     existing = {
         (s.subtype_code, s.unit): s
         for s in await _load_session_subtypes(db, session.id)
     }
 
-    # Бригада: приоритет — значение из загрузки сметы; иначе ручное заполнение.
-    def _crew_default() -> tuple[int | None, str]:
+    # Бригада: приоритет — значение из загрузки сметы; иначе справочник.
+    def _crew_default(ref: WorkSubtype | None) -> tuple[int | None, str]:
         if batch_crew is not None:
             return batch_crew, "estimate"
-        return None, _OUTPUT_SOURCE_NONE
+        return (ref.crew_size if ref else None), "default"
 
     # Одна строка = одна работа. Ключ уникален по item.id (закодирован в
     # subtype_code), поэтому разные работы не сливаются.
@@ -3777,17 +3801,11 @@ async def build_session_subtypes(
             if it.quantity is not None and float(it.quantity) > 0
             else _DEFAULT_VOLUME
         )
-        raw = _rate_raw(est)
-        crew_value, crew_src = _crew_default()
+        crew_value, crew_src = _crew_default(ref)
         key = (stored_code, unit)
         kept_keys.add(key)
         row = existing.get(key)
         if row is None:
-            output_value, output_source = _catalog_output_per_day(
-                raw,
-                crew_size=crew_value,
-                hours_per_day=batch_hours_per_day,
-            )
             row = KtpSessionSubtype(
                 id=_uuid(),
                 session_id=session.id,
@@ -3800,10 +3818,10 @@ async def build_session_subtypes(
                 macro_name=macro_name,
                 unit=unit,
                 volume=volume,
-                output_per_day=output_value,
+                output_per_day=ref.output_per_day if ref else None,
                 crew_size=crew_value,
                 lag_after_days=int(ref.lag_after_days) if ref else 0,
-                output_source=output_source,
+                output_source="default",
                 crew_source=crew_src,
                 lag_source="default",
             )
@@ -3818,17 +3836,11 @@ async def build_session_subtypes(
             row.macro_name = macro_name
             row.volume = volume
             # дефолтные поля обновляем из источника, ручные правки не трогаем
+            if row.output_source == "default" and ref is not None:
+                row.output_per_day = ref.output_per_day
             if row.crew_source != "manual":
                 row.crew_size = crew_value
                 row.crew_source = crew_src
-            if row.output_source != _OUTPUT_SOURCE_MANUAL:
-                output_value, output_source = _catalog_output_per_day(
-                    raw,
-                    crew_size=row.crew_size,
-                    hours_per_day=batch_hours_per_day,
-                )
-                row.output_per_day = output_value
-                row.output_source = output_source
             if row.lag_source == "default" and ref is not None:
                 row.lag_after_days = int(ref.lag_after_days)
 
@@ -3850,37 +3862,6 @@ async def rebuild_session_subtypes(
     await build_session_subtypes(db, session)
     await db.commit()
     return await get_wbs(db, project_id, session_id)
-
-
-async def _refresh_session_subtype_catalog_output(
-    db: AsyncSession,
-    row: KtpSessionSubtype,
-) -> None:
-    """Recalculate non-manual productivity from the selected catalog rate."""
-    if row.output_source == _OUTPUT_SOURCE_MANUAL:
-        return
-
-    session = await db.get(KtpEstimateSession, row.session_id)
-    batch = await db.get(EstimateBatch, session.estimate_batch_id) if session else None
-    hours_per_day = (
-        float(batch.hours_per_day or _DEFAULT_HOURS_PER_DAY)
-        if batch
-        else _DEFAULT_HOURS_PER_DAY
-    )
-
-    estimate: Estimate | None = None
-    if row.item_id:
-        item = await db.get(KtpWbsItem, row.item_id)
-        if item and item.estimate_id:
-            estimate = await db.get(Estimate, item.estimate_id)
-
-    output_value, output_source = _catalog_output_per_day(
-        _rate_raw(estimate),
-        crew_size=row.crew_size,
-        hours_per_day=hours_per_day,
-    )
-    row.output_per_day = output_value
-    row.output_source = output_source
 
 
 async def update_session_subtype(
@@ -3919,8 +3900,6 @@ async def update_session_subtype(
             raise ValueError("Размер бригады должен быть больше нуля")
         row.crew_size = int(v) if v is not None else None
         row.crew_source = "manual"
-        if row.output_source != _OUTPUT_SOURCE_MANUAL:
-            await _refresh_session_subtype_catalog_output(db, row)
     if "lag_after_days" in patch:
         v = patch["lag_after_days"]
         if v is None or int(v) < 0:

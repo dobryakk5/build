@@ -63,7 +63,7 @@ TMP_TTL_SECONDS = 3600
 # Initial auditable work-rate catalogue. Production can override the path with
 # WORK_RATE_CATALOG_FILE or replace the JSON adapter with the SQL repository.
 DEFAULT_WORK_RATE_CATALOG_FILE = (
-    Path(__file__).resolve().parents[1] / "data" / "work_rate_catalog_v1.json"
+    Path(__file__).resolve().parents[1] / "data" / "work_rate_catalog_v1_2.json"
 )
 
 
@@ -87,12 +87,15 @@ async def start_upload_job(
     clarification_answers: dict | None,
     hierarchy_selection: dict | None,
     db:               AsyncSession,
+    building_params: dict | None = None,
 ) -> Job:
     """
     Сохраняет файл, пробует авто-парсинг.
     - Если парсер уверен (confidence ≥ 0.8) → создаёт Job и запускает фон.
     - Если нет → поднимает HTTPException 422 с данными для UI маппинга.
     """
+    _validate_building_params_for_upload(hierarchy_selection, building_params)
+
     allowed = (".xlsx", ".xls", ".pdf")
     if not file.filename.lower().endswith(allowed):
         raise HTTPException(400, f"Поддерживаются: {', '.join(allowed)}")
@@ -129,6 +132,7 @@ async def start_upload_job(
         complex_mode  = complex_mode,
         clarification_answers = clarification_answers,
         hierarchy_selection = hierarchy_selection,
+        building_params = building_params,
         db         = db,
     )
 
@@ -150,11 +154,13 @@ async def start_upload_job_with_mapping(
     clarification_answers: dict | None,
     hierarchy_selection: dict | None,
     db:         AsyncSession,
+    building_params: dict | None = None,
 ) -> Job:
     """
     Запускает обработку файла с явным маппингом колонок.
     tmp_path пришёл из ответа 422 предыдущего upload-запроса.
     """
+    _validate_building_params_for_upload(hierarchy_selection, building_params)
     if not os.path.exists(tmp_path):
         raise HTTPException(404, "Временный файл не найден или устарел. Загрузите файл заново.")
 
@@ -169,6 +175,7 @@ async def start_upload_job_with_mapping(
         complex_mode  = complex_mode,
         clarification_answers = clarification_answers,
         hierarchy_selection = hierarchy_selection,
+        building_params = building_params,
         db          = db,
         col_mapping = col_mapping,
         sheet       = sheet,
@@ -327,6 +334,22 @@ def _row_preview_dict(row, index: int | None = None) -> dict:
         "work_stage_number": raw.get("work_stage_number"),
         "work_stage_title": raw.get("work_stage_title"),
         "canonical_stage_id": raw.get("canonical_stage_id"),
+        "stage_instance_id": raw.get("stage_instance_id"),
+        "template_stage_number": raw.get("template_stage_number"),
+        "floor_number": raw.get("floor_number"),
+        "floor_kind": raw.get("floor_kind"),
+        "floor_label": raw.get("floor_label"),
+        "floor_component": raw.get("floor_component"),
+        "component_role": raw.get("component_role"),
+        "quantity_policy_mode": raw.get("quantity_policy_mode"),
+        "quantity_policy": raw.get("quantity_policy"),
+        "work_scope_key": raw.get("work_scope_key"),
+        "quantity_binding_key": raw.get("quantity_binding_key"),
+        "quantity_projection_count": raw.get("quantity_projection_count"),
+        "quantity_projection_needs_review": raw.get("quantity_projection_needs_review"),
+        "quantity_projection_review_reason": raw.get("quantity_projection_review_reason"),
+        "quantity_projection_review_reasons": raw.get("quantity_projection_review_reasons"),
+        "ktp_quantity_projections": raw.get("ktp_quantity_projections"),
         "stage_occurrence_index": raw.get("stage_occurrence_index"),
         "stage_occurrence_label": raw.get("stage_occurrence_label"),
         "stage_options_mode": raw.get("stage_options_mode"),
@@ -539,6 +562,9 @@ def _enrich_work_subtypes_sync(
         "classification_candidates",
         "classification_matched_terms",
         "classification_reason",
+        "classification_review_reason",
+        "suggested_taxonomy_code",
+        "suggested_operation_code",
         "classification_related_sections",
         "classification_scope",
         "classification_scope_estimate_type",
@@ -553,7 +579,13 @@ def _enrich_work_subtypes_sync(
         "object_priority_rule",
         "object_conflicts",
         "operation_code",
+        "operation_package_code",
         "operation_confidence_score",
+        "operation_candidates",
+        "operation_detection_reason",
+        "operation_needs_review",
+        "operation_multi_codes",
+        "preferred_stage_option_id",
         "section_object_candidates",
         "selected_object_scope_code",
         "object_scope_confidence_score",
@@ -692,6 +724,7 @@ def _enrich_work_stages_sync(
     rows: list,
     hierarchy_selection: dict | None,
     preclassified_results: dict[int, object] | None = None,
+    building_params: dict | None = None,
 ) -> None:
     if not hierarchy_selection:
         return
@@ -702,11 +735,13 @@ def _enrich_work_stages_sync(
 
     from app.services.stage_classifier import StageClassifier
     from app.services.work_taxonomy_service import (
-        get_project_variant_stages,
+        get_project_variant_stage_instances,
         get_sequential_scoring_policy,
     )
 
-    stages = get_project_variant_stages(str(estimate_type_id), str(project_variant_id))
+    stages = get_project_variant_stage_instances(
+        str(estimate_type_id), str(project_variant_id), building_params
+    )
     classifier = StageClassifier(get_sequential_scoring_policy())
     estimate_profile_id = (
         hierarchy_selection.get("estimate_profile_id")
@@ -777,6 +812,22 @@ def _enrich_work_stages_sync(
                     "work_subtype_name": getattr(base_result, "subtype_name", None),
                     "work_type_confidence": base_result.confidence,
                     "operation_code": getattr(base_result, "operation_code", None),
+                    "operation_package_code": getattr(base_result, "operation_package_code", None),
+                    "operation_candidates": [
+                        dict(item) for item in getattr(base_result, "operation_candidates", ())
+                    ],
+                    "operation_detection_reason": getattr(
+                        base_result, "operation_detection_reason", None
+                    ),
+                    "operation_needs_review": bool(
+                        getattr(base_result, "operation_needs_review", False)
+                    ),
+                    "operation_multi_codes": list(
+                        getattr(base_result, "operation_multi_codes", ())
+                    ),
+                    "preferred_stage_option_id": getattr(
+                        base_result, "preferred_stage_option_id", None
+                    ),
                     "selected_object_scope_code": getattr(
                         base_result, "selected_object_scope_code", None
                     ),
@@ -787,6 +838,9 @@ def _enrich_work_stages_sync(
                 }
             )
         raw.update(stage_raw)
+        raw["operator_review_required"] = bool(match.needs_review)
+        raw["operator_review_reason"] = match.review_reason if match.needs_review else None
+        raw["operator_review_status"] = None
         raw["row_role"] = "work"
         raw["work_type_applicable"] = True
         raw["gpr_included"] = True
@@ -829,6 +883,14 @@ def _enrich_work_stages_sync(
                 "work_stage_number": parent_raw.get("work_stage_number"),
                 "work_stage_title": parent_raw.get("work_stage_title"),
                 "canonical_stage_id": parent_raw.get("canonical_stage_id"),
+                "stage_instance_id": parent_raw.get("stage_instance_id"),
+                "template_stage_number": parent_raw.get("template_stage_number"),
+                "floor_number": parent_raw.get("floor_number"),
+                "floor_kind": parent_raw.get("floor_kind"),
+                "floor_label": parent_raw.get("floor_label"),
+                "floor_component": parent_raw.get("floor_component"),
+                "component_role": parent_raw.get("component_role"),
+                "stage_sort_order": parent_raw.get("stage_sort_order"),
                 "stage_occurrence_index": parent_raw.get("stage_occurrence_index"),
                 "stage_occurrence_label": parent_raw.get("stage_occurrence_label"),
                 "stage_confidence": parent_raw.get("stage_confidence"),
@@ -849,51 +911,68 @@ def _enrich_work_stages_sync(
 
 
 
+def _enrich_quantity_projections_sync(
+    rows: list,
+    hierarchy_selection: dict | None,
+    building_params: dict | None,
+):
+    """Resolve per-operation quantity policies without cloning Estimate rows."""
+    if not hierarchy_selection:
+        return None
+    estimate_type_id = hierarchy_selection.get("estimate_type_id")
+    project_variant_id = hierarchy_selection.get("project_variant_id")
+    if not estimate_type_id or not project_variant_id:
+        return None
+
+    from app.services.quantity_projection_service import enrich_quantity_projections
+    from app.services.work_rate_import_service import normalize_unit
+    from app.services.work_taxonomy_service import (
+        get_project_variant_definition,
+        get_project_variant_stage_instances,
+    )
+
+    variant = get_project_variant_definition(
+        str(estimate_type_id), str(project_variant_id)
+    )
+    stage_instances = get_project_variant_stage_instances(
+        str(estimate_type_id), str(project_variant_id), building_params
+    )
+    return enrich_quantity_projections(
+        rows,
+        variant=variant,
+        stage_instances=stage_instances,
+        normalize_unit=normalize_unit,
+    )
+
+
+def _enrich_package_resolution_sync(
+    rows: list,
+    hierarchy_selection: dict | None,
+):
+    """Resolve package/atomic representation after quantity and rate enrichment."""
+    if not hierarchy_selection:
+        return None
+    estimate_type_id = hierarchy_selection.get("estimate_type_id")
+    project_variant_id = hierarchy_selection.get("project_variant_id")
+    if not estimate_type_id or not project_variant_id:
+        return None
+
+    from app.services.package_resolution_service import (
+        resolve_package_atomic_conflicts,
+    )
+    from app.services.work_taxonomy_service import get_project_variant_definition
+
+    variant = get_project_variant_definition(
+        str(estimate_type_id), str(project_variant_id)
+    )
+    if not isinstance(variant.get("operation_registry"), dict):
+        return None
+    return resolve_package_atomic_conflicts(rows, variant=variant)
+
+
 def _work_rate_catalog_path() -> Path:
     configured = str(os.getenv("WORK_RATE_CATALOG_FILE") or "").strip()
     return Path(configured) if configured else DEFAULT_WORK_RATE_CATALOG_FILE
-
-
-def _infer_operation_from_catalog_mapping(
-    *,
-    taxonomy_code: str,
-    unit_code: str | None,
-    object_scope_code: str | None,
-    mappings: list,
-    item_by_id: dict,
-) -> tuple[str | None, str | None]:
-    """Infer operation only when catalog has one safe auto-applicable option."""
-    from app.services.work_rate_models import (
-        MAPPING_EXCLUDED,
-        MAPPING_OBSERVATION,
-        MAPPING_UNMAPPED,
-    )
-    from app.services.work_rate_selection_service import WorkRateSelectionService
-
-    candidates = []
-    for mapping in mappings:
-        if not mapping.is_active or mapping.taxonomy_code != taxonomy_code:
-            continue
-        if mapping.mapping_mode in {MAPPING_EXCLUDED, MAPPING_OBSERVATION, MAPPING_UNMAPPED}:
-            continue
-        if not mapping.operation_code:
-            continue
-        if object_scope_code and mapping.object_scope_code and mapping.object_scope_code != object_scope_code:
-            continue
-        item = item_by_id.get(mapping.rate_item_id)
-        if item is None or not item.is_active or not item.has_active_mapping:
-            continue
-        if not item.auto_applicable or item.labor_avg is None or float(item.labor_avg) <= 0:
-            continue
-        if WorkRateSelectionService.unit_conversion_factor(unit_code, item.unit_code) is None:
-            continue
-        candidates.append(mapping)
-
-    operation_codes = sorted({str(mapping.operation_code) for mapping in candidates if mapping.operation_code})
-    if len(operation_codes) != 1:
-        return None, None
-    object_codes = sorted({str(mapping.object_scope_code) for mapping in candidates if mapping.object_scope_code})
-    return operation_codes[0], object_codes[0] if len(object_codes) == 1 else None
 
 
 def _enrich_work_rates_sync(
@@ -920,6 +999,7 @@ def _enrich_work_rates_sync(
     )
     from app.services.work_rate_models import WorkRateCalculationRow
     from app.services.work_rate_selection_service import WorkRateSelectionService
+    from app.services.user_work_rate_override_service import UserWorkRateOverrideRepository
     from app.services.work_taxonomy_service import _load_dictionary
 
     catalog = WorkRateCatalog.load(catalog_path)
@@ -935,6 +1015,8 @@ def _enrich_work_rates_sync(
         or "hybrid"
     )
     project_key = str(project_id or (hierarchy_selection or {}).get("project_id") or "preview")
+    user_key = str((hierarchy_selection or {}).get("user_id") or "").strip() or None
+    user_overrides = UserWorkRateOverrideRepository().list(user_id=user_key) if user_key else []
 
     calculation_rows: list[WorkRateCalculationRow] = []
     raw_by_group: dict[str, list[dict]] = {}
@@ -946,52 +1028,15 @@ def _enrich_work_rates_sync(
             continue
 
         taxonomy_code = str(raw.get("work_subtype_code") or "").strip()
-        unit_code, _dimension, _factor = normalize_unit(getattr(row, "unit", None))
         operation_code = str(raw.get("operation_code") or "").strip()
-        object_scope_code = raw.get("selected_object_scope_code")
-        if taxonomy_code and taxonomy_code != "unknown/needs_review" and not operation_code:
-            inferred_operation, inferred_object = _infer_operation_from_catalog_mapping(
-                taxonomy_code=taxonomy_code,
-                unit_code=unit_code,
-                object_scope_code=str(object_scope_code or "") or None,
-                mappings=catalog.mappings,
-                item_by_id=item_by_id,
-            )
-            if inferred_operation:
-                operation_code = inferred_operation
-                raw["operation_code"] = inferred_operation
-                raw["operation_source"] = "catalog_taxonomy_unit_fallback"
-                raw["operation_confidence_score"] = 0.86
-                if inferred_object and not object_scope_code:
-                    object_scope_code = inferred_object
-                    raw["selected_object_scope_code"] = inferred_object
         if not taxonomy_code or taxonomy_code == "unknown/needs_review" or not operation_code:
-            raw.update(
-                {
-                    "selected_rate_item_id": None,
-                    "selected_rate_mapping_id": None,
-                    "rate_selection_source": None,
-                    "rate_confidence": None,
-                    "rate_auto_applicable": False,
-                    "rate_needs_review": True,
-                    "rate_review_reason": (
-                        "taxonomy_or_operation_missing"
-                        if not taxonomy_code or taxonomy_code == "unknown/needs_review"
-                        else "operation_missing"
-                    ),
-                    "labor_hours_per_unit_min": None,
-                    "labor_hours_per_unit_avg": None,
-                    "labor_hours_per_unit_max": None,
-                    "effective_labor_hours_per_unit_min": None,
-                    "effective_labor_hours_per_unit_avg": None,
-                    "effective_labor_hours_per_unit_max": None,
-                    "resolved_labor_hours": None,
-                    "resolved_labor_source": None,
-                }
-            )
+            raw.setdefault("rate_needs_review", True)
+            raw.setdefault("rate_review_reason", "taxonomy_or_operation_missing")
             continue
 
+        unit_code, _dimension, _factor = normalize_unit(getattr(row, "unit", None))
         quantity = getattr(row, "quantity", None)
+        object_scope_code = raw.get("selected_object_scope_code")
 
         selection = selector.select_rate(
             taxonomy_code=taxonomy_code,
@@ -999,9 +1044,25 @@ def _enrich_work_rates_sync(
             object_scope_code=object_scope_code,
             quantity=quantity,
             unit_code=unit_code,
+            work_name=getattr(row, "work_name", None),
+            item_text=raw.get("item_text"),
+            spec=raw.get("spec"),
+            section_title=raw.get("section_title"),
+            section_description=raw.get("section_description"),
+            section_parent_context=raw.get("section_parent_context"),
             items=catalog.items,
             mappings=catalog.mappings,
             sources=catalog.sources,
+            user_id=user_key,
+            user_overrides=user_overrides,
+            applicability={
+                "project_variant_id": (hierarchy_selection or {}).get("project_variant_id"),
+                "template_stage_number": raw.get("template_stage_number") or raw.get("work_stage_number"),
+                "semantic_stage_option_id": raw.get("semantic_stage_option_id") or raw.get("preferred_stage_option_id"),
+                "floor_number": raw.get("floor_number"),
+                "floor_kind": raw.get("floor_kind"),
+                "rate_context_code": raw.get("rate_context_code"),
+            },
         )
         rate_item = item_by_id.get(selection.rate_item_id) if selection.rate_item_id else None
         group_key = build_calculation_group_key(
@@ -1011,6 +1072,10 @@ def _enrich_work_rates_sync(
             taxonomy_code=taxonomy_code,
             object_scope_code=str(object_scope_code or "") or None,
             volume_scope=str(raw.get("volume_scope") or "") or None,
+            estimate_batch_id=project_key,
+            stage_instance_id=str(raw.get("stage_instance_id") or "") or None,
+            operation_package_code=str(raw.get("operation_package_code") or "") or None,
+            work_scope_key=str(raw.get("work_scope_key") or "") or None,
         )
 
         manual_labor = raw.get("manual_labor_hours")
@@ -1027,6 +1092,9 @@ def _enrich_work_rates_sync(
             manual_labor_hours=manual_labor,
             project_specific_labor_hours=raw.get("project_specific_labor_hours"),
             fer_labor_hours=raw.get("fer_labor_hours"),
+            subtype_output_per_day=raw.get("subtype_output_per_day"),
+            crew_size=raw.get("crew_size"),
+            hours_per_day=float(raw.get("hours_per_day") or DEFAULT_HOURS_PER_DAY),
             calculation_group_key=group_key,
         )
         raw = row.raw_data
@@ -1050,22 +1118,31 @@ def _enrich_work_rates_sync(
             )
         )
 
-    for conflict in selector.detect_package_conflicts(calculation_rows):
-        diagnostics = conflict.as_dict()
-        for raw in raw_by_group.get(conflict.calculation_group_key, []):
-            raw.update(
-                {
-                    "package_conflict": True,
-                    "package_conflict_diagnostics": diagnostics,
-                    "package_resolution_mode": raw.get("package_resolution_mode") or "manual_split",
-                    "rate_auto_applicable": False,
-                    "rate_needs_review": True,
-                    "rate_review_reason": "package_conflict",
-                }
-            )
+    project_variant_id = str((hierarchy_selection or {}).get("project_variant_id") or "")
+    # Variant 2.7 uses stage-7 projection-aware resolution after rate enrichment.
+    # Keep the legacy group-level detector for variants that do not provide a
+    # source operation registry yet.
+    if project_variant_id != "residential_construction_kirpichnye_doma":
+        for conflict in selector.detect_package_conflicts(calculation_rows):
+            diagnostics = conflict.as_dict()
+            for raw in raw_by_group.get(conflict.calculation_group_key, []):
+                raw.update(
+                    {
+                        "package_conflict": True,
+                        "package_conflict_diagnostics": diagnostics,
+                        "package_resolution_mode": raw.get("package_resolution_mode") or "manual_split",
+                        "rate_needs_review": True,
+                        "rate_review_reason": "package_conflict_unresolved",
+                    }
+                )
 
 
-async def _enrich_work_subtypes(rows: list, db: AsyncSession, hierarchy_selection: dict | None = None) -> None:
+async def _enrich_work_subtypes(
+    rows: list,
+    db: AsyncSession,
+    hierarchy_selection: dict | None = None,
+    building_params: dict | None = None,
+) -> None:
     preclassified_results = await run_in_threadpool(
         _enrich_work_subtypes_sync,
         rows,
@@ -1076,11 +1153,29 @@ async def _enrich_work_subtypes(rows: list, db: AsyncSession, hierarchy_selectio
         rows,
         hierarchy_selection,
         preclassified_results,
+        building_params,
+    )
+    await run_in_threadpool(
+        _enrich_quantity_projections_sync,
+        rows,
+        hierarchy_selection,
+        building_params,
     )
     await run_in_threadpool(
         _enrich_work_rates_sync,
         rows,
         hierarchy_selection,
+    )
+    await run_in_threadpool(
+        _enrich_package_resolution_sync,
+        rows,
+        hierarchy_selection,
+    )
+    await run_in_threadpool(
+        _enrich_taxonomy_snapshots_sync,
+        rows,
+        hierarchy_selection,
+        building_params,
     )
 
 
@@ -1153,6 +1248,14 @@ def _apply_stage_operator_overrides(rows: list, edits: dict | None) -> None:
             "work_stage_number",
             "work_stage_title",
             "canonical_stage_id",
+            "stage_instance_id",
+            "template_stage_number",
+            "floor_number",
+            "floor_kind",
+            "floor_label",
+            "floor_component",
+            "component_role",
+            "stage_sort_order",
             "stage_occurrence_index",
             "stage_occurrence_label",
             "stage_options_mode",
@@ -1193,6 +1296,32 @@ def _apply_stage_operator_overrides(rows: list, edits: dict | None) -> None:
         }
 
 
+def _apply_package_resolution_overrides(rows: list, edits: dict | None) -> None:
+    if not edits:
+        return
+    for override in edits.get("package_resolution_overrides") or []:
+        index = override.get("index")
+        if not isinstance(index, int) or index < 0 or index >= len(rows):
+            raise PreviewChangedError(
+                "PREVIEW_EXPIRED_OR_CHANGED: строка package resolution вне диапазона"
+            )
+        mode = str(override.get("mode") or "").strip()
+        if mode not in {"package_only", "atomic_only"}:
+            raise PreviewChangedError(
+                "PREVIEW_EXPIRED_OR_CHANGED: недопустимый package resolution mode"
+            )
+        row = rows[index]
+        expected = override.get("row_hash")
+        actual = _row_hash(row.section, row.work_name, row.unit, row.quantity, row.total_price)
+        if expected and expected != actual:
+            raise PreviewChangedError("PREVIEW_EXPIRED_OR_CHANGED: строка изменилась")
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        row.raw_data = raw
+        raw["package_resolution_mode"] = mode
+        raw["package_resolution_manual_override"] = True
+
+
+
 def _parse_upload_rows_for_import(
     tmp_path: str,
     col_mapping: dict | None,
@@ -1200,6 +1329,7 @@ def _parse_upload_rows_for_import(
     parser_profile: str,
     edits: dict | None,
     hierarchy_selection: dict | None,
+    building_params: dict | None,
 ) -> tuple[list, list[dict], dict]:
     if col_mapping is not None:
         int_mapping = {int(k): v for k, v in col_mapping.items()}
@@ -1237,10 +1367,40 @@ def _parse_upload_rows_for_import(
         raise ValueError("В файле не осталось активных строк сметы после исключения нулевых позиций каталога.")
     rows = _apply_operator_edits(rows, edits)
     preclassified_results = _enrich_work_subtypes_sync(rows, hierarchy_selection)
-    _enrich_work_stages_sync(rows, hierarchy_selection, preclassified_results)
+    _enrich_work_stages_sync(
+        rows, hierarchy_selection, preclassified_results, building_params
+    )
     _apply_stage_operator_overrides(rows, edits)
+    _apply_package_resolution_overrides(rows, edits)
+    _enrich_quantity_projections_sync(rows, hierarchy_selection, building_params)
     _enrich_work_rates_sync(rows, hierarchy_selection)
+    _enrich_package_resolution_sync(rows, hierarchy_selection)
+    _enrich_taxonomy_snapshots_sync(rows, hierarchy_selection, building_params)
     return rows, subtotal_rows, meta
+
+
+
+def _enrich_taxonomy_snapshots_sync(
+    rows: list,
+    hierarchy_selection: dict | None,
+    building_params: dict | None,
+) -> None:
+    """Freeze the taxonomy assignment produced during this import.
+
+    Old batches must remain readable even after the runtime JSON changes.  The
+    snapshot is stored inside ``raw_data`` and duplicated to explicit DB fields
+    by the normal Estimate constructor below.
+    """
+    from app.services.taxonomy_compatibility_service import ensure_taxonomy_snapshot
+
+    for row in rows:
+        raw = row.raw_data if isinstance(getattr(row, "raw_data", None), dict) else {}
+        row.raw_data = raw
+        ensure_taxonomy_snapshot(
+            raw,
+            hierarchy_selection=hierarchy_selection,
+            building_params=building_params,
+        )
 
 
 def _material_dict(material: dict) -> dict:
@@ -1467,9 +1627,11 @@ def _build_stage_preview_groups(rows: list) -> list[dict]:
     for index, row in enumerate(rows[:MAX_PREVIEW_GROUP_ROWS]):
         raw = getattr(row, "raw_data", None) or {}
         stage_number = raw.get("work_stage_number") or "unmatched"
-        if stage_number not in groups:
+        stage_key = raw.get("stage_instance_id") or stage_number
+        if stage_key not in groups:
             title = raw.get("work_stage_title") or ("Не распределено" if stage_number == "unmatched" else "")
-            groups[stage_number] = {
+            groups[stage_key] = {
+                "stage_instance_id": raw.get("stage_instance_id"),
                 "work_stage_number": None if stage_number == "unmatched" else stage_number,
                 "work_stage_title": title,
                 "canonical_stage_id": raw.get("canonical_stage_id"),
@@ -1481,19 +1643,19 @@ def _build_stage_preview_groups(rows: list) -> list[dict]:
                 "total": 0.0,
                 "rows": [],
             }
-            decimal_totals[stage_number] = {
+            decimal_totals[stage_key] = {
                 "work": Decimal("0"),
                 "material": Decimal("0"),
                 "gross": Decimal("0"),
             }
-            order.append(stage_number)
-        group = groups[stage_number]
+            order.append(stage_key)
+        group = groups[stage_key]
         entry = _row_preview_dict(row, index=index)
         financial = _row_financial_totals(row, unique_nested_by_parent.get(id(row), []))
         group["rows_count"] += 1
-        decimal_totals[stage_number]["work"] += financial["work_total"]
-        decimal_totals[stage_number]["material"] += financial["material_total"]
-        decimal_totals[stage_number]["gross"] += financial["gross_total"]
+        decimal_totals[stage_key]["work"] += financial["work_total"]
+        decimal_totals[stage_key]["material"] += financial["material_total"]
+        decimal_totals[stage_key]["gross"] += financial["gross_total"]
         if entry.get("needs_review") or entry.get("operator_review_required"):
             group["needs_review_count"] += 1
         group["rows"].append(entry)
@@ -1735,6 +1897,30 @@ def structured_smeta_financial_warning(meta: dict | None) -> dict | None:
     }
 
 
+def _validate_building_params_for_upload(
+    hierarchy_selection: dict | None,
+    building_params: dict | None,
+):
+    if not hierarchy_selection:
+        return None
+    estimate_type_id = hierarchy_selection.get("estimate_type_id")
+    project_variant_id = hierarchy_selection.get("project_variant_id")
+    if not estimate_type_id or not project_variant_id:
+        return None
+    from app.services.floor_structure_service import BuildingParamsValidationError
+    from app.services.work_taxonomy_service import validate_project_variant_building_params
+
+    try:
+        return validate_project_variant_building_params(
+            str(estimate_type_id), str(project_variant_id), building_params
+        )
+    except BuildingParamsValidationError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": exc.code, "message": exc.message},
+        ) from exc
+
+
 async def preview_upload_job(
     file:             UploadFile,
     project_id:       str,
@@ -1748,6 +1934,7 @@ async def preview_upload_job(
     clarification_answers: dict | None,
     hierarchy_selection: dict | None,
     db:               AsyncSession,
+    building_params: dict | None = None,
     hierarchy_suggestions = None,
     suggestion_estimate_type_id: str | None = None,
 ) -> dict:
@@ -1757,6 +1944,11 @@ async def preview_upload_job(
         parse_estimate, ParserProfileNotImplemented, FORMAT_SCAN, FORMAT_UNKNOWN,
     )
     from app.services.preview_session import save_preview_session
+    from app.services.floor_structure_service import structure_summary
+
+    validated_building_params = _validate_building_params_for_upload(
+        hierarchy_selection, building_params
+    )
 
     allowed = (".xlsx", ".xls", ".pdf")
     if not file.filename.lower().endswith(allowed):
@@ -1842,6 +2034,7 @@ async def preview_upload_job(
         "complex_mode":   complex_mode,
         "clarification_answers": clarification_answers,
         "hierarchy_selection": hierarchy_selection,
+        "building_params": building_params,
         "type_breakdown": preview["type_breakdown"],
         "strategy":       meta.get("strategy"),
         "detected_format": meta.get("format"),
@@ -1856,6 +2049,11 @@ async def preview_upload_job(
         "strategy":       meta.get("strategy"),
         "confidence":     meta.get("confidence"),
         "hierarchy_selection": hierarchy_selection,
+        "building_params": building_params,
+        "building_structure_summary": (
+            structure_summary(validated_building_params)
+            if validated_building_params is not None else None
+        ),
         "hierarchy_suggestions": suggestions,
         "groups":         grouped["groups"],
         "rows":           flat_rows,
@@ -1892,6 +2090,7 @@ async def confirm_upload_job(
         complex_mode  = bool(preview.get("complex_mode")),
         clarification_answers = preview.get("clarification_answers"),
         hierarchy_selection = preview.get("hierarchy_selection"),
+        building_params = preview.get("building_params"),
         db          = db,
         parser_profile = preview.get("parser_profile", "auto"),
         build_gantt = effective_gantt,
@@ -1923,12 +2122,14 @@ async def _create_and_run_job(
     clarification_answers: dict | None,
     hierarchy_selection: dict | None,
     db:          AsyncSession,
+    building_params: dict | None = None,
     col_mapping: dict[int, str] | None = None,
     sheet:       str | None = None,
     parser_profile: str = "auto",
     build_gantt: bool = True,
     edits:       dict | None = None,
 ) -> Job:
+    _validate_building_params_for_upload(hierarchy_selection, building_params)
     job = Job(
         id         = str(uuid4()),
         type       = "estimate_upload",
@@ -1944,6 +2145,7 @@ async def _create_and_run_job(
             "complex_mode": complex_mode,
             "clarification_answers": clarification_answers,
             "hierarchy_selection": hierarchy_selection,
+            "building_params": building_params,
             "col_mapping": col_mapping,   # None = авто
             "sheet":       sheet,
             "parser_profile": parser_profile,
@@ -1992,6 +2194,16 @@ async def _process_upload(job_id: str) -> None:
                 if isinstance(job.input.get("hierarchy_selection"), dict)
                 else {}
             )
+            hierarchy_selection = {
+                **hierarchy_selection,
+                "user_id": str(job.created_by or ""),
+                "project_id": str(job.project_id or ""),
+            }
+            building_params = (
+                job.input.get("building_params")
+                if isinstance(job.input.get("building_params"), dict)
+                else None
+            )
             col_mapping = job.input.get("col_mapping")   # None → авто
             sheet       = job.input.get("sheet")
             parser_profile = job.input.get("parser_profile", "auto")
@@ -2011,6 +2223,7 @@ async def _process_upload(job_id: str) -> None:
                 parser_profile,
                 edits,
                 hierarchy_selection,
+                building_params,
             )
 
             # ── 2. Парсинг успешен — теперь безопасно заменить старую смету ───
@@ -2037,10 +2250,20 @@ async def _process_upload(job_id: str) -> None:
                 project_variant_title=hierarchy_selection.get("project_variant_title"),
                 project_variant_number=hierarchy_selection.get("project_variant_number"),
                 taxonomy_dictionary_version=hierarchy_selection.get("taxonomy_dictionary_version"),
+                building_params=building_params or {},
                 clarification_answers=clarification_answers,
                 parser_profile=parser_profile,
                 import_meta={
                     "parser_profile":   parser_profile,
+                    "building_params": building_params or {},
+                    "variant_schema_version": (
+                        "brick_house_2_7@2.0.0"
+                        if str(hierarchy_selection.get("project_variant_id") or "")
+                        == "residential_construction_kirpichnye_doma"
+                        else None
+                    ),
+                    "taxonomy_resolution_mode": "persisted_snapshot",
+                    "taxonomy_locked": True,
                     "detected_format":  meta.get("format"),
                     "strategy":         meta.get("strategy"),
                     "confidence":       meta.get("confidence"),
@@ -2072,6 +2295,22 @@ async def _process_upload(job_id: str) -> None:
                     "catalog_like_excel": bool(meta.get("catalog_like_excel", False)),
                 },
             )
+            # Optional fields are persisted when the stage-11 ORM migration is
+            # present; setattr keeps this delivery compatible with older models.
+            for _key, _value in {
+                "variant_schema_version": (
+                    "brick_house_2_7@2.0.0"
+                    if str(hierarchy_selection.get("project_variant_id") or "")
+                    == "residential_construction_kirpichnye_doma"
+                    else None
+                ),
+                "taxonomy_resolution_mode": "persisted_snapshot",
+                "taxonomy_locked": True,
+            }.items():
+                try:
+                    setattr(batch, _key, _value)
+                except Exception:
+                    pass
             db.add(batch)
             await db.flush()
 
@@ -2101,6 +2340,13 @@ async def _process_upload(job_id: str) -> None:
                     project_variant_id = raw.get("project_variant_id"),
                     project_variant_number = raw.get("project_variant_number"),
                     canonical_stage_id = raw.get("canonical_stage_id"),
+                    stage_instance_id = raw.get("stage_instance_id"),
+                    template_stage_number = raw.get("template_stage_number"),
+                    floor_number = raw.get("floor_number"),
+                    floor_kind = raw.get("floor_kind"),
+                    floor_label = raw.get("floor_label"),
+                    floor_component = raw.get("floor_component"),
+                    component_role = raw.get("component_role"),
                     work_stage_number = raw.get("work_stage_number"),
                     work_stage_title = raw.get("work_stage_title"),
                     stage_occurrence_index = raw.get("stage_occurrence_index"),
@@ -2134,6 +2380,18 @@ async def _process_upload(job_id: str) -> None:
                     prompt_version = raw.get("prompt_version"),
                     manual_override = bool(raw.get("manual_override")),
                 )
+                for _key, _value in {
+                    "taxonomy_snapshot": raw.get("taxonomy_snapshot"),
+                    "taxonomy_locked": bool(raw.get("taxonomy_locked", True)),
+                    "variant_schema_version": raw.get("variant_schema_version"),
+                    "classification_migrated_from_version": raw.get("classification_migrated_from_version"),
+                    "classification_migrated_to_version": raw.get("classification_migrated_to_version"),
+                    "classification_migrated_at": raw.get("classification_migrated_at"),
+                }.items():
+                    try:
+                        setattr(est, _key, _value)
+                    except Exception:
+                        pass
                 db.add(est)
                 estimates.append(est)
 
@@ -2191,6 +2449,7 @@ async def _process_upload(job_id: str) -> None:
                 "project_variant_id": hierarchy_selection.get("project_variant_id"),
                 "project_variant_title": hierarchy_selection.get("project_variant_title"),
                 "taxonomy_dictionary_version": hierarchy_selection.get("taxonomy_dictionary_version"),
+                "building_params": building_params or {},
                 "complex_mode": complex_mode,
                 "parser_profile": parser_profile,
                 "build_gantt": build_gantt,

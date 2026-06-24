@@ -28,7 +28,7 @@ def _from_dict(cls: type[T], payload: dict[str, Any]) -> T:
 
 
 class WorkRateCatalog:
-    FORMAT_VERSION = "1.2.0"
+    FORMAT_VERSION = "1.4.0"
 
     def __init__(self) -> None:
         self.sources: list[WorkRateSource] = []

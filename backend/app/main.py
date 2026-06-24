@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config   import settings
 from app.core.database import engine
 from app.core.redis import close_redis, init_redis
+from app.api.deps import get_current_user
 
 from app.api.routes.auth          import router as auth_router
 from app.api.routes.dashboard     import router as dashboard_router
@@ -28,18 +29,25 @@ from app.api.routes.work_plan     import router as work_plan_router
 from app.api.routes.work_taxonomy import router as work_taxonomy_router
 from app.api.routes.work_rates    import create_work_rate_router
 from app.api.routes.activity      import router as activity_router
+from app.api.routes.estimate_previews import router as estimate_previews_router
+from app.api.routes.estimate_batches import router as estimate_batches_router
+from app.api.routes.estimate_import_operations import router as estimate_import_operations_router
+from app.services.dynamic_floor_feature_flag import validate_dynamic_floor_settings
+from app.services.taxonomy_snapshot_service import resolve_config_path
 from app.services.work_taxonomy_service import assert_project_hierarchy_compatible
 
 
 _APP_DIR = Path(__file__).resolve().parent
 work_rates_router = create_work_rate_router(
-    catalog_path=_APP_DIR / "data" / "work_rate_catalog_v1.json",
-    taxonomy_path=_APP_DIR / "data" / "construction_work_dictionary_v6_4_11.json",
+    catalog_path=resolve_config_path(settings.WORK_RATE_CATALOG_PATH),
+    taxonomy_path=resolve_config_path(settings.LEGACY_WORK_TAXONOMY_PATH),
+    authenticated_user_dependency=get_current_user,
 )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_dynamic_floor_settings()
     assert_project_hierarchy_compatible()
     await init_redis()
     yield
@@ -85,6 +93,9 @@ app.include_router(nw_router)
 app.include_router(work_plan_router)
 app.include_router(work_taxonomy_router)
 app.include_router(work_rates_router)
+app.include_router(estimate_previews_router)
+app.include_router(estimate_batches_router)
+app.include_router(estimate_import_operations_router)
 app.include_router(activity_router)
 
 

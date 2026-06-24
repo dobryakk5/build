@@ -1,6 +1,6 @@
 """Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v6_4_11.json`` is the canonical work
+``construction_work_dictionary_v6_4_14.json`` is the canonical work
 classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
@@ -16,16 +16,21 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.work_context_rules import (
+    build_rate_context_text,
+    has_internal_wall_insulation_exception,
+    resolve_special_masonry_operation,
+)
 from app.models import WorkPrecedence, WorkSubtype
 
 
 DICTIONARY_FILE = (
     Path(__file__).resolve().parents[1]
     / "data"
-    / "construction_work_dictionary_v6_4_11.json"
+    / "construction_work_dictionary_v6_4_14.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_11"
-PROMPT_VERSION = "estimate-v6.4.11"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_14"
+PROMPT_VERSION = "estimate-v6.4.14"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
@@ -113,6 +118,48 @@ class ClassificationCandidate:
 
 
 @dataclass(frozen=True)
+class OperationDetectionCandidate:
+    code: str | None
+    kind: str
+    score: float
+    matched_terms: tuple[str, ...] = ()
+    source: str = "dictionary_operation_terms"
+    stage_numbers: tuple[str, ...] = ()
+    stage_option_ids: tuple[str, ...] = ()
+    target_codes: tuple[str, ...] = ()
+    exact: bool = False
+    context_gate_matched: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "kind": self.kind,
+            "score": round(float(self.score), 4),
+            "matched_terms": list(self.matched_terms),
+            "source": self.source,
+            "stage_numbers": list(self.stage_numbers),
+            "stage_option_ids": list(self.stage_option_ids),
+            "target_codes": list(self.target_codes),
+            "exact": self.exact,
+            "context_gate_matched": self.context_gate_matched,
+        }
+
+
+@dataclass(frozen=True)
+class OperationDetectionResult:
+    operation_code: str | None
+    operation_package_code: str | None
+    confidence_score: float | None
+    matched_terms: tuple[str, ...]
+    candidates: tuple[OperationDetectionCandidate, ...] = ()
+    needs_review: bool = False
+    reason: str | None = None
+    preferred_stage_number: str | None = None
+    preferred_stage_option_id: str | None = None
+    multi_operation_codes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ClassificationResult:
     section_code: str | None
     section_name: str | None
@@ -145,7 +192,13 @@ class ClassificationResult:
     object_priority_rule: str | None = None
     object_conflicts: tuple[str, ...] = ()
     operation_code: str | None = None
+    operation_package_code: str | None = None
     operation_confidence_score: float | None = None
+    operation_candidates: tuple[dict[str, Any], ...] = ()
+    operation_detection_reason: str | None = None
+    operation_needs_review: bool = False
+    operation_multi_codes: tuple[str, ...] = ()
+    preferred_stage_option_id: str | None = None
     section_object_candidates: tuple[dict[str, Any], ...] = ()
     selected_object_scope_code: str | None = None
     object_scope_confidence_score: float | None = None
@@ -153,6 +206,8 @@ class ClassificationResult:
     context_override_blocked: bool = False
     context_override_reason: str | None = None
     preferred_stage_number: str | None = None
+    suggested_taxonomy_code: str | None = None
+    suggested_operation_code: str | None = None
 
     def as_raw_data(self) -> dict[str, Any]:
         return {
@@ -187,7 +242,13 @@ class ClassificationResult:
             "object_priority_rule": self.object_priority_rule,
             "object_conflicts": list(self.object_conflicts),
             "operation_code": self.operation_code,
+            "operation_package_code": self.operation_package_code,
             "operation_confidence_score": self.operation_confidence_score,
+            "operation_candidates": [dict(item) for item in self.operation_candidates],
+            "operation_detection_reason": self.operation_detection_reason,
+            "operation_needs_review": self.operation_needs_review,
+            "operation_multi_codes": list(self.operation_multi_codes),
+            "preferred_stage_option_id": self.preferred_stage_option_id,
             "section_object_candidates": [dict(item) for item in self.section_object_candidates],
             "selected_object_scope_code": self.selected_object_scope_code,
             "object_scope_confidence_score": self.object_scope_confidence_score,
@@ -195,6 +256,9 @@ class ClassificationResult:
             "context_override_blocked": self.context_override_blocked,
             "context_override_reason": self.context_override_reason,
             "preferred_stage_number": self.preferred_stage_number,
+            "classification_review_reason": self.reason if self.needs_review else None,
+            "suggested_taxonomy_code": self.suggested_taxonomy_code,
+            "suggested_operation_code": self.suggested_operation_code,
             # Legacy names kept until the UI/API is fully migrated.
             "subtype_code": self.subtype_code,
             "subtype_name": self.subtype_name,
@@ -227,6 +291,9 @@ def clear_cache() -> None:
     _taxonomy_cache = None
     _precedence_cache = None
     _load_dictionary.cache_clear()
+    cached_variant_catalog = globals().get("_variant_operation_alias_catalog")
+    if cached_variant_catalog is not None and hasattr(cached_variant_catalog, "cache_clear"):
+        cached_variant_catalog.cache_clear()
     for cached in ("_term_signature", "_boundary_pattern", "_cached_stems"):
         func = globals().get(cached)
         if func is not None and hasattr(func, "cache_clear"):
@@ -239,6 +306,15 @@ def _load_dictionary() -> dict[str, Any]:
         payload = json.load(fh)
     validate_dictionary_payload(payload)
     return payload
+
+
+def _effective_project_variant(variant: dict[str, Any]) -> dict[str, Any]:
+    """Return the project variant embedded in the canonical dictionary.
+
+    Since v6.4.14 source-variant files are audit/build inputs only. Runtime
+    must not overlay the canonical dictionary with a second JSON source.
+    """
+    return variant
 
 
 def validate_dictionary_payload(payload: dict[str, Any]) -> None:
@@ -358,8 +434,12 @@ def validate_dictionary_payload(payload: dict[str, Any]) -> None:
                 for option in stage.get("stage_options") or []:
                     if not isinstance(option, dict):
                         continue
-                    if option.get("autofill_enabled") and not (option.get("section_id") and option.get("subtype_id")):
-                        errors.append(f"stage {stage_number} option {option.get('id')} autofill without subtype")
+                    has_taxonomy_target = bool(option.get("section_id") and option.get("subtype_id"))
+                    has_operation_target = bool(option.get("operation_codes") or option.get("package_codes"))
+                    if option.get("autofill_enabled") and not (has_taxonomy_target or has_operation_target):
+                        errors.append(
+                            f"stage {stage_number} option {option.get('id')} autofill without taxonomy or operation target"
+                        )
                     section_id = option.get("section_id")
                     subtype_id = option.get("subtype_id")
                     if section_id and subtype_id and (str(section_id), str(subtype_id)) not in subtypes_by_section:
@@ -452,25 +532,42 @@ def _public_work_stage(stage: dict[str, Any]) -> dict[str, Any]:
         "number": str(stage.get("number") or ""),
         "title": str(stage.get("title") or ""),
         "canonical_stage_id": stage.get("canonical_stage_id") or None,
+        "stage_instance_id": stage.get("stage_instance_id"),
+        "template_stage_number": stage.get("template_stage_number"),
+        "legacy_stage_number": stage.get("legacy_stage_number"),
+        "floor_number": stage.get("floor_number"),
+        "floor_kind": stage.get("floor_kind"),
+        "floor_label": stage.get("floor_label"),
+        "floor_component": stage.get("floor_component"),
+        "component_role": stage.get("component_role"),
+        "sort_order": stage.get("sort_order"),
+        "floor_binding": stage.get("floor_binding") or None,
+        "stage_kind": stage.get("stage_kind"),
         "stage_role": stage.get("stage_role"),
         "stage_options_mode": stage.get("stage_options_mode") or "none",
         "stage_options": stage.get("stage_options") or [],
         "detail_lines": stage.get("detail_lines") or [],
+        "operations": stage.get("operations") or [],
+        "operation_packages": stage.get("operation_packages") or [],
+        "primary_operation_code": stage.get("primary_operation_code"),
         "occurrence_index": stage.get("occurrence_index"),
         "occurrence_label": stage.get("occurrence_label"),
-        "autofill_enabled": bool(stage.get("autofill_enabled", False)),
+        "autofill_enabled": bool(stage.get("autofill_enabled", stage.get("autofill_enabled_default", False))),
         "primary_work_type": stage.get("primary_work_type") or None,
         "related_work_types": stage.get("related_work_types") or [],
     }
 
 
 def _public_project_variant(variant: dict[str, Any], include_stages: bool) -> dict[str, Any]:
+    variant = _effective_project_variant(variant)
     stages = variant.get("stages") if isinstance(variant.get("stages"), list) else []
     item = {
         "id": str(variant.get("id") or ""),
         "number": str(variant.get("number") or ""),
         "title": str(variant.get("title") or ""),
         "stages_count": len(stages),
+        "building_params_schema": deepcopy(variant.get("building_params_schema") or {}),
+        "floor_structure_schema": deepcopy(variant.get("floor_structure_schema") or {}),
     }
     if include_stages:
         item["stages"] = [_public_work_stage(stage) for stage in stages]
@@ -540,12 +637,7 @@ def get_project_variants(estimate_type_id: str) -> list[dict[str, Any]]:
     payload = _load_dictionary()
     estimate_type = _find_estimate_type(payload, estimate_type_id)
     return [
-        {
-            "number": str(variant.get("number") or ""),
-            "id": str(variant.get("id") or ""),
-            "title": str(variant.get("title") or ""),
-            "stages_count": len(variant.get("stages") or []),
-        }
+        _public_project_variant(variant, include_stages=False)
         for variant in estimate_type.get("project_variants") or []
         if isinstance(variant, dict)
     ]
@@ -554,11 +646,43 @@ def get_project_variants(estimate_type_id: str) -> list[dict[str, Any]]:
 def get_project_variant_stages(estimate_type_id: str, project_variant_id: str) -> list[dict[str, Any]]:
     payload = _load_dictionary()
     estimate_type = _find_estimate_type(payload, estimate_type_id)
-    variant = _find_project_variant(estimate_type, project_variant_id)
+    variant = _effective_project_variant(_find_project_variant(estimate_type, project_variant_id))
     return [
         _public_work_stage(stage)
         for stage in variant.get("stages") or []
         if isinstance(stage, dict)
+    ]
+
+
+def get_project_variant_definition(estimate_type_id: str, project_variant_id: str) -> dict[str, Any]:
+    payload = _load_dictionary()
+    estimate_type = _find_estimate_type(payload, str(estimate_type_id))
+    return deepcopy(_effective_project_variant(_find_project_variant(estimate_type, str(project_variant_id))))
+
+
+def validate_project_variant_building_params(
+    estimate_type_id: str,
+    project_variant_id: str,
+    building_params: dict[str, Any] | None,
+):
+    from app.services.floor_structure_service import validate_building_params
+
+    variant = get_project_variant_definition(estimate_type_id, project_variant_id)
+    return validate_building_params(building_params, variant)
+
+
+def get_project_variant_stage_instances(
+    estimate_type_id: str,
+    project_variant_id: str,
+    building_params: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    from app.services.floor_structure_service import build_stage_instances, validate_building_params
+
+    variant = get_project_variant_definition(estimate_type_id, project_variant_id)
+    params = validate_building_params(building_params, variant)
+    return [
+        _public_work_stage(stage)
+        for stage in build_stage_instances(variant, params)
     ]
 
 
@@ -582,7 +706,7 @@ def _scope_pairs_from_stages(stages: list[dict[str, Any]]) -> frozenset[tuple[st
 def get_variant_scope(estimate_type_id: str, project_variant_id: str) -> TaxonomyScope:
     payload = _load_dictionary()
     estimate_type = _find_estimate_type(payload, str(estimate_type_id))
-    variant = _find_project_variant(estimate_type, str(project_variant_id))
+    variant = _effective_project_variant(_find_project_variant(estimate_type, str(project_variant_id)))
     stages = [
         _public_work_stage(stage)
         for stage in variant.get("stages") or []
@@ -2274,13 +2398,49 @@ def _explicit_object_priority_pair(
             "drywall_partition_object_priority", ["ГКЛ/ВГКЛ по каркасу"],
         )
 
+    # Special masonry must be resolved before generic brick masonry scoring.
+    special_masonry = resolve_special_masonry_operation(haystack, section_context or "")
+    if not demolition and special_masonry == "facade_cladding":
+        return (
+            "interior_finishing", "facade_finishing",
+            "facade_facing_masonry_object_priority", ["облицовочная кладка фасада"],
+        )
+    if not demolition and special_masonry == "arm_belt_masonry":
+        return (
+            "load_bearing_walls", "arm_belts_lintels",
+            "brick_arm_belt_object_priority", ["кирпичный армопояс"],
+        )
+    if not demolition and special_masonry == "vent_shaft_masonry":
+        return (
+            "load_bearing_walls", "vent_shafts_masonry",
+            "vent_shaft_masonry_object_priority", ["кирпичная кладка вентканалов"],
+        )
+    if not demolition and special_masonry == "brick_pillar_masonry":
+        combined = f"{haystack} {section_context or ''}"
+        if _contains_any(combined, (
+            "забор", "огражден", "ограждён", "штакет", "ворот", "калитк", "благоустрой",
+        )):
+            return (
+                "landscape", "small_forms",
+                "brick_fence_pillar_object_priority", ["кирпичные столбы ограждения"],
+            )
+        if _contains_any(combined, (
+            "здани", "каркас", "несущ", "колонна здания", "колонны здания",
+        )):
+            return (
+                "structural_frame", "columns_beams_girders",
+                "brick_building_column_object_priority", ["кирпичные колонны здания"],
+            )
+
+    # In this domain the canonical «Утепление стен» means exterior insulation.
+    # Explicit interior insulation is blocked before scoring in classify_work_cascade.
     if not demolition and _contains_any(haystack, (
-        "теплоизоляц стен", "пароизоляц стен", "утепление стен",
-        "утепление внутренн стен", "тепло и пароизоляц стен",
+        "теплоизоляц стен", "утепление стен", "утепление наружн стен",
+        "утепление фасад", "теплоизоляц фасад",
     )):
         return (
-            "insulation", "internal_wall_insulation",
-            "internal_wall_insulation_object_priority", ["изоляция стен"],
+            "insulation", "facade_wall_insulation",
+            "facade_wall_insulation_object_priority", ["утепление стен"],
         )
 
     if not demolition and _contains_any(haystack, (
@@ -2482,18 +2642,294 @@ def _operation_resolution_policy(payload: dict[str, Any] | None = None) -> dict[
     return policy if isinstance(policy, dict) else {}
 
 
-def detect_operation(
-    item_text: str | None,
-    payload: dict[str, Any] | None = None,
-) -> tuple[str | None, float | None, list[str]]:
-    """Detect a physical operation from the row text only."""
-    payload = payload or _load_dictionary()
+@lru_cache(maxsize=16)
+def _variant_operation_alias_catalog(project_variant_id: str) -> dict[str, Any]:
+    payload = _load_dictionary()
+    variant: dict[str, Any] | None = None
+    for estimate_type in _hierarchy_estimate_types(payload):
+        for candidate in estimate_type.get("project_variants") or []:
+            if not isinstance(candidate, dict):
+                continue
+            if (
+                str(candidate.get("id") or "") == str(project_variant_id)
+                or str(candidate.get("number") or "") == str(project_variant_id)
+            ):
+                variant = candidate
+                break
+        if variant is not None:
+            break
+    if variant is None:
+        return {}
+
+    registry = variant.get("operation_registry") or {}
+    operations = registry.get("operations") or {}
+    packages = registry.get("operation_packages") or {}
+    alias_catalog = variant.get("classification_catalog") or {}
+    stages = variant.get("stages") or []
+
+    operation_to_stages: dict[str, set[str]] = {}
+    package_to_stages: dict[str, set[str]] = {}
+    stage_options: dict[str, list[dict[str, Any]]] = {}
+    stage_packages: dict[str, set[str]] = {}
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        stage_number = str(stage.get("number") or "")
+        if not stage_number:
+            continue
+        stage_options[stage_number] = [
+            option for option in (stage.get("stage_options") or []) if isinstance(option, dict)
+        ]
+        stage_packages[stage_number] = {
+            str(code) for code in (stage.get("operation_packages") or []) if code
+        }
+        primary_code = str(stage.get("primary_operation_code") or "")
+        if primary_code:
+            operation_to_stages.setdefault(primary_code, set()).add(stage_number)
+        for operation in stage.get("operations") or []:
+            if not isinstance(operation, dict):
+                continue
+            code = str(operation.get("operation_code") or "")
+            if code:
+                operation_to_stages.setdefault(code, set()).add(stage_number)
+        for code in stage_packages[stage_number]:
+            package_to_stages.setdefault(code, set()).add(stage_number)
+        for option in stage_options[stage_number]:
+            for code in option.get("operation_codes") or []:
+                if code:
+                    operation_to_stages.setdefault(str(code), set()).add(stage_number)
+            for code in option.get("package_codes") or []:
+                if code:
+                    package_to_stages.setdefault(str(code), set()).add(stage_number)
+
+    return {
+        "payload": {"project_variant": variant},
+        "operations": operations if isinstance(operations, dict) else {},
+        "packages": packages if isinstance(packages, dict) else {},
+        "alias_groups": [
+            group for group in (alias_catalog.get("alias_groups") or []) if isinstance(group, dict)
+        ],
+        "alias_policy": alias_catalog.get("alias_policy") or {},
+        "operation_to_stages": operation_to_stages,
+        "package_to_stages": package_to_stages,
+        "stage_options": stage_options,
+        "stage_packages": stage_packages,
+    }
+
+
+def _context_term_present(term: str, haystack: str, tokens: list[str]) -> bool:
+    """Match context gates by phrase or stable word stem.
+
+    Source aliases intentionally contain stems such as ``вент``, ``уров`` and
+    ``перемыч``. The regular alias matcher is phrase-oriented and therefore
+    cannot be used as the only gate for these values.
+    """
+    normalized = normalize_text(term)
+    if not normalized:
+        return False
+    if _match_terms([term], haystack, tokens):
+        return True
+    term_tokens = [token for token in normalized.split() if token]
+    if not term_tokens:
+        return False
+    for term_token in term_tokens:
+        if len(term_token) < 4:
+            if term_token not in tokens:
+                return False
+            continue
+        prefix_len = min(6, len(term_token))
+        prefix = term_token[:prefix_len]
+        if not any(
+            token.startswith(prefix) or term_token.startswith(token[:prefix_len])
+            for token in tokens
+            if len(token) >= 4
+        ):
+            return False
+    return True
+
+
+def _operation_context_gate(
+    definition: dict[str, Any],
+    *,
+    item_haystack: str,
+    context_haystack: str,
+) -> tuple[bool, bool]:
+    combined = " ".join(part for part in (item_haystack, context_haystack) if part)
+    combined_tokens = combined.split()
+    required_any = [str(term) for term in (definition.get("required_terms_any") or []) if term]
+    required_all = [str(term) for term in (definition.get("required_terms_all") or []) if term]
+    excluded = [str(term) for term in (definition.get("excluded_terms") or definition.get("negative_terms") or []) if term]
+    if excluded and any(_context_term_present(term, combined, combined_tokens) for term in excluded):
+        return False, False
+    required_matched = False
+    if required_any:
+        required_matched = any(
+            _context_term_present(term, combined, combined_tokens)
+            for term in required_any
+        )
+        if not required_matched:
+            return False, False
+    if required_all:
+        for term in required_all:
+            if not _context_term_present(term, combined, combined_tokens):
+                return False, required_matched
+        required_matched = True
+    # Context may be supplied either by the section/stage or explicitly in
+    # the row text itself (for example ``обрешетка фасада``).
+    if bool(definition.get("requires_context")) and not context_haystack and not required_matched:
+        return False, required_matched
+    return True, required_matched
+
+
+_RUSSIAN_INFLECTION_SUFFIXES = tuple(
+    sorted(
+        {
+            "иями", "ями", "ами", "ого", "ему", "ому", "ыми", "ими",
+            "ной", "ный", "ная", "ное", "ные", "ную", "нее",
+            "ого", "ая", "яя", "ое", "ее", "ые", "ие", "ый", "ий", "ой",
+            "ам", "ям", "ах", "ях", "ом", "ем", "ов", "ев", "ей",
+            "а", "я", "ы", "и", "у", "ю", "е", "о", "ь",
+        },
+        key=len,
+        reverse=True,
+    )
+)
+
+
+def _operation_token_stem(token: str) -> str:
+    normalized = normalize_text(token)
+    if not normalized or normalized.isascii():
+        return normalized
+    for suffix in _RUSSIAN_INFLECTION_SUFFIXES:
+        if normalized.endswith(suffix) and len(normalized) - len(suffix) >= 4:
+            return normalized[: -len(suffix)]
+    return normalized
+
+
+def _operation_term_match(term: str, haystack: str, tokens: list[str]) -> tuple[bool, bool]:
+    normalized = normalize_text(term)
+    if not normalized:
+        return False, False
+    exact = normalized == haystack
+    matched = bool(exact or _match_terms([term], haystack, tokens))
+    if not matched:
+        stop_tokens = {"из", "на", "по", "для", "под", "при", "в", "и", "с", "со", "к"}
+        term_tokens = [
+            token for token in normalized.split()
+            if token not in stop_tokens
+            and (len(token) >= 4 or (token.isascii() and len(token) >= 2))
+        ]
+        if term_tokens:
+            matched = all(
+                any(
+                    (
+                        (
+                            _operation_token_stem(term_token)
+                            == _operation_token_stem(hay_token)
+                        )
+                        or (
+                            min(
+                                len(_operation_token_stem(term_token)),
+                                len(_operation_token_stem(hay_token)),
+                            ) >= 6
+                            and abs(
+                                len(_operation_token_stem(term_token))
+                                - len(_operation_token_stem(hay_token))
+                            ) <= 3
+                            and (
+                                _operation_token_stem(term_token).startswith(
+                                    _operation_token_stem(hay_token)
+                                )
+                                or _operation_token_stem(hay_token).startswith(
+                                    _operation_token_stem(term_token)
+                                )
+                            )
+                        )
+                    )
+                    for hay_token in tokens
+                    if len(hay_token) >= 4
+                )
+                for term_token in term_tokens
+            )
+    return matched, exact
+
+
+def _option_context_score(option: dict[str, Any], item_haystack: str) -> float:
+    score = 0.0
+    title = str(option.get("title") or "")
+    title_terms = [title] + [
+        token for token in normalize_text(title).split() if len(token) >= 4
+    ]
+    if title and _match_terms(title_terms, item_haystack, item_haystack.split()):
+        score += 0.12
+    applicability = option.get("applicability") or {}
+    method = str(applicability.get("installation_method") or "")
+    if method == "crane" and _contains_any(item_haystack, ("кран", "автокран", "механизирован")):
+        score += 0.2
+    if method == "manual" and _contains_any(item_haystack, ("ручн", "вручную")):
+        score += 0.2
+    return score
+
+
+def _preferred_option_for_operation(
+    catalog: dict[str, Any],
+    *,
+    stage_number: str | None,
+    operation_code: str | None,
+    package_code: str | None,
+    item_haystack: str,
+) -> str | None:
+    if not stage_number:
+        return None
+    matches: list[tuple[float, str]] = []
+    for option in catalog.get("stage_options", {}).get(stage_number, []):
+        option_id = str(option.get("id") or option.get("number") or "")
+        if not option_id:
+            continue
+        supports = False
+        if operation_code and operation_code in {str(code) for code in (option.get("operation_codes") or [])}:
+            supports = True
+        if package_code and package_code in {str(code) for code in (option.get("package_codes") or [])}:
+            supports = True
+        if supports:
+            matches.append((_option_context_score(option, item_haystack), option_id))
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    if len(matches) == 1:
+        return matches[0][1]
+    if matches[0][0] > matches[1][0]:
+        return matches[0][1]
+    return None
+
+
+def _find_covering_package(
+    catalog: dict[str, Any],
+    operation_codes: set[str],
+    preferred_stage_numbers: set[str],
+) -> str | None:
+    if len(operation_codes) < 2:
+        return None
+    candidates: list[str] = []
+    for code, package in catalog.get("packages", {}).items():
+        if not isinstance(package, dict):
+            continue
+        included = {str(item) for item in (package.get("included_operations") or [])}
+        if not operation_codes.issubset(included):
+            continue
+        package_stages = catalog.get("package_to_stages", {}).get(str(code), set())
+        if preferred_stage_numbers and package_stages and not (preferred_stage_numbers & package_stages):
+            continue
+        candidates.append(str(code))
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _legacy_operation_detection(item_text: str, payload: dict[str, Any]) -> OperationDetectionResult:
     policy = _operation_resolution_policy(payload)
     haystack = normalize_text(item_text or "")
     hay_tokens = haystack.split()
     if not haystack:
-        return None, None, []
-
+        return OperationDetectionResult(None, None, None, ())
     matches: list[tuple[int, str, list[str]]] = []
     for operation_code, terms in (policy.get("operations") or {}).items():
         if not isinstance(terms, list):
@@ -2502,14 +2938,521 @@ def detect_operation(
         if matched:
             specificity = max(len(normalize_text(term)) for term in matched)
             matches.append((specificity, str(operation_code), matched))
-
     if not matches:
-        return None, None, []
+        return OperationDetectionResult(None, None, None, ())
     matches.sort(key=lambda item: (item[0], len(item[2])), reverse=True)
     _, operation_code, matched_terms = matches[0]
     exact = any(normalize_text(term) == haystack for term in matched_terms)
-    return operation_code, (0.99 if exact else 0.94), matched_terms
+    candidate = OperationDetectionCandidate(
+        code=operation_code,
+        kind="atomic",
+        score=0.99 if exact else 0.94,
+        matched_terms=tuple(matched_terms),
+        exact=exact,
+    )
+    return OperationDetectionResult(
+        operation_code=operation_code,
+        operation_package_code=None,
+        confidence_score=candidate.score,
+        matched_terms=candidate.matched_terms,
+        candidates=(candidate,),
+        reason="legacy_operation_term_match",
+    )
 
+
+def detect_operation_detailed(
+    item_text: str | None,
+    payload: dict[str, Any] | None = None,
+    *,
+    project_variant_id: str | None = None,
+    section_title: str | None = None,
+    section_description: str | None = None,
+    unit_code: str | None = None,
+) -> OperationDetectionResult:
+    """Detect an atomic operation or package with variant aliases and context."""
+    payload = payload or _load_dictionary()
+    if not project_variant_id:
+        return _legacy_operation_detection(item_text or "", payload)
+    catalog = _variant_operation_alias_catalog(str(project_variant_id))
+    if not catalog:
+        return _legacy_operation_detection(item_text or "", payload)
+
+    item_haystack = normalize_text(item_text or "")
+    context_haystack = normalize_text(" ".join(part for part in (section_title, section_description) if part))
+    tokens = item_haystack.split()
+    if not item_haystack:
+        return OperationDetectionResult(None, None, None, ())
+
+    policy = catalog.get("alias_policy") or {}
+    exact_bonus = float(policy.get("exact_phrase_bonus", 0.07))
+    ambiguity_delta = float(policy.get("ambiguity_delta", 0.035))
+    atomic_bonus = float(policy.get("atomic_explicit_bonus", 0.06))
+    package_penalty = float(policy.get("package_generic_penalty", 0.05))
+    aggregate: dict[str, dict[str, Any]] = {}
+    multi_candidates: list[dict[str, Any]] = []
+
+    def add_candidate(
+        code: str,
+        *,
+        kind: str,
+        score: float,
+        matched_term: str,
+        source: str,
+        stage_numbers: set[str] | None = None,
+        exact: bool = False,
+        context_gate_matched: bool = False,
+    ) -> None:
+        if not code:
+            return
+        current = aggregate.get(code)
+        data = {
+            "code": code,
+            "kind": kind,
+            "score": min(1.0, score),
+            "matched_terms": {matched_term} if matched_term else set(),
+            "sources": {source},
+            "stage_numbers": set(stage_numbers or set()),
+            "explicit_stage_numbers": (
+                set(stage_numbers or set()) if source.startswith("variant_alias") else set()
+            ),
+            "exact": exact,
+            "context_gate_matched": context_gate_matched,
+        }
+        if current is None:
+            aggregate[code] = data
+            return
+        current["score"] = max(float(current["score"]), min(1.0, score))
+        current["matched_terms"].update(data["matched_terms"])
+        current["sources"].update(data["sources"])
+        current["stage_numbers"].update(data["stage_numbers"])
+        current["explicit_stage_numbers"].update(data["explicit_stage_numbers"])
+        current["exact"] = bool(current["exact"] or exact)
+        current["context_gate_matched"] = bool(
+            current["context_gate_matched"] or context_gate_matched
+        )
+
+    # Common dictionary terms remain available, but variant-specific aliases win.
+    common_policy = _operation_resolution_policy(payload)
+    common_metadata = common_policy.get("operation_metadata") or {}
+    for operation_code, terms in (common_policy.get("operations") or {}).items():
+        if not isinstance(terms, list):
+            continue
+        operation_kind = str((common_metadata.get(operation_code) or {}).get("kind") or "atomic")
+        for term in terms:
+            matched, exact = _operation_term_match(str(term), item_haystack, tokens)
+            if matched:
+                add_candidate(
+                    str(operation_code),
+                    kind=operation_kind,
+                    score=0.78 + (exact_bonus if exact else 0.0),
+                    matched_term=str(term),
+                    source="dictionary_operation_terms",
+                    exact=exact,
+                )
+
+    for code, definition in catalog.get("operations", {}).items():
+        if not isinstance(definition, dict):
+            continue
+        metadata = definition.get("metadata") or {}
+        gate_definition = {**metadata, **{key: definition.get(key) for key in (
+            "required_terms_any", "required_terms_all", "excluded_terms", "requires_context"
+        ) if definition.get(key) is not None}}
+        allowed, gate_matched = _operation_context_gate(
+            gate_definition,
+            item_haystack=item_haystack,
+            context_haystack=context_haystack,
+        )
+        if not allowed:
+            continue
+        stage_numbers = set(catalog.get("operation_to_stages", {}).get(str(code), set()))
+        terms = [str(term) for term in (definition.get("terms") or []) if term]
+        title = str(definition.get("title") or "")
+        if title:
+            terms.append(title)
+        for term in terms:
+            matched, exact = _operation_term_match(term, item_haystack, tokens)
+            if not matched:
+                continue
+            specificity = min(0.08, len(normalize_text(term)) / 250.0)
+            add_candidate(
+                str(code),
+                kind="atomic",
+                score=0.82 + specificity + (exact_bonus if exact else 0.0) + (0.03 if gate_matched else 0.0),
+                matched_term=term,
+                source="variant_operation_terms",
+                stage_numbers=stage_numbers,
+                exact=exact,
+                context_gate_matched=gate_matched,
+            )
+
+    for code, package in catalog.get("packages", {}).items():
+        if not isinstance(package, dict):
+            continue
+        allowed, gate_matched = _operation_context_gate(
+            package,
+            item_haystack=item_haystack,
+            context_haystack=context_haystack,
+        )
+        if not allowed:
+            continue
+        stage_numbers = set(catalog.get("package_to_stages", {}).get(str(code), set()))
+        terms = [str(term) for term in (package.get("terms") or []) if term]
+        if package.get("title"):
+            terms.append(str(package["title"]))
+        for term in terms:
+            matched, exact = _operation_term_match(term, item_haystack, tokens)
+            if matched:
+                add_candidate(
+                    str(code),
+                    kind="package",
+                    score=0.84 + (exact_bonus if exact else 0.0) + (0.03 if gate_matched else 0.0),
+                    matched_term=term,
+                    source="variant_package_terms",
+                    stage_numbers=stage_numbers,
+                    exact=exact,
+                    context_gate_matched=gate_matched,
+                )
+
+    generic_labels = {
+        "монтаж", "кладка", "подготовка", "армирование", "бетонирование",
+        "крепление", "доборы", "пирог", "подача", "геодезия",
+    }
+    for group in catalog.get("alias_groups", []):
+        allowed, group_gate_matched = _operation_context_gate(
+            group,
+            item_haystack=item_haystack,
+            context_haystack=context_haystack,
+        )
+        if not allowed:
+            continue
+        terms: list[tuple[str, float]] = []
+        base_weight = float(group.get("weight") or policy.get("default_alias_weight", 0.92))
+        for raw_alias in group.get("aliases") or []:
+            if isinstance(raw_alias, dict):
+                alias_text = str(raw_alias.get("text") or "")
+                alias_weight = float(raw_alias.get("weight") or base_weight)
+            else:
+                alias_text = str(raw_alias or "")
+                alias_weight = base_weight
+            if alias_text:
+                terms.append((alias_text, alias_weight))
+        label = str(group.get("label") or "")
+        if label and normalize_text(label) not in generic_labels and len(normalize_text(label)) >= 8:
+            terms.append((label, max(0.82, base_weight - 0.04)))
+
+        for alias_text, alias_weight in terms:
+            matched, exact = _operation_term_match(alias_text, item_haystack, tokens)
+            if not matched:
+                continue
+            alias_score = min(1.0, alias_weight + (exact_bonus if exact else 0.0))
+            target_codes = tuple(str(code) for code in (group.get("target_codes") or []) if code)
+            stage_number = str(group.get("stage_number") or "")
+            stage_numbers = {stage_number} if stage_number else set()
+            if str(group.get("target_kind") or "operation") == "operation" and len(target_codes) == 1:
+                code = target_codes[0]
+                kind = "package" if code in catalog.get("packages", {}) else "atomic"
+                add_candidate(
+                    code,
+                    kind=kind,
+                    score=alias_score,
+                    matched_term=alias_text,
+                    source=f"variant_alias:{group.get('source_id')}",
+                    stage_numbers=stage_numbers,
+                    exact=exact,
+                    context_gate_matched=group_gate_matched,
+                )
+                continue
+
+            direct_targets: list[tuple[str, str, bool]] = []
+            for target_code in target_codes:
+                target_def = catalog.get("operations", {}).get(target_code)
+                target_kind = "atomic"
+                if target_def is None:
+                    target_def = catalog.get("packages", {}).get(target_code)
+                    target_kind = "package"
+                if not isinstance(target_def, dict):
+                    continue
+                target_gate, target_gate_matched = _operation_context_gate(
+                    target_def.get("metadata") or target_def,
+                    item_haystack=item_haystack,
+                    context_haystack=context_haystack,
+                )
+                if not target_gate:
+                    continue
+                target_terms = [str(value) for value in (target_def.get("terms") or []) if value]
+                if target_def.get("title"):
+                    target_terms.append(str(target_def["title"]))
+                target_matched = any(_operation_term_match(term, item_haystack, tokens)[0] for term in target_terms)
+                if target_matched or target_gate_matched:
+                    direct_targets.append((target_code, target_kind, target_gate_matched))
+
+            if len(direct_targets) == 1 and not bool(group.get("requires_disambiguation")):
+                target_code, target_kind, target_gate_matched = direct_targets[0]
+                add_candidate(
+                    target_code,
+                    kind=target_kind,
+                    score=min(1.0, alias_score + 0.025),
+                    matched_term=alias_text,
+                    source=f"variant_alias_resolved:{group.get('source_id')}",
+                    stage_numbers=stage_numbers,
+                    exact=exact,
+                    context_gate_matched=target_gate_matched,
+                )
+            elif len(direct_targets) == 1 and direct_targets[0][2]:
+                target_code, target_kind, target_gate_matched = direct_targets[0]
+                add_candidate(
+                    target_code,
+                    kind=target_kind,
+                    score=min(1.0, alias_score + 0.025),
+                    matched_term=alias_text,
+                    source=f"variant_alias_resolved:{group.get('source_id')}",
+                    stage_numbers=stage_numbers,
+                    exact=exact,
+                    context_gate_matched=target_gate_matched,
+                )
+            else:
+                multi_candidates.append(
+                    {
+                        "score": alias_score,
+                        "matched_term": alias_text,
+                        "source": f"variant_alias_multi:{group.get('source_id')}",
+                        "stage_numbers": stage_numbers,
+                        "target_codes": target_codes,
+                        "exact": exact,
+                    }
+                )
+
+    # An explicit row listing several atomic operations is represented by an existing package only.
+    atomic_high = [
+        value for value in aggregate.values()
+        if value["kind"] == "atomic" and float(value["score"]) >= 0.88
+    ]
+    # A slash inside a material alternative (for example ``металл/брус``)
+    # is not evidence that one estimate row contains several operations.
+    conjunction = bool(re.search(r"(?:,|;|\+|\s/\s|\bи\b)", item_haystack))
+    if conjunction and len(atomic_high) >= 2:
+        atomic_codes = {str(value["code"]) for value in atomic_high}
+        preferred_stage_numbers = set().union(*(value["stage_numbers"] for value in atomic_high))
+        covering_package = _find_covering_package(catalog, atomic_codes, preferred_stage_numbers)
+        if covering_package:
+            add_candidate(
+                covering_package,
+                kind="package",
+                score=0.995,
+                matched_term=item_text or "",
+                source="explicit_multi_operation_package",
+                stage_numbers=set(catalog.get("package_to_stages", {}).get(covering_package, set())),
+                exact=True,
+            )
+        elif len(atomic_codes) >= 2:
+            multi_candidates.append(
+                {
+                    "score": 0.985,
+                    "matched_term": item_text or "",
+                    "source": "explicit_multi_operation_without_package",
+                    "stage_numbers": preferred_stage_numbers,
+                    "target_codes": tuple(sorted(atomic_codes)),
+                    "exact": True,
+                }
+            )
+
+    # A package object plus several explicit package actions is a deliberate
+    # complex row, not an ambiguity between its atomic children.
+    package_action_count = sum(
+        1
+        for stem in ("опалуб", "армир", "бетон", "распалуб", "вибр", "гидроизоляц", "утепл")
+        if stem in item_haystack
+    )
+    if conjunction and package_action_count >= 2:
+        for value in aggregate.values():
+            if value["kind"] == "package" and float(value["score"]) >= 0.8:
+                value["score"] = max(float(value["score"]), 0.995)
+                value["sources"].add("explicit_package_object_with_actions")
+
+    candidates: list[OperationDetectionCandidate] = []
+    for value in aggregate.values():
+        score = float(value["score"])
+        if value["kind"] == "atomic" and value["exact"]:
+            score = min(1.0, score + atomic_bonus)
+        if value["kind"] == "package" and not value["exact"]:
+            score = max(0.0, score - package_penalty)
+        effective_stage_numbers = value.get("explicit_stage_numbers") or value["stage_numbers"]
+        stage_numbers = tuple(sorted(effective_stage_numbers))
+        candidates.append(
+            OperationDetectionCandidate(
+                code=str(value["code"]),
+                kind=str(value["kind"]),
+                score=score,
+                matched_terms=tuple(sorted(value["matched_terms"])),
+                source="+".join(sorted(value["sources"])),
+                stage_numbers=stage_numbers,
+                exact=bool(value["exact"]),
+                context_gate_matched=bool(value.get("context_gate_matched")),
+            )
+        )
+    for multi in multi_candidates:
+        candidates.append(
+            OperationDetectionCandidate(
+                code=None,
+                kind="multi_operation",
+                score=float(multi["score"]),
+                matched_terms=(str(multi["matched_term"]),),
+                source=str(multi["source"]),
+                stage_numbers=tuple(sorted(multi["stage_numbers"])),
+                target_codes=tuple(multi["target_codes"]),
+                exact=bool(multi["exact"]),
+                context_gate_matched=False,
+            )
+        )
+
+    if not candidates:
+        return OperationDetectionResult(None, None, None, (), reason="no_operation_match")
+    candidates.sort(
+        key=lambda item: (float(item.score), item.exact, len(" ".join(item.matched_terms))),
+        reverse=True,
+    )
+    top = candidates[0]
+    exact_disambiguation = next(
+        (
+            candidate for candidate in candidates
+            if candidate.kind == "multi_operation"
+            and candidate.exact
+            and candidate.score >= 0.85
+            and top.code in set(candidate.target_codes)
+        ),
+        None,
+    )
+    if (
+        exact_disambiguation is not None
+        and top.kind != "package"
+        and not top.context_gate_matched
+        and top.score - exact_disambiguation.score <= 0.11
+    ):
+        top = exact_disambiguation
+    if top.kind == "multi_operation":
+        preferred_stage = top.stage_numbers[0] if len(top.stage_numbers) == 1 else None
+        return OperationDetectionResult(
+            operation_code=None,
+            operation_package_code=None,
+            confidence_score=top.score,
+            matched_terms=top.matched_terms,
+            candidates=tuple(candidates[:10]),
+            needs_review=True,
+            reason=str(policy.get("multi_operation_without_package_reason") or "multi_operation_row_requires_package_or_split"),
+            preferred_stage_number=preferred_stage,
+            multi_operation_codes=top.target_codes,
+        )
+
+    second = next((item for item in candidates[1:] if item.code != top.code), None)
+    # Required context is a stronger discriminator than a score tie. This is
+    # important for phrases that exist in several construction sections, such
+    # as slab reinforcement or facade-panel sealing.
+    if (
+        second is not None
+        and second.context_gate_matched
+        and not top.context_gate_matched
+        and top.score - second.score < ambiguity_delta
+    ):
+        top, second = second, top
+    if second is not None and top.score - second.score < ambiguity_delta and second.score >= 0.84:
+        # Explicit atomic wording is allowed to beat a generic package wording.
+        # A candidate whose required context was satisfied is also allowed to
+        # beat an otherwise equal generic phrase (for example facade sealing
+        # versus thermal-panel sealing).
+        context_resolved = top.context_gate_matched and not second.context_gate_matched
+        if not context_resolved and not (top.kind == "atomic" and top.exact and second.kind == "package" and not second.exact):
+            multi_peer = second if second.kind == "multi_operation" else (top if top.kind == "multi_operation" else None)
+            stage_numbers = (
+                multi_peer.stage_numbers
+                if multi_peer is not None and len(multi_peer.stage_numbers) == 1
+                else tuple(sorted(set(top.stage_numbers) | set(second.stage_numbers)))
+            )
+            preferred_stage = stage_numbers[0] if len(stage_numbers) == 1 else None
+            multi_codes = (
+                multi_peer.target_codes
+                if multi_peer is not None and multi_peer.target_codes
+                else tuple(code for code in (top.code, second.code) if code)
+            )
+            return OperationDetectionResult(
+                operation_code=None,
+                operation_package_code=None,
+                confidence_score=top.score,
+                matched_terms=top.matched_terms,
+                candidates=tuple(candidates[:10]),
+                needs_review=True,
+                reason=str(policy.get("ambiguous_operation_reason") or "work_operation_ambiguous"),
+                preferred_stage_number=preferred_stage,
+                multi_operation_codes=multi_codes,
+            )
+
+    preferred_stage = top.stage_numbers[0] if len(top.stage_numbers) == 1 else None
+    package_code = top.code if top.kind == "package" else None
+    preferred_option = _preferred_option_for_operation(
+        catalog,
+        stage_number=preferred_stage,
+        operation_code=top.code if top.kind == "atomic" else None,
+        package_code=package_code,
+        item_haystack=item_haystack,
+    )
+    return OperationDetectionResult(
+        operation_code=top.code,
+        operation_package_code=package_code,
+        confidence_score=top.score,
+        matched_terms=top.matched_terms,
+        candidates=tuple(candidates[:10]),
+        needs_review=False,
+        reason=("operation_package_match" if package_code else "variant_operation_alias_match"),
+        preferred_stage_number=preferred_stage,
+        preferred_stage_option_id=preferred_option,
+    )
+
+
+def detect_operation(
+    item_text: str | None,
+    payload: dict[str, Any] | None = None,
+    *,
+    project_variant_id: str | None = None,
+    section_title: str | None = None,
+    section_description: str | None = None,
+    unit_code: str | None = None,
+) -> tuple[str | None, float | None, list[str]]:
+    """Backward-compatible wrapper around the detailed operation detector."""
+    result = detect_operation_detailed(
+        item_text,
+        payload,
+        project_variant_id=project_variant_id,
+        section_title=section_title,
+        section_description=section_description,
+        unit_code=unit_code,
+    )
+    return result.operation_code, result.confidence_score, list(result.matched_terms)
+
+
+def _apply_operation_detection(
+    result: ClassificationResult,
+    detection: OperationDetectionResult,
+) -> ClassificationResult:
+    needs_review = bool(result.needs_review or detection.needs_review)
+    reason = result.reason
+    confidence = result.confidence
+    if detection.needs_review and not result.needs_review:
+        reason = detection.reason or reason
+        confidence = "low"
+    return replace(
+        result,
+        needs_review=needs_review,
+        reason=reason,
+        confidence=confidence,
+        operation_code=detection.operation_code,
+        operation_package_code=detection.operation_package_code,
+        operation_confidence_score=detection.confidence_score,
+        operation_candidates=tuple(item.as_dict() for item in detection.candidates),
+        operation_detection_reason=detection.reason,
+        operation_needs_review=detection.needs_review,
+        operation_multi_codes=detection.multi_operation_codes,
+        preferred_stage_number=detection.preferred_stage_number or result.preferred_stage_number,
+        preferred_stage_option_id=detection.preferred_stage_option_id,
+    )
 
 def _merge_object_candidate(
     target: dict[str, dict[str, Any]],
@@ -2632,12 +3575,15 @@ def _contextual_resolution_result(
     scope_fields: dict[str, Any],
     version: str,
     thresholds: dict[str, Any],
+    operation_detection: OperationDetectionResult | None = None,
 ) -> ClassificationResult | None:
     if resolved_role != "work":
         return None
 
-    detected_operation, operation_confidence, operation_terms = detect_operation(name, payload)
-    operation_code = operation_hint or detected_operation
+    operation_detection = operation_detection or detect_operation_detailed(name, payload)
+    operation_code = operation_hint or operation_detection.operation_code
+    operation_confidence = operation_detection.confidence_score
+    operation_terms = list(operation_detection.matched_terms)
     if not operation_code:
         return None
 
@@ -2753,7 +3699,17 @@ def _contextual_resolution_result(
         dictionary_version=version,
         row_role=resolved_role,
         operation_code=operation_code,
+        operation_package_code=operation_detection.operation_package_code,
         operation_confidence_score=operation_confidence or 0.9,
+        operation_candidates=tuple(item.as_dict() for item in operation_detection.candidates),
+        operation_detection_reason=operation_detection.reason,
+        operation_needs_review=operation_detection.needs_review,
+        operation_multi_codes=operation_detection.multi_operation_codes,
+        preferred_stage_number=(
+            operation_detection.preferred_stage_number
+            or (str(selected_rule.get("preferred_stage_number") or "") or None)
+        ),
+        preferred_stage_option_id=operation_detection.preferred_stage_option_id,
         section_object_candidates=tuple(object_candidates),
         selected_object_scope_code=selected_object,
         object_scope_confidence_score=(
@@ -2767,9 +3723,6 @@ def _contextual_resolution_result(
         context_override_blocked=explicit_object,
         context_override_reason=(
             "explicit_row_object_priority" if explicit_object else None
-        ),
-        preferred_stage_number=(
-            str(selected_rule.get("preferred_stage_number") or "") or None
         ),
         **scope_fields,
     )
@@ -2806,6 +3759,13 @@ def classify_work(
     hay_tokens = haystack.split()
     version = dictionary_version(payload)
     resolved_role = row_role or classify_row_role(name, context_text, payload=payload)
+    operation_detection = detect_operation_detailed(
+        name,
+        payload,
+        project_variant_id=scope_project_variant_id,
+        section_title=effective_title,
+        section_description=effective_description,
+    )
 
     normalized_pairs: frozenset[tuple[str, str]] | None = None
     if candidate_pairs is not None:
@@ -2939,9 +3899,10 @@ def classify_work(
         scope_fields=scope_fields,
         version=version,
         thresholds=thresholds,
+        operation_detection=operation_detection,
     )
     if contextual_result is not None:
-        return contextual_result
+        return _apply_operation_detection(contextual_result, operation_detection)
 
     object_priority_pair = pre_object_priority_pair
     if object_priority_pair is not None:
@@ -2964,7 +3925,7 @@ def classify_work(
                 thresholds=thresholds,
             )
             if object_result is not None:
-                return object_result
+                return _apply_operation_detection(object_result, operation_detection)
 
     section_scores: dict[str, int] = {}
     section_matches: dict[str, dict[str, list[str]]] = {}
@@ -3098,7 +4059,6 @@ def classify_work(
 
     confidence = _confidence(total_score, min(section_delta, subtype_delta), needs_review, thresholds)
     candidates = section_candidates + subtype_candidates
-    detected_operation, detected_operation_confidence, _ = detect_operation(name, payload)
     detected_objects = detect_section_object_candidates(
         item_text=name,
         section_title=effective_title,
@@ -3106,7 +4066,7 @@ def classify_work(
         supplied_candidates=section_object_candidates,
         payload=payload,
     )
-    return ClassificationResult(
+    result = ClassificationResult(
         section_code=winner_id,
         section_name=winning_section.get("title"),
         subtype_code=subtype_code,
@@ -3121,11 +4081,19 @@ def classify_work(
         reason=reason,
         dictionary_version=version,
         row_role=resolved_role,
-        operation_code=detected_operation,
-        operation_confidence_score=detected_operation_confidence,
+        operation_code=operation_detection.operation_code,
+        operation_package_code=operation_detection.operation_package_code,
+        operation_confidence_score=operation_detection.confidence_score,
+        operation_candidates=tuple(item.as_dict() for item in operation_detection.candidates),
+        operation_detection_reason=operation_detection.reason,
+        operation_needs_review=operation_detection.needs_review,
+        operation_multi_codes=operation_detection.multi_operation_codes,
+        preferred_stage_number=operation_detection.preferred_stage_number,
+        preferred_stage_option_id=operation_detection.preferred_stage_option_id,
         section_object_candidates=tuple(detected_objects),
         **scope_fields,
     )
+    return _apply_operation_detection(result, operation_detection)
 
 
 def _scope_result_requires_fallback(result: ClassificationResult, review_min_score: int) -> bool:
@@ -3222,6 +4190,7 @@ def _global_result_is_safe(
         or result.object_priority_rule
         or matched.get("object_priority")
         or matched.get("action_object_pairs")
+        or matched.get("operation_object_resolution")
         or matched.get("subtype_strong_terms")
         or matched.get("exact_strong_phrase")
     )
@@ -3230,6 +4199,41 @@ def _global_result_is_safe(
     if matched.get("subtype_negative_terms") or result.object_conflicts:
         return False, "global_object_conflict"
     return True, "strong_global_object_or_phrase"
+
+
+def _classification_blocker_result(
+    *,
+    reason: str,
+    row_role: str | None,
+    section_code: str | None = None,
+    suggested_taxonomy_code: str | None = None,
+    suggested_operation_code: str | None = None,
+) -> ClassificationResult:
+    payload = _load_dictionary()
+    section_name = None
+    if section_code:
+        section = next((row for row in payload.get("sections", []) if row.get("id") == section_code), None)
+        section_name = section.get("title") if section else None
+    return ClassificationResult(
+        section_code=section_code,
+        section_name=section_name,
+        subtype_code=UNKNOWN_SUBTYPE_CODE,
+        subtype_name=UNKNOWN_SUBTYPE_NAME,
+        score=0,
+        confidence="low",
+        needs_review=True,
+        source="classification_blocker",
+        matched_terms={"classification_blocker": [reason]},
+        candidates=[],
+        related_sections=[],
+        reason=reason,
+        dictionary_version=dictionary_version(payload),
+        row_role=row_role or "work",
+        classification_scope="classification_blocker",
+        fallback_used=False,
+        suggested_taxonomy_code=suggested_taxonomy_code,
+        suggested_operation_code=suggested_operation_code,
+    )
 
 
 def classify_work_cascade(
@@ -3246,6 +4250,36 @@ def classify_work_cascade(
     allow_global_fallback: bool = True,
 ) -> ClassificationResult:
     """Classify in variant → estimate type → controlled global fallback order."""
+    work_text, section_context_text, source_context_text = build_rate_context_text(
+        work_name=name,
+        item_text=name,
+        section_title=section_title,
+        section_description=section_description,
+        section_parent_context=section,
+    )
+    if has_internal_wall_insulation_exception(source_context_text):
+        return _classification_blocker_result(
+            reason="internal_wall_insulation_exception",
+            row_role=row_role,
+            section_code="insulation",
+            suggested_taxonomy_code="insulation/internal_wall_insulation",
+        )
+
+    special_operation = resolve_special_masonry_operation(work_text, section_context_text)
+    if special_operation == "brick_pillar_masonry":
+        has_fence_context = _contains_any(source_context_text, (
+            "забор", "огражден", "ограждён", "штакет", "ворот", "калитк", "благоустрой",
+        ))
+        has_building_context = _contains_any(source_context_text, (
+            "здани", "каркас", "несущ", "колонна здания", "колонны здания",
+        ))
+        if not has_fence_context and not has_building_context:
+            return _classification_blocker_result(
+                reason="brick_pillar_object_not_resolved",
+                row_role=row_role,
+                suggested_operation_code="brick_pillar_masonry",
+            )
+
     thresholds = ((_load_dictionary().get("scoring") or {}).get("decision_thresholds") or {})
     review_min = int(thresholds.get("review_min_score", 5))
     attempts: list[TaxonomyScope] = []
@@ -3269,7 +4303,10 @@ def classify_work_cascade(
             candidate_pairs=scope.allowed_pairs,
             scope_name=scope.name,
             scope_estimate_type_id=scope.estimate_type_id,
-            scope_project_variant_id=scope.project_variant_id,
+            scope_project_variant_id=(
+                variant_scope.project_variant_id if variant_scope is not None
+                else scope.project_variant_id
+            ),
             fallback_used=index > 0,
         )
         scoped_results.append(result)

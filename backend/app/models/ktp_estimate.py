@@ -95,6 +95,14 @@ class KtpWbsGroup(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default="draft"
     )
+    stage_instance_id: Mapped[str | None] = mapped_column(String(255))
+    template_stage_number: Mapped[str | None] = mapped_column(String(64))
+    stage_number: Mapped[str | None] = mapped_column(String(64))
+    floor_number: Mapped[int | None] = mapped_column(Integer)
+    floor_kind: Mapped[str | None] = mapped_column(String(32))
+    floor_label: Mapped[str | None] = mapped_column(String(128))
+    floor_component: Mapped[str | None] = mapped_column(String(64))
+    component_role: Mapped[str | None] = mapped_column(String(128))
     # Этап 2 — карточка КТП
     card_title: Mapped[str | None] = mapped_column(Text)
     card_goal: Mapped[str | None] = mapped_column(Text)
@@ -219,6 +227,25 @@ class KtpWbsItem(Base, TimestampMixin):
     # Единица измерения ФЕР (эвристически извлечённая) и множитель (напр. «на 100 м2»).
     fer_unit: Mapped[str | None] = mapped_column(String(32))
     fer_unit_multiplier: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    source_row_key: Mapped[str | None] = mapped_column(PGUUID(as_uuid=False))
+    projection_id: Mapped[str | None] = mapped_column(String(96))
+    stage_instance_id: Mapped[str | None] = mapped_column(String(255))
+    template_stage_number: Mapped[str | None] = mapped_column(String(64))
+    stage_number: Mapped[str | None] = mapped_column(String(64))
+    floor_number: Mapped[int | None] = mapped_column(Integer)
+    floor_kind: Mapped[str | None] = mapped_column(String(32))
+    floor_label: Mapped[str | None] = mapped_column(String(128))
+    floor_component: Mapped[str | None] = mapped_column(String(64))
+    component_role: Mapped[str | None] = mapped_column(String(128))
+    operation_code: Mapped[str | None] = mapped_column(String(128))
+    operation_package_code: Mapped[str | None] = mapped_column(String(128))
+    semantic_stage_option_id: Mapped[str | None] = mapped_column(String(128))
+    stage_option_source: Mapped[str | None] = mapped_column(String(64))
+    work_scope_key: Mapped[str | None] = mapped_column(String(255))
+    applicability_hash: Mapped[str | None] = mapped_column(String(64))
+    applicability_hash_version: Mapped[int | None] = mapped_column(SmallInteger)
+    applicability_schema_version: Mapped[str | None] = mapped_column(String(64))
+    duration_block_reason: Mapped[str | None] = mapped_column(String(128))
 
     group: Mapped["KtpWbsGroup"] = relationship(back_populates="items")
 

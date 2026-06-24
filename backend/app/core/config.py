@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from functools import lru_cache
 
 
@@ -73,6 +74,20 @@ class Settings(BaseSettings):
     KTP_STAGE1_PROJECT_GAP_FILL_ENABLED: bool = True
     KTP_STAGE1_STALE_AFTER_SECONDS: int = 2 * 60 * 60
 
+    # Stage 10 / post-release variant 2.7 contour.
+    WORK_RATE_CATALOG_PATH: str = "backend/app/data/work_rate_catalog_v1_2.json"
+    LEGACY_WORK_TAXONOMY_PATH: str = "backend/app/data/construction_work_dictionary_v6_4_14.json"
+    DYNAMIC_FLOOR_WORK_TAXONOMY_PATH: str = "backend/app/data/construction_work_dictionary_v6_5_0.json"
+    DYNAMIC_FLOOR_STRUCTURE_2_7_MODE: str = "off"
+    DYNAMIC_FLOOR_STRUCTURE_2_7_ALLOWLIST: str = ""
+    ESTIMATE_PREVIEW_PROCESSING_TIMEOUT_MINUTES: int = 60
+    ESTIMATE_PREVIEW_TTL_MINUTES: int = 1440
+    ESTIMATE_CONFIRMED_SNAPSHOT_RETENTION_DAYS: int = 30
+    PREVIEW_CONFIRMING_RETRY_DELAY_SECONDS: int = 10
+    PREVIEW_CONFIRMING_MAX_RETRIES: int = 6
+    BACKFILL_TRANSACTION_TIMEOUT_SECONDS: int = 900
+    BACKFILL_MAX_RETRIES: int = 3
+
     # Item-level NW→ФЕР matching (calibration targets — NOT quality gates yet).
     # Toggles the post-Stage-1 pass that matches each estimate item to a ФЕР row
     # so that durations are grounded in fer_rows.h_hour instead of LLM guesses.
@@ -100,6 +115,34 @@ class Settings(BaseSettings):
 
     # CORS
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+
+    @field_validator(
+        "ESTIMATE_PREVIEW_PROCESSING_TIMEOUT_MINUTES",
+        "ESTIMATE_PREVIEW_TTL_MINUTES",
+        "ESTIMATE_CONFIRMED_SNAPSHOT_RETENTION_DAYS",
+        "PREVIEW_CONFIRMING_RETRY_DELAY_SECONDS",
+        "BACKFILL_TRANSACTION_TIMEOUT_SECONDS",
+    )
+    @classmethod
+    def _positive_stage10_timeout(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("stage10 timeout and retention settings must be positive")
+        return value
+
+    @field_validator("PREVIEW_CONFIRMING_MAX_RETRIES", "BACKFILL_MAX_RETRIES")
+    @classmethod
+    def _non_negative_stage10_retries(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("stage10 retry settings must be non-negative")
+        return value
+
+    @field_validator("DYNAMIC_FLOOR_STRUCTURE_2_7_MODE")
+    @classmethod
+    def _valid_dynamic_floor_mode(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        if normalized not in {"off", "allowlist", "on"}:
+            raise ValueError("DYNAMIC_FLOOR_STRUCTURE_2_7_MODE must be off, allowlist or on")
+        return normalized
 
     class Config:
         env_file = ".env"

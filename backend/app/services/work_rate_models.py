@@ -115,6 +115,11 @@ class WorkRateItem:
     labor_avg: float | None = None
     hourly_rate: float | None = None
     labor_basis: str | None = None
+    norm_base_quantity: float = 1.0
+    source_rate_id: str | None = None
+    rate_value_mode: str = "legacy_catalog"
+    resolution_status: str = "source_value_available"
+    applicability_json: dict[str, Any] = field(default_factory=dict)
 
     mapping_status: str = MAPPING_STATUS_UNMAPPED
     has_active_mapping: bool = False
@@ -143,6 +148,7 @@ class WorkRateMapping:
     taxonomy_subtype_id: str | None = None
     taxonomy_code: str | None = None
     object_scope_code: str | None = None
+    rate_context_code: str | None = None
     mapping_mode: str = MAPPING_UNMAPPED
     priority: int = 100
     confidence: float = 0.0
@@ -208,10 +214,10 @@ class RateSelectionResult:
     operation_code: str | None = None
     taxonomy_code: str | None = None
     object_scope_code: str | None = None
+    rate_context_code: str | None = None
+    suggested_operation_code: str | None = None
+    rate_auto_applicable: bool = False
     unit_code: str | None = None
-    item_unit_code: str | None = None
-    rate_unit_code: str | None = None
-    unit_conversion_factor: float | None = None
     price_min: float | None = None
     price_max: float | None = None
     price_avg: float | None = None
@@ -219,7 +225,16 @@ class RateSelectionResult:
     labor_max: float | None = None
     labor_avg: float | None = None
     labor_basis: str | None = None
-    rate_auto_applicable: bool = False
+    norm_base_quantity: float = 1.0
+    source_rate_id: str | None = None
+    rate_value_mode: str | None = None
+    resolution_status: str | None = None
+    requires_user_input: bool = False
+    user_override_id: str | None = None
+    user_override_scope: str | None = None
+    user_override_owner_id: str | None = None
+    applicability_hash: str | None = None
+    applicability_json: dict[str, Any] = field(default_factory=dict)
     needs_review: bool = False
     review_reason: str | None = None
     candidates: list[dict[str, Any]] = field(default_factory=list)

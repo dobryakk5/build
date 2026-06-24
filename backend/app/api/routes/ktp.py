@@ -17,8 +17,16 @@ from app.services.ktp_service import (
     get_ktp_card,
     get_ktp_groups,
 )
+from app.services.estimate_batch_revalidation_service import BlockedBatchGuard, RevalidationDomainError
 
 router = APIRouter(prefix="/projects/{project_id}/ktp", tags=["ktp"])
+
+
+def _raise_batch_guard(exc: RevalidationDomainError) -> None:
+    detail = {"code": exc.code}
+    if exc.details:
+        detail["details"] = exc.details
+    raise HTTPException(exc.http_status, detail=detail) from exc
 
 
 class KtpQuestionOut(BaseModel):
@@ -147,6 +155,7 @@ async def build_groups(
     _member=Depends(require_action(Action.EDIT)),
 ):
     try:
+        await BlockedBatchGuard(db).ensure_operation_allowed(body.estimate_batch_id, "generate_ktp")
         groups = await build_ktp_groups_for_batch(
             db,
             project_id=str(project_id),
@@ -155,6 +164,8 @@ async def build_groups(
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except RevalidationDomainError as exc:
+        _raise_batch_guard(exc)
     return [_group_to_out(group) for group in groups]
 
 
@@ -207,6 +218,14 @@ async def generate_ktp(
     _member=Depends(require_action(Action.EDIT)),
 ):
     try:
+        group = await db.scalar(
+            select(KtpGroup)
+            .where(KtpGroup.id == str(group_id))
+            .where(KtpGroup.project_id == str(project_id))
+        )
+        if not group:
+            raise HTTPException(status_code=404, detail="Группа не найдена")
+        await BlockedBatchGuard(db).ensure_operation_allowed(group.estimate_batch_id, "generate_ktp")
         result = await generate_ktp_for_group(
             db,
             project_id=str(project_id),
@@ -217,6 +236,10 @@ async def generate_ktp(
         detail = str(exc)
         status_code = 404 if "не найден" in detail or "не найдена" in detail else 502
         raise HTTPException(status_code=status_code, detail=detail)
+    except RevalidationDomainError as exc:
+        _raise_batch_guard(exc)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Ошибка генерации: {exc}")
 

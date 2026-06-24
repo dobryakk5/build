@@ -12,6 +12,7 @@ from app.models import KtpEstimateSession, KtpWbsGroup, KtpWbsItem
 from app.models.project import ProjectMember
 from app.services import ktp_estimate_service as svc
 from app.services import work_taxonomy_service
+from app.services.estimate_batch_revalidation_service import BlockedBatchGuard, RevalidationDomainError
 
 router = APIRouter(prefix="/projects/{project_id}/ktp-estimate", tags=["ktp-estimate"])
 
@@ -413,6 +414,13 @@ def _value_error(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=code, detail=detail)
 
 
+def _raise_batch_guard(exc: RevalidationDomainError) -> None:
+    detail = {"code": exc.code}
+    if exc.details:
+        detail["details"] = exc.details
+    raise HTTPException(exc.http_status, detail=detail) from exc
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ЭТАП 1 — СЕАНС И WBS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -425,6 +433,7 @@ async def start_session(
     member: ProjectMember = Depends(require_action(Action.EDIT)),
 ):
     try:
+        await BlockedBatchGuard(db).ensure_operation_allowed(body.estimate_batch_id, "generate_ktp")
         job, session = await svc.start_stage1_job(
             db,
             project_id=str(project_id),
@@ -435,6 +444,8 @@ async def start_session(
         )
     except ValueError as exc:
         raise _value_error(exc)
+    except RevalidationDomainError as exc:
+        _raise_batch_guard(exc)
     # если новый job не создан, но сеанс ещё обрабатывается — отдаём
     # его сохранённый job_id, чтобы фронт сразу подхватил поллинг
     job_id = job.id if job else None
@@ -843,6 +854,10 @@ async def build_gpr(
     from app.services import ktp_gpr_service
 
     try:
+        session = await db.get(KtpEstimateSession, str(session_id))
+        if not session or session.project_id != str(project_id):
+            raise ValueError("Сеанс не найден")
+        await BlockedBatchGuard(db).ensure_operation_allowed(session.estimate_batch_id, "generate_gpr")
         job = await ktp_gpr_service.start_gpr_job(
             db,
             project_id=str(project_id),
@@ -851,4 +866,6 @@ async def build_gpr(
         )
     except ValueError as exc:
         raise _value_error(exc)
+    except RevalidationDomainError as exc:
+        _raise_batch_guard(exc)
     return BuildGprResponse(job_id=job.id)

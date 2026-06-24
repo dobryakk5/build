@@ -688,13 +688,99 @@ def _stage_object_gate(
     return True, reasons
 
 
+FLOOR_ORDINALS: dict[str, int] = {
+    "нулевой": 0, "нулевого": 0,
+    "первый": 1, "первого": 1, "первом": 1,
+    "второй": 2, "второго": 2, "втором": 2,
+    "третий": 3, "третьего": 3, "третьем": 3,
+    "четвертый": 4, "четвёртый": 4, "четвертого": 4, "четвёртого": 4, "четвертом": 4, "четвёртом": 4,
+    "пятый": 5, "пятого": 5, "пятом": 5,
+    "шестой": 6, "шестого": 6, "шестом": 6,
+    "седьмой": 7, "седьмого": 7, "седьмом": 7,
+    "восьмой": 8, "восьмого": 8, "восьмом": 8,
+    "девятый": 9, "девятого": 9, "девятом": 9,
+    "десятый": 10, "десятого": 10, "десятом": 10,
+}
+
 OCCURRENCE_PATTERNS = [
     (re.compile(r"\b(\d+)\s*(этаж|эт\.?|этажа)\b", re.IGNORECASE), "{N} этаж"),
-    (re.compile(r"\b(цоколь|цокольный)\b", re.IGNORECASE), "цоколь"),
-    (re.compile(r"\b(подвал|подвальный)\b", re.IGNORECASE), "подвал"),
+    (re.compile(r"\b(нулев(?:ой|ого)|перв(?:ый|ого)|втор(?:ой|ого)|трет(?:ий|ьего)|четв[её]рт(?:ый|ого)|пят(?:ый|ого)|шест(?:ой|ого)|седьм(?:ой|ого)|восьм(?:ой|ого)|девят(?:ый|ого)|десят(?:ый|ого))\s+этаж", re.IGNORECASE), "{WORD} этаж"),
+    (re.compile(r"\b(цоколь|цокольный|цокольного)\b", re.IGNORECASE), "цоколь"),
+    (re.compile(r"\b(подвал|подвальный|подвального)\b", re.IGNORECASE), "подвал"),
     (re.compile(r"\b(мансард\w*|мансарда|мансардный)\b", re.IGNORECASE), "мансарда"),
     (re.compile(r"\b(чердак|чердачный)\b", re.IGNORECASE), "чердак"),
 ]
+
+
+def _floor_reference_from_text(value: str) -> dict[str, Any] | None:
+    source = normalize_text(value)
+    if not source:
+        return None
+    if re.search(r"\b(?:цоколь|цокольн\w*|подвал|подвальн\w*)\b", source):
+        return {"floor_number": 0, "floor_kind": "basement", "label": "цоколь"}
+    mansard = bool(re.search(r"\bмансард\w*\b", source))
+    numeric = re.search(r"\b(\d+)\s*(?:этаж|эт\.?|этажа)\b", source)
+    if numeric:
+        number = int(numeric.group(1))
+        return {
+            "floor_number": number,
+            "floor_kind": "mansard" if mansard else None,
+            "label": "мансарда" if mansard else f"{number} этаж",
+        }
+    for word, number in FLOOR_ORDINALS.items():
+        if re.search(rf"\b{re.escape(word)}\s+этаж", source):
+            return {
+                "floor_number": number,
+                "floor_kind": "mansard" if mansard else None,
+                "label": "мансарда" if mansard else f"{number} этаж",
+            }
+    if mansard:
+        return {"floor_number": None, "floor_kind": "mansard", "label": "мансарда"}
+    return None
+
+
+def _filter_stages_by_floor_reference(
+    stages: list[dict[str, Any]],
+    text: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    reference = _floor_reference_from_text(text)
+    if not reference:
+        return stages, None
+    floor_stages = [stage for stage in stages if stage.get("floor_number") is not None]
+    requested_number = reference.get("floor_number")
+    requested_kind = reference.get("floor_kind")
+
+    if requested_kind == "basement" and not any(stage.get("floor_number") == 0 for stage in floor_stages):
+        return [], "basement_not_enabled"
+    if requested_kind == "mansard":
+        mansard_stages = [stage for stage in floor_stages if stage.get("floor_kind") == "mansard"]
+        if not mansard_stages:
+            return [], "mansard_not_enabled"
+        if requested_number is None:
+            requested_number = max(int(stage.get("floor_number")) for stage in mansard_stages)
+    if requested_number is not None:
+        available_numbers = {int(stage.get("floor_number")) for stage in floor_stages}
+        if requested_number not in available_numbers:
+            return [], "floor_out_of_range"
+        if "перекрыт" in text and not any(
+            int(stage.get("floor_number")) == requested_number
+            and stage.get("floor_component") == "slab"
+            for stage in floor_stages
+        ):
+            if any(
+                int(stage.get("floor_number")) == requested_number
+                and stage.get("floor_kind") == "mansard"
+                for stage in floor_stages
+            ):
+                return [], "mansard_slab_conflict"
+        filtered = [
+            stage
+            for stage in stages
+            if stage.get("floor_number") is None
+            or int(stage.get("floor_number")) == requested_number
+        ]
+        return filtered, None
+    return stages, None
 
 
 class StageMatchType(StrEnum):
@@ -702,6 +788,7 @@ class StageMatchType(StrEnum):
     NEAR_STAGE_TITLE_MATCH = "near_stage_title_match"
     CANONICAL_TITLE_MATCH = "canonical_title_match"
     STAGE_OPTION_MATCH = "stage_option_match"
+    OPERATION_CODE_MATCH = "operation_code_match"
     PRIMARY_WORK_TYPE_MATCH = "primary_work_type_match"
     RELATED_WORK_TYPE_MATCH = "related_work_type_match"
     SEQUENTIAL_CONTEXT_BOOST = "sequential_context_boost"
@@ -802,12 +889,22 @@ class StageMatch:
             "project_variant_id": project_variant_id,
             "project_variant_number": project_variant_number,
             "canonical_stage_id": stage.get("canonical_stage_id"),
+            "stage_instance_id": stage.get("stage_instance_id"),
+            "template_stage_number": stage.get("template_stage_number"),
+            "legacy_stage_number": stage.get("legacy_stage_number"),
+            "floor_number": stage.get("floor_number"),
+            "floor_kind": stage.get("floor_kind"),
+            "floor_label": stage.get("floor_label"),
+            "floor_component": stage.get("floor_component"),
+            "component_role": stage.get("component_role"),
+            "stage_sort_order": stage.get("sort_order"),
             "work_stage_number": stage_number,
             "work_stage_title": stage.get("title"),
             "stage_occurrence_index": stage.get("occurrence_index"),
             "stage_occurrence_label": self.occurrence_label or stage.get("occurrence_label"),
             "stage_options_mode": stage.get("stage_options_mode") or "none",
             "stage_option_id": option.get("id") or option.get("number"),
+            "semantic_stage_option_id": option.get("id") or option.get("number"),
             "stage_option_title": option.get("title"),
             "section_id": section_id,
             "subtype_id": subtype_id,
@@ -1322,6 +1419,181 @@ class StageClassifier:
         }
         self.work_type_classifier = WorkTypeClassifier()
 
+    @staticmethod
+    def _stage_template_number(stage: dict[str, Any]) -> str:
+        return str(stage.get("template_stage_number") or stage.get("number") or "")
+
+    @staticmethod
+    def _stage_operation_codes(stage: dict[str, Any]) -> set[str]:
+        result = {str(stage.get("primary_operation_code") or "")}
+        for operation in stage.get("operations") or []:
+            if isinstance(operation, dict) and operation.get("operation_code"):
+                result.add(str(operation["operation_code"]))
+        return {code for code in result if code}
+
+    @staticmethod
+    def _stage_package_codes(stage: dict[str, Any]) -> set[str]:
+        result = {str(code) for code in (stage.get("operation_packages") or []) if code}
+        for option in stage.get("stage_options") or []:
+            if not isinstance(option, dict):
+                continue
+            result.update(str(code) for code in (option.get("package_codes") or []) if code)
+        return result
+
+    @staticmethod
+    def _operation_option(
+        stage: dict[str, Any],
+        *,
+        operation_code: str | None,
+        package_code: str | None,
+        preferred_option_id: str | None,
+    ) -> dict[str, Any] | None:
+        options = [option for option in (stage.get("stage_options") or []) if isinstance(option, dict)]
+        if preferred_option_id:
+            preferred = next(
+                (
+                    option for option in options
+                    if str(option.get("id") or option.get("number") or "") == str(preferred_option_id)
+                ),
+                None,
+            )
+            if preferred is not None:
+                return preferred
+        supporting: list[dict[str, Any]] = []
+        for option in options:
+            operation_codes = {str(code) for code in (option.get("operation_codes") or []) if code}
+            package_codes = {str(code) for code in (option.get("package_codes") or []) if code}
+            if operation_code and operation_code in operation_codes:
+                supporting.append(option)
+            elif package_code and package_code in package_codes:
+                supporting.append(option)
+        return supporting[0] if len(supporting) == 1 else None
+
+    def _operation_stage_match(
+        self,
+        *,
+        allowed_stages: list[dict[str, Any]],
+        global_result: ClassificationResult,
+        previous_context: dict[str, Any] | None,
+        normalized_role: str,
+    ) -> StageMatch | None:
+        operation_code = str(global_result.operation_code or "") or None
+        package_code = str(global_result.operation_package_code or "") or None
+        preferred_template = str(global_result.preferred_stage_number or "") or None
+        if not operation_code and not package_code and not preferred_template:
+            return None
+
+        candidates: list[dict[str, Any]] = []
+        for stage in allowed_stages:
+            template_number = self._stage_template_number(stage)
+            if preferred_template and template_number != preferred_template:
+                continue
+            supports = bool(preferred_template)
+            if operation_code and operation_code in self._stage_operation_codes(stage):
+                supports = True
+            if package_code and package_code in self._stage_package_codes(stage):
+                supports = True
+            if supports:
+                candidates.append(stage)
+
+        if len(candidates) > 1 and previous_context is not None:
+            previous_floor = previous_context.get("floor_number")
+            if previous_floor is not None:
+                same_floor = [
+                    stage for stage in candidates
+                    if stage.get("floor_number") == previous_floor
+                ]
+                if len(same_floor) == 1:
+                    candidates = same_floor
+
+        if len(candidates) != 1:
+            return None
+        stage = candidates[0]
+        option = self._operation_option(
+            stage,
+            operation_code=operation_code,
+            package_code=package_code,
+            preferred_option_id=global_result.preferred_stage_option_id,
+        )
+        mode = str(stage.get("stage_options_mode") or "none")
+        option_required = mode in {"selectable_one", "selectable_many"} and bool(stage.get("stage_options"))
+        operation_review = bool(global_result.operation_needs_review)
+        needs_review = bool(operation_review or (option_required and option is None))
+        review_reason = None
+        if operation_review:
+            review_reason = global_result.operation_detection_reason or "work_operation_ambiguous"
+        elif option_required and option is None:
+            review_reason = "semantic_stage_option_required"
+
+        primary = stage.get("primary_work_type") if isinstance(stage.get("primary_work_type"), dict) else {}
+        section_id = str(primary.get("section_id") or "") or None
+        subtype_id = str(primary.get("subtype_id") or "") or None
+        if (
+            global_result.subtype_code
+            and global_result.subtype_code != UNKNOWN_SUBTYPE_CODE
+            and "/" in global_result.subtype_code
+        ):
+            global_section, global_subtype = global_result.subtype_code.split("/", 1)
+            section_id = global_section or section_id
+            subtype_id = global_subtype or subtype_id
+        work_type = WorkTypeMatch(
+            section_id=section_id,
+            subtype_id=subtype_id,
+            confidence="low" if needs_review else "high",
+            needs_review=needs_review,
+            reason=review_reason,
+            source="variant_operation_alias",
+            stage_option=option,
+            score_breakdown={
+                "source": "variant_operation_alias",
+                "operation_code": operation_code,
+                "operation_package_code": package_code,
+                "operation_detection_reason": global_result.operation_detection_reason,
+                "operation_candidates": list(global_result.operation_candidates),
+                "preferred_stage_number": preferred_template,
+                "preferred_stage_option_id": global_result.preferred_stage_option_id,
+            },
+        )
+        return StageMatch(
+            stage=stage,
+            score=20 if not needs_review else 12,
+            confidence="low" if needs_review else "high",
+            needs_review=needs_review,
+            match_type=StageMatchType.OPERATION_CODE_MATCH.value,
+            matched_terms={
+                "operation_alias": list(
+                    next(
+                        (
+                            candidate.get("matched_terms") or []
+                            for candidate in global_result.operation_candidates
+                            if candidate.get("code") in {operation_code, package_code}
+                        ),
+                        [],
+                    )
+                )
+            },
+            stage_option=option,
+            work_type_ref=(
+                {"section_id": section_id, "subtype_id": subtype_id}
+                if section_id and subtype_id
+                else None
+            ),
+            review_reason=review_reason,
+            score_breakdown={
+                "source": "variant_operation_alias",
+                "operation_code": operation_code,
+                "operation_package_code": package_code,
+                "preferred_template_stage": preferred_template,
+                "selected_stage": stage.get("number"),
+                "selected_template_stage": self._stage_template_number(stage),
+                "selected_stage_option": (option or {}).get("id"),
+                "needs_review": needs_review,
+                "reason": review_reason,
+            },
+            work_type_match=work_type,
+            normalized_row_role=normalized_role,
+        )
+
     def classify_row_to_stage(
         self,
         row_text: str,
@@ -1358,6 +1630,12 @@ class StageClassifier:
             return self._unmatched("empty_or_no_allowed_stages", normalized_role)
         if normalized_role in SERVICE_ROLES:
             return self._unmatched(f"row_role_{normalized_role}_skipped", normalized_role, needs_review=False)
+
+        allowed_stages, floor_constraint_error = _filter_stages_by_floor_reference(allowed_stages, text)
+        if floor_constraint_error:
+            return self._unmatched(floor_constraint_error, normalized_role, needs_review=True)
+        if not allowed_stages:
+            return self._unmatched("floor_projection_conflict", normalized_role, needs_review=True)
 
         # A grout-only tile row does not identify floor vs wall by itself.
         # In catalogue estimates it immediately follows the corresponding tile
@@ -1403,6 +1681,15 @@ class StageClassifier:
                 section_description=section_description,
                 section_object_candidates=section_object_candidates,
             )
+
+        operation_stage_match = self._operation_stage_match(
+            allowed_stages=allowed_stages,
+            global_result=global_result,
+            previous_context=previous_context,
+            normalized_role=normalized_role,
+        )
+        if operation_stage_match is not None:
+            return operation_stage_match
 
         # A deterministic operation-object rule can select the exact project
         # stage before generic title scoring. This is required for mixed-object
@@ -2223,8 +2510,8 @@ class StageClassifier:
     def _sequential_score(self, stage: dict[str, Any], previous_context: dict[str, Any] | None) -> int:
         if not previous_context or not previous_context.get("work_stage_number"):
             return 0
-        current = self._stage_order(stage.get("number"))
-        previous = self._stage_order(previous_context.get("work_stage_number"))
+        current = self._stage_order(stage.get("sort_order") or stage.get("number"))
+        previous = self._stage_order(previous_context.get("stage_sort_order") or previous_context.get("work_stage_number"))
         if current is None or previous is None:
             return 0
         if current == previous:
@@ -2240,7 +2527,12 @@ class StageClassifier:
 
     def _stage_order(self, number: Any) -> int | None:
         try:
-            return int(str(number).split(".")[-1])
+            if isinstance(number, int):
+                return number
+            value = str(number)
+            if value.isdigit():
+                return int(value)
+            return int(value.split(".")[-1])
         except (TypeError, ValueError):
             return None
 
@@ -2334,5 +2626,8 @@ def _occurrence_from_text(value: str) -> str | None:
             continue
         if "{N}" in template:
             return template.replace("{N}", match.group(1))
+        if "{WORD}" in template:
+            number = FLOOR_ORDINALS.get(match.group(1).casefold())
+            return f"{number} этаж" if number is not None else match.group(0)
         return template
     return None

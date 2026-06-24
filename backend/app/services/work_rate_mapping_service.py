@@ -152,6 +152,26 @@ class WorkRateMappingService:
         found.sort(key=lambda row: row[1], reverse=True)
         return found
 
+    @staticmethod
+    def infer_rate_context_code(item: WorkRateItem, operation_code: str | None) -> str | None:
+        text = normalize_name(" ".join(filter(None, [item.name, item.notes])))
+        if operation_code == "facade_cladding":
+            return "facade"
+        if operation_code == "arm_belt_masonry":
+            return "brick_arm_belt"
+        if operation_code == "brick_pillar_masonry":
+            return "brick_pillar"
+        if operation_code == "vent_shaft_masonry":
+            return "vent_shaft"
+        if operation_code == "brick_masonry":
+            if "заполнен" in text and "каркас" in text:
+                return "frame_infill"
+            if "наружн" in text:
+                return "exterior_wall"
+            if "внутренн" in text:
+                return "interior_wall"
+        return None
+
     def _rules_for_operation(self, operation_code: str) -> list[dict[str, Any]]:
         return [rule for rule in self.rules if rule.get("operation_code") == operation_code]
 
@@ -177,6 +197,7 @@ class WorkRateMappingService:
             taxonomy_subtype_id=subtype_id,
             taxonomy_code=taxonomy_code,
             object_scope_code=rule.get("object_scope_code"),
+            rate_context_code=self.infer_rate_context_code(item, rule.get("operation_code")),
             mapping_mode=mapping_mode,
             confidence=round(confidence, 4),
             mapping_source=source,
@@ -277,6 +298,16 @@ class WorkRateMappingService:
             item.auto_applicable = False
 
         all_rules = self._rules_for_operation(operation_code)
+        rate_context_code = self.infer_rate_context_code(item, operation_code)
+        if operation_code == "brick_masonry" and rate_context_code in {
+            "exterior_wall", "interior_wall", "frame_infill"
+        }:
+            wall_rules = [
+                rule for rule in all_rules
+                if rule.get("object_scope_code") == "building_wall"
+            ]
+            if wall_rules:
+                all_rules = wall_rules
         object_rule_candidates: list[tuple[dict[str, Any], float]] = []
         if object_rows:
             confidence_by_object = {code: conf for code, conf, _ in object_rows}
@@ -314,6 +345,7 @@ class WorkRateMappingService:
                     WorkRateMapping(
                         rate_item_id=item.id,
                         operation_code=operation_code,
+                        rate_context_code=self.infer_rate_context_code(item, operation_code),
                         mapping_mode=(
                             MAPPING_OBSERVATION
                             if is_observation

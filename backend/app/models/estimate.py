@@ -1,6 +1,6 @@
 from datetime import datetime
 import uuid
-from sqlalchemy import String, Text, Integer, Numeric, ForeignKey, text, Boolean
+from sqlalchemy import String, Text, Integer, Numeric, ForeignKey, text, Boolean, SmallInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy import TIMESTAMP
@@ -55,6 +55,13 @@ class Estimate(Base, SoftDeleteMixin):
     project_variant_id: Mapped[str|None] = mapped_column(Text)
     project_variant_number: Mapped[str|None] = mapped_column(String(16))
     canonical_stage_id: Mapped[str|None] = mapped_column(Text)
+    stage_instance_id: Mapped[str|None] = mapped_column(String(255))
+    template_stage_number: Mapped[str|None] = mapped_column(String(64))
+    floor_number: Mapped[int|None] = mapped_column(Integer)
+    floor_kind: Mapped[str|None] = mapped_column(String(32))
+    floor_label: Mapped[str|None] = mapped_column(String(128))
+    floor_component: Mapped[str|None] = mapped_column(String(64))
+    component_role: Mapped[str|None] = mapped_column(String(128))
     work_stage_number: Mapped[str|None] = mapped_column(String(32))
     work_stage_title: Mapped[str|None] = mapped_column(Text)
     stage_occurrence_index: Mapped[int|None] = mapped_column(Integer)
@@ -89,6 +96,23 @@ class Estimate(Base, SoftDeleteMixin):
     manual_override: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     manual_changed_by: Mapped[str|None] = mapped_column(PGUUID(as_uuid=False))
     manual_changed_at: Mapped[datetime|None] = mapped_column(TIMESTAMPTZ)
+    source_row_key: Mapped[str|None] = mapped_column(PGUUID(as_uuid=False))
+    source_scope_id: Mapped[str|None] = mapped_column(PGUUID(as_uuid=False))
+    work_scope_key: Mapped[str|None] = mapped_column(String(255))
+    legacy_work_scope_key: Mapped[str|None] = mapped_column(String(255))
+    applicability: Mapped[dict|None] = mapped_column(JSONB)
+    applicability_hash: Mapped[str|None] = mapped_column(String(64))
+    applicability_hash_version: Mapped[int|None] = mapped_column(SmallInteger)
+    applicability_schema_version: Mapped[str|None] = mapped_column(String(64))
+    stage_option_source: Mapped[str|None] = mapped_column(String(64))
+    taxonomy_snapshot: Mapped[dict|None] = mapped_column(JSONB)
+    taxonomy_locked: Mapped[bool|None] = mapped_column(Boolean)
+    variant_schema_version: Mapped[str|None] = mapped_column(String(128))
+    classification_migrated_from_version: Mapped[str|None] = mapped_column(String(255))
+    classification_migrated_to_version: Mapped[str|None] = mapped_column(String(255))
+    classification_migrated_at: Mapped[datetime|None] = mapped_column(TIMESTAMPTZ)
+    calculation_trace: Mapped[dict|None] = mapped_column(JSONB)
+    projection_json: Mapped[dict|None] = mapped_column(JSONB)
     req_hidden_work_act: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     req_intermediate_act: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     req_ks2_ks3: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
