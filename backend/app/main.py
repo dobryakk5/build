@@ -1,7 +1,10 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI
+import asyncpg
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.core.config   import settings
 from app.core.database import engine
@@ -63,6 +66,17 @@ app = FastAPI(
     redoc_url   = "/redoc",
     lifespan    = lifespan,
 )
+
+
+@app.exception_handler(asyncpg.PostgresConnectionError)
+@app.exception_handler(asyncpg.CannotConnectNowError)
+@app.exception_handler(OperationalError)
+@app.exception_handler(DBAPIError)
+async def database_unavailable_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=503,
+        content={"detail": {"code": "database_unavailable"}},
+    )
 
 app.add_middleware(
     CORSMiddleware,

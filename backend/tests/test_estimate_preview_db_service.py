@@ -1,0 +1,102 @@
+from pathlib import Path
+import sys
+
+import pytest
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+from app.services.estimate_preview_db_service import (
+    BASEMENT_TOP_SLAB_STAGE_ID,
+    PreviewDomainError,
+    _validate_stage10_preview_metadata,
+)
+
+
+ESTIMATE_TYPE_ID = "residential_construction"
+VARIANT_ID = "residential_construction_kirpichnye_doma"
+HIGH_BASEMENT_STAGE_ID = "residential_construction.vysokiy_cokol"
+LINTEL_STAGE_ID = "residential_construction.ustroystvo_peremychek_nad_proemami_kladki_etazha"
+
+
+def test_stage10_preview_metadata_requires_basement_slab_option_when_basement_enabled():
+    with pytest.raises(PreviewDomainError) as exc:
+        _validate_stage10_preview_metadata(
+            estimate_type_id=ESTIMATE_TYPE_ID,
+            project_variant_id=VARIANT_ID,
+            building_params={"floors_count": 2, "has_basement": True, "has_mansard": False},
+            project_structure_options={},
+        )
+
+    assert exc.value.code == "basement_top_slab_option_required"
+
+
+def test_stage10_preview_metadata_accepts_single_basement_slab_radio_option():
+    building_params, project_options = _validate_stage10_preview_metadata(
+        estimate_type_id=ESTIMATE_TYPE_ID,
+        project_variant_id=VARIANT_ID,
+        building_params={"floors_count": 2, "has_basement": True, "has_mansard": False},
+        project_structure_options={BASEMENT_TOP_SLAB_STAGE_ID: "monolithic_rc"},
+    )
+
+    assert building_params == {"floors_count": 2, "has_basement": True, "has_mansard": False}
+    assert project_options == {BASEMENT_TOP_SLAB_STAGE_ID: "monolithic_rc"}
+
+
+def test_stage10_preview_metadata_coerces_single_item_legacy_array_to_radio_option():
+    _building_params, project_options = _validate_stage10_preview_metadata(
+        estimate_type_id=ESTIMATE_TYPE_ID,
+        project_variant_id=VARIANT_ID,
+        building_params={"floors_count": 2, "has_basement": True, "has_mansard": False},
+        project_structure_options={BASEMENT_TOP_SLAB_STAGE_ID: ["monolithic_rc"]},
+    )
+
+    assert project_options == {BASEMENT_TOP_SLAB_STAGE_ID: "monolithic_rc"}
+
+
+def test_stage10_preview_metadata_accepts_radio_value_for_legacy_selectable_many_stage():
+    _building_params, project_options = _validate_stage10_preview_metadata(
+        estimate_type_id=ESTIMATE_TYPE_ID,
+        project_variant_id=VARIANT_ID,
+        building_params={"floors_count": 2, "has_basement": False, "has_mansard": False},
+        project_structure_options={LINTEL_STAGE_ID: "metal"},
+    )
+
+    assert project_options == {LINTEL_STAGE_ID: ["metal"]}
+
+
+def test_stage10_preview_metadata_rejects_multiple_basement_slab_radio_options():
+    with pytest.raises(PreviewDomainError) as exc:
+        _validate_stage10_preview_metadata(
+            estimate_type_id=ESTIMATE_TYPE_ID,
+            project_variant_id=VARIANT_ID,
+            building_params={"floors_count": 1, "has_basement": True, "has_mansard": False},
+            project_structure_options={BASEMENT_TOP_SLAB_STAGE_ID: ["precast_rc", "slab_on_grade"]},
+        )
+
+    assert exc.value.code == "invalid_stage_option"
+
+
+def test_stage10_preview_metadata_does_not_require_basement_slab_without_basement():
+    building_params, project_options = _validate_stage10_preview_metadata(
+        estimate_type_id=ESTIMATE_TYPE_ID,
+        project_variant_id=VARIANT_ID,
+        building_params={"floors_count": 1, "has_basement": False, "has_mansard": True},
+        project_structure_options={},
+    )
+
+    assert building_params == {"floors_count": 1, "has_basement": False, "has_mansard": True}
+    assert project_options == {}
+
+
+def test_stage10_preview_metadata_drops_basement_branch_options_without_basement():
+    _building_params, project_options = _validate_stage10_preview_metadata(
+        estimate_type_id=ESTIMATE_TYPE_ID,
+        project_variant_id=VARIANT_ID,
+        building_params={"floors_count": 1, "has_basement": False, "has_mansard": False},
+        project_structure_options={
+            HIGH_BASEMENT_STAGE_ID: "brick",
+            BASEMENT_TOP_SLAB_STAGE_ID: "precast_rc",
+        },
+    )
+
+    assert project_options == {}

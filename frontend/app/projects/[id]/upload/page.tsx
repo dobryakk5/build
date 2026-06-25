@@ -19,6 +19,7 @@ import type {
   WorkEstimateType,
   WorkProjectHierarchy,
   WorkProjectVariant,
+  WorkStage,
 } from "@/lib/types";
 
 const ITEM_TYPE_LABELS: Record<EstimateItemType, string> = {
@@ -45,6 +46,35 @@ type RestoredHierarchySnapshot = {
   project_variant_id: string | null;
   project_variant_title: string | null;
   project_variant_number: string | null;
+};
+
+const DYNAMIC_FLOOR_VARIANT_ID = "residential_construction_kirpichnye_doma";
+const BASEMENT_TOP_SLAB_STAGE_ID = "residential_construction.ustroystvo_perekrytiy_cokolya";
+const BASEMENT_BRANCH_STAGE_IDS = new Set([
+  "residential_construction.vysokiy_cokol",
+  BASEMENT_TOP_SLAB_STAGE_ID,
+]);
+const STAGE10_PREVIEW_STORAGE_PREFIX = "stage10-estimate-preview:";
+
+type Stage10BuildingParams = {
+  floors_count: number;
+  has_basement: boolean;
+  has_mansard: boolean;
+};
+
+type Stage10PreviewRestoreState = {
+  previewId: string;
+  projectId: string;
+  filename: string;
+  parserProfile: string;
+  estimateKind: EstimateKind | null;
+  estimateTypeId: string | null;
+  projectVariantId: string | null;
+  startDate: string;
+  workers: number;
+  buildingParams: Stage10BuildingParams;
+  projectStructureOptions: Record<string, string>;
+  savedAt: string;
 };
 
 const LEGACY_KIND_LABEL_BY_ID: Record<EstimateKind, string> = {
@@ -91,6 +121,65 @@ function restoreClarificationAnswers(batch: EstimateBatch): Record<string, strin
   return restored;
 }
 
+function stage10PreviewStorageKey(projectId: string) {
+  return `${STAGE10_PREVIEW_STORAGE_PREFIX}${projectId}`;
+}
+
+function readStage10PreviewRestore(projectId: string): Stage10PreviewRestoreState | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(stage10PreviewStorageKey(projectId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<Stage10PreviewRestoreState>;
+    if (!parsed.previewId || parsed.projectId !== projectId) return null;
+    return {
+      previewId: String(parsed.previewId),
+      projectId,
+      filename: String(parsed.filename || "Восстановленное превью"),
+      parserProfile: String(parsed.parserProfile || "auto"),
+      estimateKind: (parsed.estimateKind ?? null) as EstimateKind | null,
+      estimateTypeId: parsed.estimateTypeId ? String(parsed.estimateTypeId) : null,
+      projectVariantId: parsed.projectVariantId ? String(parsed.projectVariantId) : null,
+      startDate: String(parsed.startDate || new Date().toISOString().split("T")[0]),
+      workers: Number.isFinite(Number(parsed.workers)) ? Number(parsed.workers) : 3,
+      buildingParams: {
+        floors_count: Math.max(1, Math.min(100, Number(parsed.buildingParams?.floors_count) || 1)),
+        has_basement: Boolean(parsed.buildingParams?.has_basement),
+        has_mansard: Boolean(parsed.buildingParams?.has_mansard),
+      },
+      projectStructureOptions: Object.fromEntries(
+        Object.entries(parsed.projectStructureOptions || {})
+          .map(([stageId, optionId]) => [String(stageId), String(optionId)])
+          .filter(([stageId, optionId]) => stageId && optionId),
+      ),
+      savedAt: String(parsed.savedAt || ""),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStage10PreviewRestore(projectId: string, state: Stage10PreviewRestoreState) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(stage10PreviewStorageKey(projectId), JSON.stringify(state));
+}
+
+function clearStage10PreviewRestore(projectId: string) {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(stage10PreviewStorageKey(projectId));
+}
+
+function replacePreviewQuery(previewId: string | null) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (previewId) {
+    url.searchParams.set("preview", previewId);
+  } else {
+    url.searchParams.delete("preview");
+  }
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
 export default function UploadPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
@@ -98,6 +187,7 @@ export default function UploadPage() {
   const fileRef = useRef<HTMLInputElement>(null);
   const batchIdFromQuery = searchParams.get("batch");
   const sessionIdFromQuery = searchParams.get("session");
+  const previewIdFromQuery = searchParams.get("preview");
   const fromKtpFlow = searchParams.get("fromKtp") === "1";
 
   const [file, setFile] = useState<File | null>(null);
@@ -126,12 +216,20 @@ export default function UploadPage() {
   const [resetNotice, setResetNotice] = useState<string | null>(null);
   const [stage10ImportNotice, setStage10ImportNotice] = useState<string | null>(null);
   const [stage10PendingBatchId, setStage10PendingBatchId] = useState<string | null>(null);
+  const [stage10BuildingParams, setStage10BuildingParams] = useState<Stage10BuildingParams>({
+    floors_count: 1,
+    has_basement: false,
+    has_mansard: false,
+  });
+  const [stage10SelectedOptions, setStage10SelectedOptions] = useState<Record<string, string>>({});
 
   const { job, loading: polling } = useJobPoller(jobId);
   const status = job?.status;
   const result = job?.result;
   const activeStatus = jobId ? status : undefined;
   const currentClarification = estimateKind ? CLARIFICATION_BY_KIND[estimateKind] : null;
+  const isDynamicFloorVariant = projectVariantId === DYNAMIC_FLOOR_VARIANT_ID;
+  const activeClarification = isDynamicFloorVariant ? null : currentClarification;
   const estimateTypes = hierarchy?.estimate_types ?? [];
   const estimateTypeOptions = useMemo(() => {
     if (!restoredHierarchySnapshot?.estimate_type_id) return estimateTypes;
@@ -166,16 +264,39 @@ export default function UploadPage() {
     () => projectVariants.find((item) => item.id === projectVariantId) ?? null,
     [projectVariantId, projectVariants],
   );
+  const stage10RadioGroups = useMemo(() => {
+    if (!isDynamicFloorVariant || !selectedProjectVariant?.stages?.length) return [];
+
+    return selectedProjectVariant.stages.filter((stage): stage is WorkStage => {
+      const stageId = String(stage.canonical_stage_id || "").trim();
+      const mode = stage.stage_options_mode;
+      if (!stageId || !["selectable_one", "selectable_many"].includes(mode)) return false;
+      if (!stage.stage_options?.some((option) => String(option.id || "").trim())) return false;
+      if (!stage10BuildingParams.has_basement && BASEMENT_BRANCH_STAGE_IDS.has(stageId)) return false;
+      return true;
+    });
+  }, [isDynamicFloorVariant, selectedProjectVariant, stage10BuildingParams.has_basement]);
   const answeredCount = Object.values(clarificationAnswers).filter((answers) => answers.length > 0).length;
-  const questionsCount = currentClarification?.sections.reduce((sum, section) => sum + section.questions.length, 0) ?? 0;
+  const questionsCount = activeClarification?.sections.reduce((sum, section) => sum + section.questions.length, 0) ?? 0;
   const allClarificationsAnswered = questionsCount > 0 && answeredCount === questionsCount;
   const hasRequiredSelection = estimateKind !== null && !!estimateTypeId && (!!projectVariantId || projectVariants.length === 0);
-  const canUpload = hasRequiredSelection;
+  const stage10StructureComplete = !isDynamicFloorVariant || stage10RadioGroups.every((stage) => {
+    const stageId = String(stage.canonical_stage_id || "").trim();
+    return !!stage10SelectedOptions[stageId];
+  });
+  const canUpload = hasRequiredSelection && stage10StructureComplete;
+  const uploadDisabledTitle = !hasRequiredSelection
+    ? "Выберите тип и подтип объекта"
+    : "Выберите ветвления работ";
+  const uploadDisabledHint = !hasRequiredSelection
+    ? "После выбора объекта поле загрузки станет активным"
+    : "Перед загрузкой нужно выбрать по одному варианту в каждой radio-группе";
   const wasAllClarificationsAnsweredRef = useRef(false);
   const clarificationStartedRef = useRef(false);
   const trackedJobTerminalStatusRef = useRef<string | null>(null);
   const autoStartedKtpBatchRef = useRef<string | null>(null);
   const restoredBatchRef = useRef<string | null>(null);
+  const restoredPreviewRef = useRef<string | null>(null);
 
   useEffect(() => {
     trackActivity("UPLOAD_PAGE_OPENED", {
@@ -206,6 +327,71 @@ export default function UploadPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (preview || activeStatus || mappingPayload || stage10PendingBatchId) return;
+
+    const stored = readStage10PreviewRestore(id);
+    const previewId = previewIdFromQuery || stored?.previewId;
+    if (!previewId || restoredPreviewRef.current === previewId) return;
+
+    let cancelled = false;
+    restoredPreviewRef.current = previewId;
+    estimates
+      .getDbStage10Preview(
+        previewId,
+        stored?.filename || "Восстановленное превью",
+        stored?.parserProfile || "auto",
+      )
+      .then((restoredPreview) => {
+        if (cancelled) return;
+        if (restoredPreview.project_id && restoredPreview.project_id !== id) {
+          if (stored?.previewId === previewId) {
+            clearStage10PreviewRestore(id);
+          }
+          replacePreviewQuery(null);
+          return;
+        }
+        if (restoredPreview.preview_status && restoredPreview.preview_status !== "active") {
+          if (stored?.previewId === previewId) {
+            clearStage10PreviewRestore(id);
+          }
+          replacePreviewQuery(null);
+          return;
+        }
+
+        if (stored?.previewId === previewId) {
+          setEstimateKind(stored.estimateKind);
+          setEstimateTypeId(stored.estimateTypeId);
+          setProjectVariantId(stored.projectVariantId);
+          setStartDate(stored.startDate);
+          setWorkers(stored.workers);
+          setStage10BuildingParams(stored.buildingParams);
+          setStage10SelectedOptions(stored.projectStructureOptions);
+        }
+        setFile(null);
+        setPreview(restoredPreview);
+        setMappingPayload(null);
+        setUploading(false);
+        setConfirming(false);
+        setStage10ImportNotice(null);
+        setStage10PendingBatchId(null);
+        if (!previewIdFromQuery) {
+          replacePreviewQuery(previewId);
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        if (stored?.previewId === previewId) {
+          clearStage10PreviewRestore(id);
+        }
+        replacePreviewQuery(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeStatus, id, mappingPayload, preview, previewIdFromQuery, stage10PendingBatchId]);
 
   useEffect(() => {
     const wasAllAnswered = wasAllClarificationsAnsweredRef.current;
@@ -348,6 +534,9 @@ export default function UploadPage() {
     setStage10ImportNotice(null);
     setStage10PendingBatchId(null);
     autoStartedKtpBatchRef.current = null;
+    const clarificationPayload = buildClarificationPayload();
+    const stage10SavedBuildingParams = buildStage10BuildingParams();
+    const stage10SavedProjectStructureOptions = buildStage10ProjectStructureOptions();
     trackActivity("ESTIMATE_UPLOAD_STARTED", {
       projectId: id,
       entityType: "project",
@@ -369,9 +558,26 @@ export default function UploadPage() {
       const res = await estimates.preview(
         id, file, startDate, workers, estimateKind, complexMode,
         estimateTypeId, projectVariantId,
-        "auto", buildGantt, buildClarificationPayload(),
+        "auto", buildGantt, clarificationPayload, stage10SavedBuildingParams, stage10SavedProjectStructureOptions,
       );
       setPreview(res);
+      if (res.preview_backend === "db_stage10") {
+        writeStage10PreviewRestore(id, {
+          previewId: res.preview_id,
+          projectId: id,
+          filename: file.name,
+          parserProfile: res.parser_profile || "auto",
+          estimateKind,
+          estimateTypeId,
+          projectVariantId: projectVariantId ?? null,
+          startDate,
+          workers,
+          buildingParams: stage10SavedBuildingParams as Stage10BuildingParams,
+          projectStructureOptions: (stage10SavedProjectStructureOptions ?? {}) as Record<string, string>,
+          savedAt: new Date().toISOString(),
+        });
+        replacePreviewQuery(res.preview_id);
+      }
       trackActivity("ESTIMATE_PREVIEW_READY", {
         projectId: id,
         entityType: "project",
@@ -409,6 +615,9 @@ export default function UploadPage() {
           throw new Error("Не найден hash DB preview");
         }
         const res = await estimates.confirmDbStage10(preview.preview_id, preview.preview_content_hash);
+        restoredPreviewRef.current = preview.preview_id;
+        clearStage10PreviewRestore(id);
+        replacePreviewQuery(null);
         setPreview(null);
         setJobId(null);
         setStage10PendingBatchId(res.estimate_batch_id);
@@ -440,6 +649,10 @@ export default function UploadPage() {
       // 410 — сессия истекла, нужно загрузить заново
       const msg = String(e?.message || "");
       if (msg.includes("410") || /истекл/i.test(msg)) {
+        if (preview?.preview_backend === "db_stage10") {
+          clearStage10PreviewRestore(id);
+          replacePreviewQuery(null);
+        }
         setPreview(null);
         alert("Превью истекло. Загрузите файл заново.");
       } else {
@@ -447,6 +660,17 @@ export default function UploadPage() {
       }
     } finally {
       setConfirming(false);
+    }
+  }
+
+  async function handleCancelPreview() {
+    const currentPreview = preview;
+    setPreview(null);
+    if (currentPreview?.preview_backend === "db_stage10") {
+      restoredPreviewRef.current = currentPreview.preview_id;
+      clearStage10PreviewRestore(id);
+      replacePreviewQuery(null);
+      await estimates.cancelDbStage10(currentPreview.preview_id).catch(() => undefined);
     }
   }
 
@@ -484,10 +708,10 @@ export default function UploadPage() {
   }
 
   function buildClarificationPayload(): ClarificationUploadPayload | undefined {
-    if (!estimateKind || !currentClarification) return undefined;
+    if (!estimateKind || !activeClarification) return undefined;
 
     const form: ClarificationUploadPayload["form"] = {};
-    for (const section of currentClarification.sections) {
+    for (const section of activeClarification.sections) {
       for (const question of section.questions) {
         const answers = (clarificationAnswers[question.id] ?? [])
           .map((answer) => answer.trim())
@@ -507,14 +731,44 @@ export default function UploadPage() {
     return {
       version: "v1",
       estimate_kind: estimateKind,
-      kind_title: currentClarification.title,
+      kind_title: activeClarification.title,
       form,
     };
   }
 
+  function buildStage10BuildingParams() {
+    if (!isDynamicFloorVariant) return undefined;
+    return {
+      floors_count: stage10BuildingParams.floors_count,
+      has_basement: stage10BuildingParams.has_basement,
+      has_mansard: stage10BuildingParams.has_mansard,
+    };
+  }
+
+  function buildStage10ProjectStructureOptions() {
+    if (!isDynamicFloorVariant) {
+      return undefined;
+    }
+    const options: Record<string, string> = {};
+    const visibleStageIds = new Set(stage10RadioGroups.map((stage) => String(stage.canonical_stage_id || "").trim()));
+    for (const [stageId, optionId] of Object.entries(stage10SelectedOptions)) {
+      if (visibleStageIds.has(stageId) && optionId) {
+        options[stageId] = optionId;
+      }
+    }
+    return Object.keys(options).length ? options : undefined;
+  }
+
   function resetClarificationState() {
+    if (previewIdFromQuery) {
+      restoredPreviewRef.current = previewIdFromQuery;
+    }
+    clearStage10PreviewRestore(id);
+    replacePreviewQuery(null);
     setClarificationAnswers({});
     setClarificationsConfirmed(false);
+    setStage10BuildingParams({ floors_count: 1, has_basement: false, has_mansard: false });
+    setStage10SelectedOptions({});
     setFile(null);
     setJobId(null);
     setPreview(null);
@@ -579,6 +833,42 @@ export default function UploadPage() {
         [questionId]: next,
       };
     });
+  }
+
+  function updateStage10BuildingParam<K extends keyof typeof stage10BuildingParams>(
+    key: K,
+    value: (typeof stage10BuildingParams)[K],
+  ) {
+    if (previewIdFromQuery) {
+      restoredPreviewRef.current = previewIdFromQuery;
+    }
+    clearStage10PreviewRestore(id);
+    replacePreviewQuery(null);
+    setStage10BuildingParams((prev) => ({ ...prev, [key]: value }));
+    if (key === "has_basement" && value === false) {
+      setStage10SelectedOptions((prev) => {
+        const next = { ...prev };
+        for (const stageId of BASEMENT_BRANCH_STAGE_IDS) {
+          delete next[stageId];
+        }
+        return next;
+      });
+    }
+    setFile(null);
+    setPreview(null);
+    setMappingPayload(null);
+  }
+
+  function selectStage10Option(stageId: string, optionId: string) {
+    if (previewIdFromQuery) {
+      restoredPreviewRef.current = previewIdFromQuery;
+    }
+    clearStage10PreviewRestore(id);
+    replacePreviewQuery(null);
+    setStage10SelectedOptions((prev) => ({ ...prev, [stageId]: optionId }));
+    setFile(null);
+    setPreview(null);
+    setMappingPayload(null);
   }
 
   const handleKtpEstimate = useCallback(async (batchId: string) => {
@@ -668,7 +958,7 @@ export default function UploadPage() {
         <div>
           <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>Загрузка сметы</h2>
           <div style={{ fontSize: 12, color: "var(--muted)", maxWidth: 620 }}>
-            Выберите тип и подтип объекта. Уточняющие чекбоксы необязательны, а загрузка сметы доступна внизу сразу после выбора.
+            Выберите тип и подтип объекта. Для кирпичных домов 2.7 задайте структуру здания и ветвления работ перед загрузкой.
           </div>
         </div>
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
@@ -808,19 +1098,126 @@ export default function UploadPage() {
 
         <div>
           <div style={{ marginBottom: 8, fontSize: 14, fontWeight: 600 }}>
-            3. Уточните исходные данные, если нужно
+            3. Уточните исходные данные
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
-            Чекбоксы необязательны. Если отметить подходящие пункты, они помогут точнее разобрать смету.
+            {isDynamicFloorVariant
+              ? "Для кирпичных домов задайте структуру здания и выберите ветки работ."
+              : "Чекбоксы необязательны. Если отметить подходящие пункты, они помогут точнее разобрать смету."}
           </div>
         </div>
       </div>
 
-      {currentClarification && selectedEstimateType && !clarificationsConfirmed && !activeStatus && (
+      {isDynamicFloorVariant && selectedProjectVariant && !activeStatus && (
+        <div style={{ marginBottom: 20, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+          <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>Структура кирпичного дома</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+              Эти параметры управляют поэтажной структурой 2.7 и рекомендованными работами.
+            </div>
+          </div>
+          <div style={{ display: "grid", gap: 14, padding: 16 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={stage10BuildingParams.has_basement}
+                  onChange={(event) => updateStage10BuildingParam("has_basement", event.target.checked)}
+                />
+                <span>Цоколь</span>
+              </label>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 6, fontSize: 13, cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={stage10BuildingParams.has_mansard}
+                  onChange={(event) => updateStage10BuildingParam("has_mansard", event.target.checked)}
+                />
+                <span>Мансарда</span>
+              </label>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                <span style={{ fontWeight: 600 }}>Этажность</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={stage10BuildingParams.floors_count}
+                  onChange={(event) => {
+                    const next = Math.max(1, Math.min(100, Number.parseInt(event.target.value, 10) || 1));
+                    updateStage10BuildingParam("floors_count", next);
+                  }}
+                  style={{ width: 86, padding: "8px 9px", border: "1px solid var(--border2)", borderRadius: 6, fontSize: 13 }}
+                />
+              </label>
+            </div>
+
+            {stage10RadioGroups.length > 0 && (
+              <section style={{ display: "grid", gap: 12 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>Ветвления работ</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                    Для каждого этапа с вариантами выберите один способ выполнения.
+                  </div>
+                </div>
+                {stage10RadioGroups.map((stage) => {
+                  const stageId = String(stage.canonical_stage_id || "").trim();
+                  const selectedOption = stage10SelectedOptions[stageId] || "";
+                  return (
+                    <section key={stageId} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
+                        {stage.number}. {stage.title}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {stage.stage_options
+                          .filter((option) => String(option.id || "").trim())
+                          .map((option) => {
+                            const optionId = String(option.id || "").trim();
+                            const checked = selectedOption === optionId;
+                            return (
+                              <label
+                                key={optionId}
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 7,
+                                  padding: "7px 9px",
+                                  border: `1px solid ${checked ? "rgba(29,78,216,.55)" : "var(--border)"}`,
+                                  borderRadius: 6,
+                                  background: checked ? "rgba(59,130,246,.08)" : "rgba(248,250,252,.75)",
+                                  fontSize: 12,
+                                  cursor: "pointer",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name={`stage10-option-${stageId}`}
+                                  checked={checked}
+                                  onChange={() => selectStage10Option(stageId, optionId)}
+                                />
+                                <span>{option.title}</span>
+                              </label>
+                            );
+                          })}
+                      </div>
+                      {!selectedOption && (
+                        <div style={{ marginTop: 8, fontSize: 12, color: "var(--red)" }}>
+                          Выберите один вариант.
+                        </div>
+                      )}
+                    </section>
+                  );
+                })}
+              </section>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeClarification && selectedEstimateType && !clarificationsConfirmed && !activeStatus && (
         <div style={{ marginBottom: 20, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
           <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 700 }}>{currentClarification.title}</div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{activeClarification.title}</div>
               <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
                 Отмечено вопросов: {answeredCount} из {questionsCount}
               </div>
@@ -845,7 +1242,7 @@ export default function UploadPage() {
           </div>
 
           <div style={{ display: "grid", gap: 16, padding: 16 }}>
-            {currentClarification.sections.map((section) => (
+            {activeClarification.sections.map((section) => (
               <section key={section.title} style={{ display: "grid", gap: 10 }}>
                 <h3 style={{ fontSize: 13, fontWeight: 700, color: "var(--hdr3)" }}>{section.title}</h3>
                 {section.questions.map((question) => (
@@ -889,7 +1286,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {currentClarification && selectedEstimateType && clarificationsConfirmed && !activeStatus && (
+      {activeClarification && selectedEstimateType && clarificationsConfirmed && !activeStatus && (
         <div style={{ marginBottom: 20, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,.25)", background: "rgba(34,197,94,.06)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
           <div style={{ fontSize: 12, color: "#166534" }}>
             Уточнения отмечены: {answeredCount} из {questionsCount}. Загрузка сметы доступна внизу.
@@ -989,21 +1386,21 @@ export default function UploadPage() {
             accept=".xlsx,.xls,.pdf"
             disabled={!canUpload}
             style={{ display: "none" }}
-          onChange={(e) => {
-            handleDrop(e.target.files);
-            e.currentTarget.value = "";
-          }}
+            onChange={(e) => {
+              handleDrop(e.target.files);
+              e.currentTarget.value = "";
+            }}
           />
           <div style={{ fontSize: 36, marginBottom: 10 }}>{file ? "📊" : canUpload ? "⬆" : "🔒"}</div>
           <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
-            {file ? file.name : canUpload ? "Перетащите смету сюда" : "Выберите тип и подтип объекта"}
+            {file ? file.name : canUpload ? "Перетащите смету сюда" : uploadDisabledTitle}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)" }}>
             {file
               ? `${(file.size / 1024).toFixed(1)} KB · нажмите для замены`
               : canUpload
                 ? "Поддерживаются .xlsx, .xls, .pdf · ГрандСмета, CourtDoc, PDF-сметы"
-                : "После выбора объекта поле загрузки станет активным"}
+                : uploadDisabledHint}
           </div>
         </div>
       )}
@@ -1072,7 +1469,7 @@ export default function UploadPage() {
           preserveEstimateStructure={preserveEstimateStructure}
           onPreserveEstimateStructureChange={setPreserveEstimateStructure}
           onConfirm={handleConfirmImport}
-          onCancel={() => { setPreview(null); }}
+          onCancel={handleCancelPreview}
         />
       )}
 

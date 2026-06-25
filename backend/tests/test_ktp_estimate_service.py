@@ -1089,3 +1089,31 @@ async def test_approve_group_sequence_repins_fallback_and_sets_ready():
     assert by_id["z"].sort_order == 3000.0
     assert session.status == "gpr_ready"
     assert result is session
+
+
+@pytest.mark.asyncio
+async def test_approve_stage1_ignores_downstream_operator_review_flag():
+    import app.services.ktp_estimate_service as svc
+
+    session = make_session("s1", "p1")
+    session.status = "stage1_review"
+    item = MagicMock()
+    item.operator_review_required = True
+    item.work_type_needs_review = False
+    item.manual_override = False
+    estimate = make_est("e1", "Кладка стен")
+    estimate.operator_review_required = True
+    estimate.classification_needs_review = False
+    estimate.needs_review = False
+    estimate.raw_data = {"operator_review_required": True}
+    estimate.stage_match_score_json = {"needs_review": False, "winner": {"score": 20}, "delta_top_1_top_2": 9}
+    db = AsyncMock()
+    db.scalar = AsyncMock(side_effect=[None, None])
+    db.execute = AsyncMock(return_value=[(item, estimate)])
+
+    with patch.object(svc, "get_session_by_id", AsyncMock(return_value=session)):
+        result = await svc.approve_stage1(db, "p1", "s1")
+
+    assert result is session
+    assert session.status == "stage2_review"
+    db.commit.assert_awaited()

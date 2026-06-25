@@ -185,6 +185,9 @@ export interface PreviewGroup {
 export interface PreviewResult {
   preview_id: string;
   preview_backend?: "legacy_redis" | "db_stage10";
+  preview_status?: string | null;
+  project_id?: string | null;
+  project_variant_id?: string | null;
   preview_content_hash?: string | null;
   filename: string;
   parser_profile: string;

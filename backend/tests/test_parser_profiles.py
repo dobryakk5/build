@@ -60,6 +60,22 @@ def test_auto_tags_rows_with_profile(tmp_path):
     assert rows and rows[0].raw_data.get("parser_profile") == PROFILE_AUTO
 
 
+def test_auto_falls_back_after_false_positive_sectioned_detection(tmp_path, monkeypatch):
+    from app.services import parser_factory
+    from app.services.excel_sectioned_parser import ExcelSectionedCostSplitParser
+
+    def fail_sectioned_parse(self, path):
+        raise ValueError("false positive")
+
+    monkeypatch.setattr(parser_factory, "_detect_sectioned", lambda path: True)
+    monkeypatch.setattr(ExcelSectionedCostSplitParser, "parse", fail_sectioned_parse)
+
+    rows, meta = parse_estimate(_simple_xlsx(tmp_path))
+
+    assert meta["parser_profile"] == PROFILE_AUTO
+    assert rows
+
+
 @pytest.mark.skipif(not _has_pdf, reason="Sewera sample PDF not present")
 def test_pdf_materials_labor_profile_routes_to_parser():
     rows, meta = parse_estimate(str(SEWERA_PDF), parser_profile=PROFILE_PDF_MATERIALS_LABOR)

@@ -65,6 +65,9 @@ type Stage10PreviewResponse = {
   project_variant_id: string;
   status: string;
   preview_content_hash: string;
+  expires_at?: string | null;
+  building_params?: Record<string, any> | null;
+  project_structure_options?: Record<string, any> | null;
   rows: Stage10PreviewRow[];
 };
 
@@ -105,6 +108,9 @@ export class ApiError extends Error {
 
 function apiErrorMessage(data: any, fallback: string): string {
   const detail = data?.detail;
+  if (detail?.code === "database_unavailable") {
+    return "База данных временно недоступна. Повторите попытку после восстановления PostgreSQL.";
+  }
   if (detail?.code === "dynamic_floor_structure_2_7_disabled") {
     return "Вариант 2.7 выключен флагом DYNAMIC_FLOOR_STRUCTURE_2_7_MODE.";
   }
@@ -156,6 +162,9 @@ function stage10PreviewToLegacyPreview(data: Stage10PreviewResponse, filename: s
   return {
     preview_id: data.preview_session_id,
     preview_backend: "db_stage10",
+    preview_status: data.status,
+    project_id: data.project_id,
+    project_variant_id: data.project_variant_id,
     preview_content_hash: data.preview_content_hash,
     filename,
     parser_profile: parserProfile,
@@ -220,7 +229,7 @@ async function requestInternal<T>(
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new ApiError(
-      err?.detail ?? (res.status === 401 ? "Unauthorized" : `HTTP ${res.status}`),
+      apiErrorMessage(err, res.status === 401 ? "Unauthorized" : `HTTP ${res.status}`),
       res.status,
     );
   }
@@ -473,6 +482,8 @@ export const estimates = {
     parserProfile: string,
     buildGantt: boolean,
     clarificationAnswers?: Record<string, unknown>,
+    buildingParams?: Record<string, unknown>,
+    projectStructureOptions?: Record<string, unknown>,
   ): Promise<PreviewResult> => {
     if (projectVariantId === DYNAMIC_FLOOR_VARIANT_ID) {
       return estimates.previewDbStage10(
@@ -482,6 +493,8 @@ export const estimates = {
         projectVariantId,
         parserProfile,
         clarificationAnswers,
+        buildingParams,
+        projectStructureOptions,
       );
     }
     const form = new FormData();
@@ -506,7 +519,7 @@ export const estimates = {
       if (r.status === 401) {
         const ok = await tryRefresh();
         if (ok) {
-          return estimates.preview(pid, file, startDate, workers, estimateKind, complexMode, estimateTypeId, projectVariantId, parserProfile, buildGantt, clarificationAnswers);
+          return estimates.preview(pid, file, startDate, workers, estimateKind, complexMode, estimateTypeId, projectVariantId, parserProfile, buildGantt, clarificationAnswers, buildingParams, projectStructureOptions);
         }
       }
       if (!r.ok) {
@@ -527,6 +540,8 @@ export const estimates = {
     projectVariantId: string | null | undefined,
     parserProfile: string,
     clarificationAnswers?: Record<string, unknown>,
+    buildingParams?: Record<string, unknown>,
+    projectStructureOptions?: Record<string, unknown>,
   ): Promise<PreviewResult> => {
     const form = new FormData();
     form.append("file", file);
@@ -535,8 +550,9 @@ export const estimates = {
       estimate_type_id: estimateTypeId,
       project_variant_id: projectVariantId,
       parser_profile: parserProfile,
-      building_params: clarificationAnswers ?? {},
-      project_structure_options: clarificationAnswers ?? {},
+      clarification_answers: clarificationAnswers ?? {},
+      building_params: buildingParams ?? {},
+      project_structure_options: projectStructureOptions ?? {},
     }));
     return fetch(`${BASE}/api/estimate-previews`, {
       method: "POST",
@@ -547,7 +563,7 @@ export const estimates = {
       if (r.status === 401) {
         const ok = await tryRefresh();
         if (ok) {
-          return estimates.previewDbStage10(pid, file, estimateTypeId, projectVariantId, parserProfile, clarificationAnswers);
+          return estimates.previewDbStage10(pid, file, estimateTypeId, projectVariantId, parserProfile, clarificationAnswers, buildingParams, projectStructureOptions);
         }
       }
       if (!r.ok) {
@@ -556,6 +572,17 @@ export const estimates = {
       return stage10PreviewToLegacyPreview(data as Stage10PreviewResponse, file.name, parserProfile);
     });
   },
+  getDbStage10Preview: (
+    previewId: string,
+    filename = "Восстановленное превью",
+    parserProfile = "auto",
+  ): Promise<PreviewResult> =>
+    request<Stage10PreviewResponse>(`/estimate-previews/${encodeURIComponent(previewId)}`)
+      .then((data) => stage10PreviewToLegacyPreview(data, filename, parserProfile)),
+  cancelDbStage10: (previewId: string) =>
+    request<void>(`/estimate-previews/${encodeURIComponent(previewId)}/cancel`, {
+      method: "POST",
+    }),
   confirmImport: (pid: string, previewId: string, buildGantt?: boolean, edits?: PreviewEdits) =>
     request<{ job_id: string }>(`/projects/${pid}/estimates/upload/confirm`, {
       method: "POST",

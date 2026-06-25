@@ -3165,10 +3165,7 @@ async def approve_stage1(
         .where(KtpWbsItem.session_id == session_id)
         .where(KtpWbsItem.review_status != "rejected")
         .where(KtpWbsItem.manual_override.is_(False))
-        .where(
-            (KtpWbsItem.operator_review_required.is_(True))
-            | (KtpWbsItem.work_type_needs_review.is_(True))
-        )
+        .where(KtpWbsItem.work_type_needs_review.is_(True))
         .limit(1)
     )
     if review_pending:

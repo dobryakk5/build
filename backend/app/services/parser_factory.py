@@ -278,11 +278,15 @@ def parse_estimate(
             return rows, meta
         # 2) blocks РАБОТЫ/МАТЕРИАЛЫ/НАКЛАДНЫЕ + cost-split header.
         if _detect_sectioned(path):
-            rows, meta = ExcelSectionedCostSplitParser().parse(path)
-            meta["format"] = FORMAT_EXCEL
-            meta["parser_profile"] = PROFILE_EXCEL_SECTIONED_COST_SPLIT
-            _tag_profile(rows, PROFILE_EXCEL_SECTIONED_COST_SPLIT)
-            return rows, meta
+            try:
+                rows, meta = ExcelSectionedCostSplitParser().parse(path)
+            except ValueError:
+                pass
+            else:
+                meta["format"] = FORMAT_EXCEL
+                meta["parser_profile"] = PROFILE_EXCEL_SECTIONED_COST_SPLIT
+                _tag_profile(rows, PROFILE_EXCEL_SECTIONED_COST_SPLIT)
+                return rows, meta
         # 3) explicit «Тип» column journal.
         if _excel_is_typed_journal(path):
             rows, meta = ExcelTypedJournalParser().parse(path)

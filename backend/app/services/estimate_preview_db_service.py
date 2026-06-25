@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -21,17 +21,28 @@ from app.services.dynamic_floor_feature_flag import (
 )
 from app.services.source_file_fingerprint_service import SourceFileFingerprintError, fingerprint_raw_bytes
 from app.services.source_identity_service import new_source_row_key
+from app.services.semantic_options_service import normalize_project_structure_options
 from app.services.taxonomy_snapshot_service import (
     build_immutable_taxonomy_snapshot,
     load_target_dictionary,
     work_rate_catalog_hash,
 )
-from app.services.work_taxonomy_service import validate_project_hierarchy_selection
+from app.services.work_taxonomy_service import (
+    get_project_variant_definition,
+    validate_project_hierarchy_selection,
+    validate_project_variant_building_params,
+)
 
 
 PREVIEW_CONTENT_HASH_PAYLOAD_VERSION = 1
 SNAPSHOT_PAYLOAD_VERSION = 1
 HASH_ALGORITHM = "sha256"
+BASEMENT_TOP_SLAB_STAGE_ID = "residential_construction.ustroystvo_perekrytiy_cokolya"
+BASEMENT_TOP_SLAB_OPTION_IDS = frozenset({"precast_rc", "monolithic_rc", "slab_on_grade"})
+BASEMENT_BRANCH_STAGE_IDS = frozenset({
+    "residential_construction.vysokiy_cokol",
+    BASEMENT_TOP_SLAB_STAGE_ID,
+})
 
 STATUS_PROCESSING = "processing"
 STATUS_ACTIVE = "active"
@@ -101,6 +112,107 @@ def _preview_content_hash(session: EstimatePreviewSession, rows: Iterable[Estima
 def _dynamic_taxonomy_version() -> str:
     dictionary, _hash = load_target_dictionary()
     return str(dictionary.get("dictionary_version") or "construction_work_dictionary_v6_5_0")
+
+
+def _coerce_stage10_radio_options(
+    variant: Mapping[str, Any],
+    project_structure_options: Mapping[str, Any],
+) -> dict[str, Any]:
+    stage_by_id: dict[str, Mapping[str, Any]] = {}
+    for stage in variant.get("stages") or []:
+        if not isinstance(stage, Mapping):
+            continue
+        stage_id = str(stage.get("canonical_stage_id") or "").strip()
+        if stage_id:
+            stage_by_id[stage_id] = stage
+
+    coerced: dict[str, Any] = {}
+    for raw_stage_id, raw_value in project_structure_options.items():
+        stage_id = str(raw_stage_id).strip()
+        stage = stage_by_id.get(stage_id)
+        mode = str(stage.get("stage_options_mode") or "none") if stage else "none"
+
+        if mode == "selectable_one":
+            if isinstance(raw_value, (list, tuple)):
+                selected = [str(item).strip() for item in raw_value if str(item or "").strip()]
+                if len(selected) == 1:
+                    coerced[stage_id] = selected[0]
+                    continue
+            coerced[stage_id] = raw_value
+        elif mode == "selectable_many":
+            if isinstance(raw_value, str):
+                value = raw_value.strip()
+                if value:
+                    coerced[stage_id] = [value]
+                continue
+            if isinstance(raw_value, (list, tuple)):
+                selected = [str(item).strip() for item in raw_value if str(item or "").strip()]
+                if len(selected) <= 1:
+                    coerced[stage_id] = selected
+                    continue
+                raise PreviewDomainError(
+                    "too_many_stage_options_selected",
+                    422,
+                    details={"stage": stage_id, "selected_count": len(selected), "max_selected": 1},
+                )
+            coerced[stage_id] = raw_value
+        else:
+            coerced[stage_id] = raw_value
+    return coerced
+
+
+def _validate_stage10_preview_metadata(
+    *,
+    estimate_type_id: str,
+    project_variant_id: str,
+    building_params: dict[str, Any],
+    project_structure_options: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    try:
+        params = validate_project_variant_building_params(
+            estimate_type_id,
+            project_variant_id,
+            building_params,
+        )
+    except Exception as exc:  # noqa: BLE001 - normalize domain validation errors to preview contract
+        raise PreviewDomainError(
+            getattr(exc, "code", "invalid_building_params"),
+            422,
+            details={"error": getattr(exc, "message", str(exc))},
+        ) from exc
+
+    normalized_building_params = {
+        "floors_count": int(params.floors_count),
+        "has_basement": bool(params.has_basement),
+        "has_mansard": bool(params.has_mansard),
+    }
+
+    if not isinstance(project_structure_options, Mapping):
+        raise PreviewDomainError("invalid_stage_option", 422)
+
+    variant = get_project_variant_definition(estimate_type_id, project_variant_id)
+    coerced_options = _coerce_stage10_radio_options(variant, project_structure_options)
+    normalized_options, issues, _trace = normalize_project_structure_options(
+        variant,
+        coerced_options,
+    )
+    if issues:
+        issue = issues[0]
+        raise PreviewDomainError(issue.code, 422, details=issue.as_dict())
+    if not normalized_building_params["has_basement"]:
+        for stage_id in BASEMENT_BRANCH_STAGE_IDS:
+            normalized_options.pop(stage_id, None)
+    if normalized_building_params["has_basement"]:
+        selected = normalized_options.get(BASEMENT_TOP_SLAB_STAGE_ID)
+        if not selected:
+            raise PreviewDomainError("basement_top_slab_option_required", 422)
+        if selected not in BASEMENT_TOP_SLAB_OPTION_IDS:
+            raise PreviewDomainError(
+                "invalid_stage_option",
+                422,
+                details={"stage": BASEMENT_TOP_SLAB_STAGE_ID, "option": selected},
+            )
+    return normalized_building_params, normalized_options
 
 
 def _batch_taxonomy_snapshot(project_variant_id: str, building_params: dict | None = None) -> dict[str, Any]:
@@ -191,6 +303,12 @@ class EstimatePreviewService:
         project_variant_id = str(hierarchy_selection["project_variant_id"])
         if project_variant_id != DYNAMIC_FLOOR_VARIANT_ID:
             raise PreviewDomainError("dynamic_floor_structure_2_7_required", 422)
+        building_params, project_structure_options = _validate_stage10_preview_metadata(
+            estimate_type_id=str(hierarchy_selection["estimate_type_id"]),
+            project_variant_id=project_variant_id,
+            building_params=dict(building_params or {}),
+            project_structure_options=dict(project_structure_options or {}),
+        )
         await self._ensure_project_member(project_id, owner_user_id)
         self.feature_gate.ensure_allowed(project_variant_id=project_variant_id, user_id=owner_user_id)
         fingerprint = fingerprint_raw_bytes(raw_uploaded_bytes)
