@@ -1857,9 +1857,18 @@ const RATE_REVIEW_REASON_LABELS: Record<string, string> = {
   operation_missing: "не определена операция для подбора расценки",
   operation_unit_conflict: "конфликт операции и единицы",
   package_conflict: "конфликт пакетной расценки",
+  package_conflict_unresolved: "конфликт пакетной и атомарных расценок",
   taxonomy_or_operation_missing: "нет таксономии или операции",
   rate_not_approved: "расценка не утверждена",
   catalog_labor_not_available: "нет каталожной трудоёмкости",
+  provisional_rate_requires_approval: "расценка требует утверждения",
+  quantity_missing: "не задан объём работы",
+  user_rate_input_required: "нужно ввести пользовательскую норму",
+  user_rate_identity_required: "нужен пользователь для нормы по факту",
+  special_masonry_operation_mismatch: "операция кладки не совпадает с типом работы",
+  brick_pillar_rate_not_available: "нет расценки для кладки столбов",
+  vent_shaft_masonry_rate_not_available: "нет расценки для кладки вентканалов",
+  facade_cladding_rate_not_available: "нет расценки для облицовки фасада",
 };
 
 function rateReviewLabel(reason: string | null | undefined): string {

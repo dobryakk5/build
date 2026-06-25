@@ -17,6 +17,7 @@ import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 
 from sqlalchemy import select, text
@@ -57,6 +58,7 @@ from app.services.taxonomy_compatibility_service import (
     build_persisted_stage_catalog,
     resolved_stage_title,
 )
+from app.services.taxonomy_snapshot_service import resolve_config_path
 
 logger = logging.getLogger(__name__)
 
@@ -3826,13 +3828,277 @@ def _resolve_item_subtype(
 async def _load_session_subtypes(
     db: AsyncSession, session_id: str
 ) -> list[KtpSessionSubtype]:
-    return list(
+    rows = list(
         await db.scalars(
             select(KtpSessionSubtype)
             .where(KtpSessionSubtype.session_id == session_id)
             .order_by(KtpSessionSubtype.subtype_code, KtpSessionSubtype.unit)
         )
     )
+    await _attach_session_subtype_rate_projection(db, session_id, rows)
+    return rows
+
+
+def _rate_projection_attrs() -> tuple[str, ...]:
+    return (
+        "selected_rate_item_id",
+        "selected_rate_mapping_id",
+        "rate_unit_code",
+        "item_unit_code",
+        "unit_conversion_factor",
+        "labor_hours_per_unit_min",
+        "labor_hours_per_unit_avg",
+        "labor_hours_per_unit_max",
+        "effective_labor_hours_per_unit_min",
+        "effective_labor_hours_per_unit_avg",
+        "effective_labor_hours_per_unit_max",
+        "session_calculated_labor_hours_min",
+        "session_calculated_labor_hours_avg",
+        "session_calculated_labor_hours_max",
+        "rate_auto_applicable",
+        "rate_needs_review",
+        "rate_review_reason",
+        "resolved_labor_source",
+        "resolved_labor_hours",
+        "rate_catalog_version",
+        "rate_catalog_file",
+    )
+
+
+def _clear_rate_projection(row: KtpSessionSubtype, reason: str | None) -> None:
+    for attr in _rate_projection_attrs():
+        setattr(row, attr, None)
+    row.rate_auto_applicable = False
+    row.rate_needs_review = True
+    row.rate_review_reason = reason
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _per_item_labor(
+    labor_hours_per_norm: float | None,
+    *,
+    norm_base_quantity: float | None,
+    unit_conversion_factor: float | None,
+) -> float | None:
+    labor = _float_or_none(labor_hours_per_norm)
+    base = _float_or_none(norm_base_quantity) or 1.0
+    factor = _float_or_none(unit_conversion_factor)
+    if labor is None or factor is None:
+        return None
+    return round(labor * factor / base, 6)
+
+
+@lru_cache(maxsize=4)
+def _load_work_rate_catalog_cached(path_text: str):
+    from app.services.work_rate_catalog_service import WorkRateCatalog
+
+    return WorkRateCatalog.load(path_text)
+
+
+@lru_cache(maxsize=1)
+def _work_rate_operation_packages() -> dict[str, Any]:
+    from app.services.work_taxonomy_service import _load_dictionary
+
+    return dict((_load_dictionary().get("operation_object_resolution_policy") or {}).get("operation_packages") or {})
+
+
+async def _attach_session_subtype_rate_projection(
+    db: AsyncSession,
+    session_id: str,
+    rows: list[KtpSessionSubtype],
+) -> None:
+    if not rows:
+        return
+
+    catalog_path = resolve_config_path(settings.WORK_RATE_CATALOG_PATH)
+    if not catalog_path.exists():
+        for row in rows:
+            _clear_rate_projection(row, "catalog_labor_not_available")
+        return
+
+    from app.services.work_rate_import_service import normalize_unit as normalize_work_rate_unit
+    from app.services.work_rate_selection_service import WorkRateSelectionService
+    from app.services.work_taxonomy_service import detect_operation_detailed
+
+    catalog = _load_work_rate_catalog_cached(str(catalog_path))
+    if not catalog.items or not catalog.mappings:
+        for row in rows:
+            _clear_rate_projection(row, "catalog_labor_not_available")
+        return
+
+    session = await db.get(KtpEstimateSession, session_id)
+    batch = await db.get(EstimateBatch, session.estimate_batch_id) if session else None
+    hours_per_day = float(batch.hours_per_day) if batch and batch.hours_per_day else 8.0
+    project_variant_id = None
+
+    item_ids = [row.item_id for row in rows if row.item_id]
+    items_by_id: dict[str, KtpWbsItem] = {}
+    estimates_by_id: dict[str, Estimate] = {}
+    if item_ids:
+        items = list(await db.scalars(select(KtpWbsItem).where(KtpWbsItem.id.in_(item_ids))))
+        items_by_id = {str(item.id): item for item in items}
+        estimate_ids = [item.estimate_id for item in items if item.estimate_id]
+        if estimate_ids:
+            estimates = list(await db.scalars(select(Estimate).where(Estimate.id.in_(estimate_ids))))
+            estimates_by_id = {str(estimate.id): estimate for estimate in estimates}
+            project_variant_id = next((estimate.project_variant_id for estimate in estimates if estimate.project_variant_id), None)
+
+    selector = WorkRateSelectionService(_work_rate_operation_packages())
+    item_by_rate_id = {item.id: item for item in catalog.items if item.is_active}
+
+    for row in rows:
+        item = items_by_id.get(str(row.item_id)) if row.item_id else None
+        estimate = estimates_by_id.get(str(item.estimate_id)) if item and item.estimate_id else None
+        raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
+
+        taxonomy_code = (
+            row.work_subtype_code
+            or (item.work_subtype_code if item else None)
+            or (estimate.work_subtype_code if estimate else None)
+            or base_subtype_code(row.subtype_code)
+        )
+        operation_code = (
+            getattr(item, "operation_code", None)
+            or raw.get("operation_code")
+            or raw.get("selected_operation_code")
+        )
+        operation_code = str(operation_code or "").strip() or None
+        row_project_variant_id = (
+            raw.get("project_variant_id")
+            or (estimate.project_variant_id if estimate else None)
+            or project_variant_id
+        )
+        section_title = raw.get("section_title") or (estimate.section if estimate else None)
+        section_description = raw.get("section_description")
+        unit_code, _dimension, _factor = normalize_work_rate_unit(
+            (item.unit if item and item.unit else None)
+            or (estimate.unit if estimate else None)
+            or row.unit
+        )
+
+        if not operation_code and item:
+            detected = detect_operation_detailed(
+                item.name,
+                project_variant_id=row_project_variant_id,
+                section_title=section_title,
+                section_description=section_description,
+                unit_code=unit_code,
+            )
+            operation_code = detected.operation_code
+
+        if not taxonomy_code or taxonomy_code == UNKNOWN_SUBTYPE_CODE or not operation_code:
+            _clear_rate_projection(row, "taxonomy_or_operation_missing")
+            row.item_unit_code = unit_code
+            continue
+
+        quantity = _float_or_none(item.quantity if item else None) or _float_or_none(row.volume)
+        selection = selector.select_rate(
+            taxonomy_code=str(taxonomy_code),
+            operation_code=str(operation_code),
+            object_scope_code=raw.get("selected_object_scope_code") or raw.get("object_scope_code"),
+            quantity=quantity,
+            unit_code=unit_code,
+            work_name=(item.name if item else None) or row.subtype_name,
+            item_text=raw.get("item_text"),
+            spec=raw.get("spec"),
+            section_title=section_title,
+            section_description=section_description,
+            section_parent_context=raw.get("section_parent_context"),
+            items=catalog.items,
+            mappings=catalog.mappings,
+            sources=catalog.sources,
+            applicability={
+                "project_variant_id": row_project_variant_id,
+                "template_stage_number": raw.get("template_stage_number") or raw.get("work_stage_number"),
+                "semantic_stage_option_id": raw.get("semantic_stage_option_id") or raw.get("preferred_stage_option_id"),
+                "floor_number": raw.get("floor_number"),
+                "floor_kind": raw.get("floor_kind"),
+                "rate_context_code": raw.get("rate_context_code"),
+            },
+        )
+        rate_item = item_by_rate_id.get(selection.rate_item_id) if selection.rate_item_id else None
+        calculation = (
+            WorkRateSelectionService.calculate_labor(
+                quantity=quantity,
+                quantity_unit=unit_code,
+                rate_item=rate_item,
+            )
+            if rate_item is not None
+            else {}
+        )
+        conversion_factor = (
+            WorkRateSelectionService.unit_conversion_factor(unit_code, selection.unit_code)
+            if selection.unit_code
+            else None
+        )
+        effective_min = _per_item_labor(
+            selection.labor_min,
+            norm_base_quantity=selection.norm_base_quantity,
+            unit_conversion_factor=conversion_factor,
+        )
+        effective_avg = _per_item_labor(
+            selection.labor_avg,
+            norm_base_quantity=selection.norm_base_quantity,
+            unit_conversion_factor=conversion_factor,
+        )
+        effective_max = _per_item_labor(
+            selection.labor_max,
+            norm_base_quantity=selection.norm_base_quantity,
+            unit_conversion_factor=conversion_factor,
+        )
+
+        catalog_total = calculation.get("labor_avg_total")
+        resolved_labor_hours = catalog_total if selection.rate_auto_applicable else None
+        resolved_labor_source = "catalog_independent" if resolved_labor_hours else None
+
+        row.selected_rate_item_id = selection.rate_item_id
+        row.selected_rate_mapping_id = selection.rate_mapping_id
+        row.rate_unit_code = selection.unit_code
+        row.item_unit_code = unit_code
+        row.unit_conversion_factor = conversion_factor
+        row.labor_hours_per_unit_min = selection.labor_min
+        row.labor_hours_per_unit_avg = selection.labor_avg
+        row.labor_hours_per_unit_max = selection.labor_max
+        row.effective_labor_hours_per_unit_min = effective_min
+        row.effective_labor_hours_per_unit_avg = effective_avg
+        row.effective_labor_hours_per_unit_max = effective_max
+        row.session_calculated_labor_hours_min = calculation.get("labor_min_total")
+        row.session_calculated_labor_hours_avg = calculation.get("labor_avg_total")
+        row.session_calculated_labor_hours_max = calculation.get("labor_max_total")
+        row.rate_auto_applicable = bool(selection.rate_auto_applicable)
+        row.rate_needs_review = bool(selection.needs_review)
+        row.rate_review_reason = selection.review_reason
+        row.resolved_labor_source = resolved_labor_source
+        row.resolved_labor_hours = resolved_labor_hours
+        row.rate_catalog_version = str(
+            catalog.metadata.get("rate_catalog_version")
+            or catalog.metadata.get("catalog_version")
+            or getattr(catalog, "FORMAT_VERSION", "1.4.0")
+        )
+        row.rate_catalog_file = catalog_path.name
+
+        if (
+            selection.rate_auto_applicable
+            and row.output_source != "manual"
+            and effective_avg is not None
+        ):
+            output_per_day = WorkRateSelectionService.output_per_day(
+                crew_size=row.crew_size,
+                hours_per_day=hours_per_day,
+                labor_hours_per_unit=effective_avg,
+            )
+            if output_per_day is not None:
+                row.output_per_day = output_per_day
+                row.output_source = "catalog"
 
 
 async def build_session_subtypes(
