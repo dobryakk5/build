@@ -178,6 +178,13 @@ class GroupOut(BaseModel):
     work_section_name: str | None = None
     work_type_confidence: str | None = None
     work_type_source: str | None = None
+    stage_instance_id: str | None = None
+    template_stage_number: str | None = None
+    stage_number: str | None = None
+    floor_number: int | None = None
+    floor_label: str | None = None
+    floor_component: str | None = None
+    component_role: str | None = None
     status: str
     start_date: str | None = None
     duration_days: int | None = None
@@ -195,6 +202,13 @@ class GroupOut(BaseModel):
             work_section_name=g.work_section_name,
             work_type_confidence=g.work_type_confidence,
             work_type_source=g.work_type_source,
+            stage_instance_id=g.stage_instance_id,
+            template_stage_number=g.template_stage_number,
+            stage_number=g.stage_number,
+            floor_number=g.floor_number,
+            floor_label=g.floor_label,
+            floor_component=g.floor_component,
+            component_role=g.component_role,
             status=g.status,
             start_date=str(g.start_date) if g.start_date else None,
             duration_days=g.duration_days,
@@ -679,6 +693,20 @@ async def approve_stage2(
 ):
     try:
         session = await svc.approve_stage2(db, str(project_id), str(session_id))
+    except ValueError as exc:
+        raise _value_error(exc)
+    return SessionOut.of(session)
+
+
+@router.post("/sessions/{session_id}/skip-stage2", response_model=SessionOut)
+async def skip_stage2(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        session = await svc.skip_stage2(db, str(project_id), str(session_id))
     except ValueError as exc:
         raise _value_error(exc)
     return SessionOut.of(session)

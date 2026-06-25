@@ -3706,6 +3706,41 @@ async def approve_stage2(
     return session
 
 
+async def skip_stage2(
+    db: AsyncSession, project_id: str, session_id: str
+) -> KtpEstimateSession:
+    session = await get_session_by_id(db, project_id, session_id)
+    if session.status != "stage2_review":
+        raise ValueError("Пропустить КТП можно только на этапе КТП")
+
+    groups = list(
+        await db.scalars(
+            select(KtpWbsGroup)
+            .where(KtpWbsGroup.session_id == session_id)
+            .options(selectinload(KtpWbsGroup.items))
+        )
+    )
+    accepted_count = 0
+    for group in groups:
+        accepted = [item for item in group.items if item.review_status != "rejected"]
+        if not accepted:
+            for item in group.items:
+                await db.delete(item)
+            await db.delete(group)
+            continue
+        accepted_count += len(accepted)
+
+    if accepted_count <= 0:
+        raise ValueError("В структуре нет принятых работ для расчёта производительности")
+
+    await build_session_subtypes(db, session)
+    session.status = "prod_review"
+    session.updated_at = _now()
+    await db.commit()
+    await db.refresh(session)
+    return session
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ЭТАП 4 — ПРОИЗВОДИТЕЛЬНОСТЬ ПО ПОДТИПАМ РАБОТ
 # ─────────────────────────────────────────────────────────────────────────────

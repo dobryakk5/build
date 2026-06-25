@@ -909,6 +909,11 @@ export const ktpEstimate = {
       `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-stage2`,
       { method: "POST" },
     ),
+  skipStage2: (projectId: string, sessionId: string) =>
+    request<KtpEstimateSession>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/skip-stage2`,
+      { method: "POST" },
+    ),
   matchFer: (projectId: string, sessionId: string) =>
     request<{ job_id: string }>(
       `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/match-fer`,

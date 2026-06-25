@@ -907,6 +907,13 @@ export interface KtpWbsGroup {
   work_section_name?: string | null;
   work_type_confidence?: string | null;
   work_type_source?: string | null;
+  stage_instance_id?: string | null;
+  template_stage_number?: string | null;
+  stage_number?: string | null;
+  floor_number?: number | null;
+  floor_label?: string | null;
+  floor_component?: string | null;
+  component_role?: string | null;
   status: "draft" | "card_questions" | "card_generated" | "card_failed";
   start_date?: string | null;
   duration_days?: number | null;

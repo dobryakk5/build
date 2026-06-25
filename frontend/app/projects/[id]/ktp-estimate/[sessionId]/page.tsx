@@ -153,6 +153,26 @@ function displayStageGroupTitle(title: string | null | undefined) {
     .trim();
 }
 
+function groupIdentifier(group: KtpWbsGroup) {
+  return (
+    group.stage_number
+    || group.template_stage_number
+    || (group.stage_instance_id ? group.stage_instance_id.split(":").at(-1) : null)
+    || `G-${group.id.slice(0, 8)}`
+  );
+}
+
+function groupIdentifierTitle(group: KtpWbsGroup) {
+  return [
+    group.stage_instance_id ? `stage_instance_id: ${group.stage_instance_id}` : null,
+    group.template_stage_number ? `template_stage_number: ${group.template_stage_number}` : null,
+    group.stage_number ? `stage_number: ${group.stage_number}` : null,
+    group.floor_label ? `floor: ${group.floor_label}` : null,
+    group.floor_component ? `component: ${group.floor_component}` : null,
+    `group_id: ${group.id}`,
+  ].filter(Boolean).join("\n");
+}
+
 function sourceParentLines(item: KtpWbsItem) {
   const title = (item.source_parent?.title ?? item.section_title ?? "").trim();
   const description = (item.source_parent?.description ?? item.section_description ?? "").trim();
@@ -1014,6 +1034,7 @@ function Stage1Group({
 }) {
   const [title, setTitle] = useState(() => displayStageGroupTitle(group.title) || group.title);
   const [newItem, setNewItem] = useState("");
+  const identifier = groupIdentifier(group);
   useEffect(() => {
     setTitle(displayStageGroupTitle(group.title) || group.title);
   }, [group.id, group.title]);
@@ -1027,6 +1048,29 @@ function Stage1Group({
   return (
     <div style={{ ...card, marginBottom: 12, padding: 14 }}>
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <span
+          title={groupIdentifierTitle(group)}
+          style={{
+            flex: "0 0 auto",
+            alignSelf: "center",
+            minWidth: 74,
+            maxWidth: 128,
+            padding: "5px 8px",
+            border: "1px solid var(--border)",
+            borderRadius: 6,
+            background: "var(--bg)",
+            color: "var(--muted)",
+            fontSize: 12,
+            fontWeight: 700,
+            lineHeight: 1,
+            textAlign: "center",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {identifier}
+        </span>
         <input
           value={title}
           onChange={(e) => setTitle(e.target.value)}
@@ -1321,6 +1365,7 @@ function Stage2({
   );
   const allReady = groupsWithWorks.every((g) => g.status === "card_generated");
   const [approving, setApproving] = useState(false);
+  const [skipping, setSkipping] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [generatingGroupIds, setGeneratingGroupIds] = useState<Set<string>>(new Set());
   const missingCards = groupsWithWorks.filter((g) => g.status !== "card_generated").length;
@@ -1349,43 +1394,79 @@ function Stage2({
               Вернуться к производительности
             </button>
           ) : (
-            <button
-              style={buttonStyle("primary", busy || hasGeneratingCards)}
-              disabled={busy || hasGeneratingCards}
-              onClick={async () => {
-                if (hasGeneratingCards) {
-                  setNotice(`Дождитесь завершения создания КТП. В работе: ${generatingGroupIds.size}.`);
-                  return;
-                }
-                if (!allReady) {
-                  setNotice(`Сначала создайте все КТП. Осталось: ${missingCards}.`);
-                  return;
-                }
-                setNotice(null);
-                setApproving(true);
-                setBusy(true);
-                try {
-                  await ktpEstimate.approveStage2(projectId, sessionId);
-                  trackActivity("KTP_STAGE2_APPROVED", {
-                    projectId,
-                    entityType: "ktp_estimate_session",
-                    entityId: sessionId,
-                    metadata: {
-                      estimate_batch_id: wbs.session.estimate_batch_id,
-                      groups_count: groupsWithWorks.length,
-                    },
-                  });
-                  await reload();
-                } catch (e: any) {
-                  setError(e.message);
-                } finally {
-                  setApproving(false);
-                  setBusy(false);
-                }
-              }}
-            >
-              <ButtonContent loading={approving}>Все карточки готовы → к ГПР</ButtonContent>
-            </button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                style={buttonStyle("ghost", busy || hasGeneratingCards)}
+                disabled={busy || hasGeneratingCards}
+                onClick={async () => {
+                  if (hasGeneratingCards) {
+                    setNotice(`Дождитесь завершения создания КТП. В работе: ${generatingGroupIds.size}.`);
+                    return;
+                  }
+                  setNotice(null);
+                  setSkipping(true);
+                  setBusy(true);
+                  try {
+                    await ktpEstimate.skipStage2(projectId, sessionId);
+                    trackActivity("KTP_STAGE2_SKIPPED", {
+                      projectId,
+                      entityType: "ktp_estimate_session",
+                      entityId: sessionId,
+                      metadata: {
+                        estimate_batch_id: wbs.session.estimate_batch_id,
+                        groups_count: groupsWithWorks.length,
+                      },
+                    });
+                    await reload();
+                  } catch (e: any) {
+                    setError(e.message);
+                  } finally {
+                    setSkipping(false);
+                    setBusy(false);
+                  }
+                }}
+              >
+                <ButtonContent loading={skipping}>Без КТП</ButtonContent>
+              </button>
+              <button
+                style={buttonStyle("primary", busy || hasGeneratingCards)}
+                disabled={busy || hasGeneratingCards}
+                onClick={async () => {
+                  if (hasGeneratingCards) {
+                    setNotice(`Дождитесь завершения создания КТП. В работе: ${generatingGroupIds.size}.`);
+                    return;
+                  }
+                  if (!allReady) {
+                    setNotice(`Сначала создайте все КТП. Осталось: ${missingCards}.`);
+                    return;
+                  }
+                  setNotice(null);
+                  setApproving(true);
+                  setBusy(true);
+                  try {
+                    await ktpEstimate.approveStage2(projectId, sessionId);
+                    trackActivity("KTP_STAGE2_APPROVED", {
+                      projectId,
+                      entityType: "ktp_estimate_session",
+                      entityId: sessionId,
+                      metadata: {
+                        estimate_batch_id: wbs.session.estimate_batch_id,
+                        groups_count: groupsWithWorks.length,
+                      },
+                    });
+                    await reload();
+                  } catch (e: any) {
+                    setError(e.message);
+                  } finally {
+                    setApproving(false);
+                    setBusy(false);
+                  }
+                }}
+              >
+                <ButtonContent loading={approving}>Все карточки готовы → к производительности</ButtonContent>
+              </button>
+            </div>
           )
         }
       />
