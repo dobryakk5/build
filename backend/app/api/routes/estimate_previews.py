@@ -55,7 +55,7 @@ async def _parse_preview_rows(raw: bytes, metadata: dict[str, Any], filename: st
         fh.write(raw)
         fh.flush()
         rows, _meta = await run_in_threadpool(parse_estimate, fh.name, parser_profile)
-        return list(rows)
+        return rows
 
 
 async def _create_preview_impl(

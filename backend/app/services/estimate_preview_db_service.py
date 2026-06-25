@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -43,6 +43,7 @@ BASEMENT_BRANCH_STAGE_IDS = frozenset({
     "residential_construction.vysokiy_cokol",
     BASEMENT_TOP_SLAB_STAGE_ID,
 })
+PREVIEW_ROW_INSERT_BATCH_SIZE = 250
 
 STATUS_PROCESSING = "processing"
 STATUS_ACTIVE = "active"
@@ -81,7 +82,27 @@ def _snapshot_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(CanonicalJsonServiceV2.dump_bytes(payload)).hexdigest()
 
 
-def _preview_hash_payload(session: EstimatePreviewSession, rows: Iterable[EstimatePreviewRow]) -> dict[str, Any]:
+def _row_hash_payload(row: EstimatePreviewRow | Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(row, Mapping):
+        return {
+            "source_row_key": row.get("source_row_key"),
+            "source_scope_id": row.get("source_scope_id"),
+            "source_row_index": row.get("source_row_index"),
+            "source_text": row.get("source_text"),
+            "parsed_data": row.get("parsed_data"),
+            "classification_result": row.get("classification_result"),
+        }
+    return {
+        "source_row_key": row.source_row_key,
+        "source_scope_id": row.source_scope_id,
+        "source_row_index": row.source_row_index,
+        "source_text": row.source_text,
+        "parsed_data": row.parsed_data,
+        "classification_result": row.classification_result,
+    }
+
+
+def _preview_hash_payload(session: EstimatePreviewSession, rows: Iterable[EstimatePreviewRow | Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "payload_version": PREVIEW_CONTENT_HASH_PAYLOAD_VERSION,
         "preview_session_id": session.id,
@@ -91,21 +112,11 @@ def _preview_hash_payload(session: EstimatePreviewSession, rows: Iterable[Estima
         "taxonomy_dictionary_version": session.taxonomy_dictionary_version,
         "building_params": session.building_params,
         "project_structure_options": session.project_structure_options,
-        "rows": [
-            {
-                "source_row_key": row.source_row_key,
-                "source_scope_id": row.source_scope_id,
-                "source_row_index": row.source_row_index,
-                "source_text": row.source_text,
-                "parsed_data": row.parsed_data,
-                "classification_result": row.classification_result,
-            }
-            for row in rows
-        ],
+        "rows": [_row_hash_payload(row) for row in rows],
     }
 
 
-def _preview_content_hash(session: EstimatePreviewSession, rows: Iterable[EstimatePreviewRow]) -> str:
+def _preview_content_hash(session: EstimatePreviewSession, rows: Iterable[EstimatePreviewRow | Mapping[str, Any]]) -> str:
     return _snapshot_hash(_preview_hash_payload(session, rows))
 
 
@@ -332,33 +343,58 @@ class EstimatePreviewService:
         )
         self.db.add(session)
         await self.db.flush()
+        await self.db.commit()
 
-        rows: list[EstimatePreviewRow] = []
-        for index, item in enumerate(parsed_rows):
-            payload = _row_from_any(item, index)
-            row = EstimatePreviewRow(
-                id=str(uuid4()),
-                preview_session_id=session.id,
-                source_row_key=payload["source_row_key"],
-                source_scope_id=payload.get("source_scope_id"),
-                source_row_index=payload["source_row_index"],
-                source_text=payload["source_text"],
-                parsed_data=payload["parsed_data"],
-                classification_result=payload["classification_result"],
-                created_at=now,
-            )
-            self.db.add(row)
-            rows.append(row)
-        if not rows:
+        row_count = 0
+        batch: list[dict[str, Any]] = []
+        hash_rows: list[dict[str, Any]] = []
+        try:
+            for index, item in enumerate(parsed_rows):
+                payload = _row_from_any(item, index)
+                record = {
+                    "id": str(uuid4()),
+                    "preview_session_id": session.id,
+                    "source_row_key": payload["source_row_key"],
+                    "source_scope_id": payload.get("source_scope_id"),
+                    "source_row_index": payload["source_row_index"],
+                    "source_text": payload["source_text"],
+                    "parsed_data": payload["parsed_data"],
+                    "classification_result": payload["classification_result"],
+                    "created_at": now,
+                }
+                batch.append(record)
+                hash_rows.append(_row_hash_payload(record))
+                row_count += 1
+                if len(batch) >= PREVIEW_ROW_INSERT_BATCH_SIZE:
+                    await self.db.execute(insert(EstimatePreviewRow), batch)
+                    await self.db.commit()
+                    batch.clear()
+            if batch:
+                await self.db.execute(insert(EstimatePreviewRow), batch)
+                await self.db.commit()
+                batch.clear()
+        except Exception:
+            await self.db.rollback()
+            failed = await self.db.get(EstimatePreviewSession, session.id)
+            if failed is not None:
+                failed.status = STATUS_FAILED
+                failed.failed_at = utcnow()
+                failed.failure_code = "preview_processing_failed"
+                await self.db.commit()
+            raise
+
+        if row_count == 0:
             session.status = STATUS_FAILED
             session.failed_at = now
             session.failure_code = "preview_processing_failed"
+            await self.db.commit()
             raise PreviewDomainError("preview_rows_empty", 422)
 
+        hash_rows.sort(key=lambda row: (int(row.get("source_row_index") or 0), str(row.get("source_row_key") or "")))
         session.status = STATUS_ACTIVE
         session.activated_at = now
         session.expires_at = now + timedelta(minutes=settings.ESTIMATE_PREVIEW_TTL_MINUTES)
-        session.preview_content_hash = _preview_content_hash(session, rows)
+        session.preview_content_hash = _preview_content_hash(session, hash_rows)
         await self.db.commit()
         return await self.get_preview(owner_user_id=owner_user_id, preview_session_id=session.id)
 
@@ -428,7 +464,7 @@ class EstimatePreviewService:
             await self._ensure_project_member(session.project_id, owner_user_id)
             self.feature_gate.ensure_allowed(project_variant_id=session.project_variant_id, user_id=owner_user_id)
 
-            rows = await self._rows(session.id, for_update=True)
+            rows = await self._rows(session.id, for_update=bool(row_decisions))
             actual_hash = _preview_content_hash(session, rows)
             if actual_hash != session.preview_content_hash or actual_hash != expected_preview_content_hash:
                 raise PreviewDomainError("preview_content_hash_mismatch", 409)
