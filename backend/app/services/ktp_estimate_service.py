@@ -621,34 +621,63 @@ async def start_stage1_job(
         existing_was_stale = await _expire_stale_stage1_session(db, existing)
 
     if existing and not force and not existing_was_stale:
-        return None, existing
+        if existing.status in {"stage1_pending", "stage1_processing"}:
+            existing_job = await db.get(Job, existing.stage1_job_id) if existing.stage1_job_id else None
+            if existing_job and existing_job.status in {"pending", "processing"}:
+                if existing_job.status == "pending":
+                    try:
+                        from app.tasks.estimate_import_tasks import process_ktp_estimate_stage1_job
+
+                        process_ktp_estimate_stage1_job.delay(existing_job.id)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("failed to re-enqueue KTP estimate stage1 job %s in celery: %s", existing_job.id, exc)
+                return existing_job, existing
+            existing.status = "stage1_pending"
+            existing.error_message = None
+            existing.stage1_job_id = None
+            session = existing
+        else:
+            return None, existing
     if existing and (force or existing_was_stale):
         await db.delete(existing)
         await db.flush()
+        existing = None
 
-    session = KtpEstimateSession(
-        project_id=project_id,
-        estimate_batch_id=estimate_batch_id,
-        status="stage1_pending",
-        stage1_raw_json={
+    if not existing:
+        session = KtpEstimateSession(
+            project_id=project_id,
+            estimate_batch_id=estimate_batch_id,
+            status="stage1_pending",
+            stage1_raw_json={
+                "grouping_mode": (
+                    GROUPING_MODE_ESTIMATE_STRUCTURE
+                    if preserve_estimate_structure
+                    else GROUPING_MODE_STAGE_AWARE
+                ),
+                "preserve_estimate_structure": bool(preserve_estimate_structure),
+            },
+        )
+        db.add(session)
+        try:
+            await db.flush()
+        except IntegrityError:
+            # race при double-click — возвращаем уже созданный сеанс
+            await db.rollback()
+            existing = await get_session(db, project_id, estimate_batch_id)
+            if existing:
+                return None, existing
+            raise
+    else:
+        session.stage1_raw_json = {
             "grouping_mode": (
                 GROUPING_MODE_ESTIMATE_STRUCTURE
                 if preserve_estimate_structure
                 else GROUPING_MODE_STAGE_AWARE
             ),
             "preserve_estimate_structure": bool(preserve_estimate_structure),
-        },
-    )
-    db.add(session)
-    try:
+        }
+        flag_modified(session, "stage1_raw_json")
         await db.flush()
-    except IntegrityError:
-        # race при double-click — возвращаем уже созданный сеанс
-        await db.rollback()
-        existing = await get_session(db, project_id, estimate_batch_id)
-        if existing:
-            return None, existing
-        raise
 
     job = Job(
         id=_uuid(),
@@ -697,6 +726,8 @@ async def _process_stage1(job_id: str) -> None:
     async with AsyncSessionLocal() as db:
         job = await db.get(Job, job_id)
         if not job:
+            return
+        if job.status not in {"pending", "processing"}:
             return
         session_id = job.input.get("session_id")
         session = await db.get(KtpEstimateSession, session_id)

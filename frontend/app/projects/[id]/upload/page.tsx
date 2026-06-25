@@ -49,6 +49,27 @@ type RestoredHierarchySnapshot = {
 };
 
 const DYNAMIC_FLOOR_VARIANT_ID = "residential_construction_kirpichnye_doma";
+
+function latestCompletedStage10Batch(batches: EstimateBatch[]) {
+  return [...batches]
+    .filter((batch) =>
+      batch.project_variant_id === DYNAMIC_FLOOR_VARIANT_ID
+      && (batch.import_status === "completed" || batch.calculation_status === "calculated")
+      && (batch.estimates_count ?? 0) > 0,
+    )
+    .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))
+    .at(-1) ?? null;
+}
+
+function ktpSessionHref(projectId: string, session: { id: string; status: string; stage1_job_id?: string | null; gpr_job_id?: string | null }) {
+  const jobId =
+    session.status === "stage1_pending" || session.status === "stage1_processing"
+      ? session.stage1_job_id
+      : session.status === "gpr_processing"
+        ? session.gpr_job_id
+        : null;
+  return `/projects/${projectId}/ktp-estimate/${session.id}${jobId ? `?job=${jobId}` : ""}`;
+}
 const BASEMENT_TOP_SLAB_STAGE_ID = "residential_construction.ustroystvo_perekrytiy_cokolya";
 const BASEMENT_BRANCH_STAGE_IDS = new Set([
   "residential_construction.vysokiy_cokol",
@@ -896,6 +917,79 @@ export default function UploadPage() {
     autoStartedKtpBatchRef.current = batchId;
     void handleKtpEstimate(batchId);
   }, [handleKtpEstimate, result?.estimate_batch_id, status]);
+
+  useEffect(() => {
+    if (
+      fromKtpFlow
+      || preview
+      || activeStatus
+      || mappingPayload
+      || stage10PendingBatchId
+      || ktpLoading
+      || file
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const recoverCompletedStage10Import = async () => {
+      try {
+        const batches = await estimates.batches(id);
+        if (cancelled) return;
+        const batch = batchIdFromQuery
+          ? batches.find((item) => item.id === batchIdFromQuery) ?? null
+          : latestCompletedStage10Batch(batches);
+        if (
+          !batch
+          || batch.project_variant_id !== DYNAMIC_FLOOR_VARIANT_ID
+          || autoStartedKtpBatchRef.current === batch.id
+          || !(
+            batch.import_status === "completed"
+            || batch.calculation_status === "calculated"
+          )
+          || (batch.estimates_count ?? 0) <= 0
+        ) {
+          return;
+        }
+
+        const session = await ktpEstimate.getSession(id, batch.id);
+        if (cancelled) return;
+        if (session) {
+          autoStartedKtpBatchRef.current = batch.id;
+          if (session.status === "stage1_pending" || session.status === "stage1_processing") {
+            setStage10ImportNotice("Анализируем смету");
+            await handleKtpEstimate(batch.id);
+            return;
+          }
+          router.replace(ktpSessionHref(id, session));
+          return;
+        }
+
+        autoStartedKtpBatchRef.current = batch.id;
+        setStage10ImportNotice("Анализируем смету");
+        await handleKtpEstimate(batch.id);
+      } catch {
+        // Recovery is best-effort; explicit upload controls remain available.
+      }
+    };
+
+    void recoverCompletedStage10Import();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeStatus,
+    batchIdFromQuery,
+    file,
+    fromKtpFlow,
+    handleKtpEstimate,
+    id,
+    ktpLoading,
+    mappingPayload,
+    preview,
+    router,
+    stage10PendingBatchId,
+  ]);
 
   useEffect(() => {
     if (!stage10PendingBatchId || autoStartedKtpBatchRef.current === stage10PendingBatchId) return;
