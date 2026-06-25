@@ -13,9 +13,19 @@ branch_labels = None
 depends_on = None
 
 
+def _execute_sql_script(sql: str) -> None:
+    without_line_comments = "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+    for statement in without_line_comments.split(";"):
+        stripped = statement.strip()
+        if stripped:
+            op.execute(stripped)
+
+
 def upgrade() -> None:
     sql_path = Path(__file__).with_name("062_work_rate_catalog.sql")
-    op.execute(sql_path.read_text(encoding="utf-8"))
+    _execute_sql_script(sql_path.read_text(encoding="utf-8"))
 
 
 def downgrade() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import logging
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
@@ -20,6 +21,7 @@ from app.services.source_file_fingerprint_service import SourceFileFingerprintEr
 
 
 router = APIRouter(prefix="/api/estimate-previews", tags=["estimate-previews"])
+logger = logging.getLogger(__name__)
 
 
 class ConfirmRowDecision(BaseModel):
@@ -73,6 +75,7 @@ async def _create_preview_impl(
         return await service.create_and_activate_preview(
             owner_user_id=current_user.id,
             project_id=str(metadata["project_id"]),
+            estimate_type_id=str(metadata["estimate_type_id"]),
             project_variant_id=str(metadata["project_variant_id"]),
             building_params=dict(metadata.get("building_params") or {}),
             project_structure_options=dict(metadata.get("project_structure_options") or {}),
@@ -140,7 +143,7 @@ async def confirm_preview(
             item.model_dump() if hasattr(item, "model_dump") else item.dict()
             for item in body.row_decisions
         ]
-        return (
+        result = (
             await EstimatePreviewService(db=db).confirm_preview(
                 owner_user_id=current_user.id,
                 preview_session_id=preview_session_id,
@@ -148,5 +151,16 @@ async def confirm_preview(
                 row_decisions=decisions,
             )
         ).as_dict()
+        try:
+            from app.tasks.estimate_import_tasks import process_stage10_estimate_import_queue
+
+            process_stage10_estimate_import_queue.delay()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "stage10 import drain task was not enqueued after preview confirm %s: %s",
+                preview_session_id,
+                exc,
+            )
+        return result
     except Exception as exc:  # noqa: BLE001
         _raise(exc)

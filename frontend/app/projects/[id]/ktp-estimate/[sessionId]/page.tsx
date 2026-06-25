@@ -18,16 +18,16 @@ import type {
   WorkTaxonomySubtype,
 } from "@/lib/types";
 
-const ORIGIN_BADGE: Record<KtpWbsItem["origin"], { label: string; color: string }> = {
-  from_estimate: { label: "из сметы", color: "var(--muted)" },
+const ORIGIN_BADGE: Partial<Record<KtpWbsItem["origin"], { label: string; color: string }>> = {
   ai_added: { label: "ИИ добавил", color: "#b45309" },
   manual: { label: "вручную", color: "#2563eb" },
 };
 
-function itemSourceBadge(item: KtpWbsItem) {
-  if (item.work_type_source === "manual") return ORIGIN_BADGE.manual;
+function itemSourceBadge(item: KtpWbsItem): { label: string; color: string } | null {
+  if (item.work_type_source === "manual") return ORIGIN_BADGE.manual ?? null;
   if (item.manual_override) return { label: "Утверждено", color: "#15803d" };
-  return ORIGIN_BADGE[item.origin];
+  if (item.origin === "from_estimate") return null;
+  return ORIGIN_BADGE[item.origin] ?? null;
 }
 
 const card = {
@@ -145,6 +145,12 @@ function determinedTypeLabel(item: KtpWbsItem) {
     item.work_section_code ||
     ""
   );
+}
+
+function displayStageGroupTitle(title: string | null | undefined) {
+  return String(title || "")
+    .replace(/^2\.7\.(?:[A-Z]\d+|\d+)(?:\.\d+)?\.\s*/, "")
+    .trim();
 }
 
 function sourceParentLines(item: KtpWbsItem) {
@@ -441,7 +447,7 @@ export default function KtpEstimateWizardPage() {
   if (!wbs && activeJobId) {
     return (
       <ProcessingScreen
-        title="ИИ анализирует смету"
+        title="Анализируем смету"
         subtitle="Строим структуру работ — группируем позиции и проверяем полноту охвата"
         progress={job?.result?._progress ?? null}
       />
@@ -450,7 +456,7 @@ export default function KtpEstimateWizardPage() {
   if (stage1Processing) {
     return (
       <ProcessingScreen
-        title="ИИ анализирует смету"
+        title="Анализируем смету"
         subtitle="Строим структуру работ — группируем позиции и проверяем полноту охвата"
         progress={job?.result?._progress ?? null}
       />
@@ -883,19 +889,19 @@ function Stage1({
         (item) =>
           item.review_status !== "rejected" &&
           !item.manual_override &&
-          (item.stage_needs_review || item.operator_review_required || item.work_type_needs_review),
+          (item.stage_needs_review || item.work_type_needs_review),
       ).length,
     0,
   );
   const unresolvedDisputes = pendingAi + pendingReview;
   const approveDisabled = busy || unresolvedDisputes > 0;
-  const groupOptions = wbs.groups.map((g) => ({ id: g.id, title: g.title }));
+  const groupOptions = wbs.groups.map((g) => ({ id: g.id, title: displayStageGroupTitle(g.title) || g.title }));
 
   return (
     <div>
       <Header
         title="Структура работ"
-        hint="ИИ собрал позиции сметы в группы и добавил недостающие работы. Проверьте и поправьте структуру, затем утвердите."
+        hint="Алгоритм собрал позиции сметы в группы и добавил недостающие работы. Проверьте и поправьте структуру, затем утвердите."
         right={
           revisiting ? (
             <button type="button" style={btn("primary")} onClick={onReturn}>
@@ -1006,8 +1012,11 @@ function Stage1Group({
   projectId: string;
   addItemOptimistic: (groupId: string, name: string) => Promise<void>;
 }) {
-  const [title, setTitle] = useState(group.title);
+  const [title, setTitle] = useState(() => displayStageGroupTitle(group.title) || group.title);
   const [newItem, setNewItem] = useState("");
+  useEffect(() => {
+    setTitle(displayStageGroupTitle(group.title) || group.title);
+  }, [group.id, group.title]);
   const submitNewItem = () => {
     const name = newItem.trim();
     if (!name || busy) return;
@@ -1022,7 +1031,9 @@ function Stage1Group({
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           onBlur={() => {
-            if (title.trim() && title !== group.title) {
+            const cleanTitle = title.trim();
+            const persistedTitle = displayStageGroupTitle(group.title) || group.title;
+            if (cleanTitle && cleanTitle !== persistedTitle) {
               void run(() => ktpEstimate.updateGroup(projectId, group.id, { title: title.trim() }));
             }
           }}
@@ -1050,7 +1061,7 @@ function Stage1Group({
         const badge = itemSourceBadge(it);
         const rejected = it.review_status === "rejected";
         const pendingAi = it.origin === "ai_added" && it.review_status === "pending";
-        const needsReview = it.stage_needs_review || it.operator_review_required || it.work_type_needs_review;
+        const needsReview = it.stage_needs_review || it.work_type_needs_review;
         const reviewReason = it.stage_review_reason || (it.work_type_needs_review ? "Нужно проверить тип работ" : null);
         const sectionLines = sourceParentLines(it);
         return (
@@ -1105,12 +1116,14 @@ function Stage1Group({
                   whiteSpace: "nowrap",
                 }}
               >
-                {it.stage_confidence_percent != null ? `${it.stage_confidence_percent}%` : "?"}
+                Проверить
               </span>
             )}
-            <span style={{ fontSize: 10, fontWeight: 600, color: badge.color, whiteSpace: "nowrap" }}>
-              {badge.label}
-            </span>
+            {badge && (
+              <span style={{ fontSize: 10, fontWeight: 600, color: badge.color, whiteSpace: "nowrap" }}>
+                {badge.label}
+              </span>
+            )}
             {it.origin === "ai_added" && it.ai_reason && (
               <span style={{ fontSize: 10, color: "var(--muted)", maxWidth: 220 }} title={it.ai_reason}>
                 {it.ai_reason}

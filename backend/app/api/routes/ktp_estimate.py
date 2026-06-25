@@ -40,7 +40,7 @@ class SessionOut(BaseModel):
             project_id=s.project_id,
             estimate_batch_id=s.estimate_batch_id,
             status=s.status,
-            error_message=s.error_message,
+            error_message=s.error_message if str(s.status).endswith("_failed") else None,
             stage1_job_id=s.stage1_job_id,
             gpr_job_id=s.gpr_job_id,
             stage1_grouping_mode=raw.get("grouping_mode"),

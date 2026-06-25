@@ -11,8 +11,18 @@ branch_labels = None
 depends_on = None
 
 
+def _execute_sql_script(sql: str) -> None:
+    without_line_comments = "\n".join(
+        line for line in sql.splitlines() if not line.lstrip().startswith("--")
+    )
+    for statement in without_line_comments.split(";"):
+        stripped = statement.strip()
+        if stripped:
+            op.execute(stripped)
+
+
 def upgrade() -> None:
-    op.execute(
+    _execute_sql_script(
         """
         CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -386,7 +396,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     # DB-A downgrade intentionally removes only the new stage-10 tables. Nullable
     # columns on legacy tables are left in place to avoid destructive data loss.
-    op.execute(
+    _execute_sql_script(
         """
         DROP TABLE IF EXISTS estimate_batch_revalidation_runs;
         DROP TABLE IF EXISTS legacy_scope_migration_runs;

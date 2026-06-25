@@ -54,6 +54,11 @@ from app.services.preview_session import (
     try_consume_preview_session,
     update_preview_session,
 )
+from app.services.dynamic_floor_feature_flag import (
+    DYNAMIC_FLOOR_VARIANT_ID,
+    DynamicFloorFeatureGate,
+    FeatureFlagError,
+)
 from app.services.estimate_batch_revalidation_service import BlockedBatchGuard, RevalidationDomainError
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["estimates"])
@@ -64,6 +69,29 @@ def _raise_batch_guard(exc: RevalidationDomainError) -> None:
     if exc.details:
         detail["details"] = exc.details
     raise HTTPException(exc.http_status, detail=detail) from exc
+
+
+def _raise_feature_flag(exc: FeatureFlagError) -> None:
+    raise HTTPException(exc.http_status, detail={"code": exc.code}) from exc
+
+
+def _forbid_dynamic_floor_legacy_redis_path(
+    project_variant_id: str | None,
+    user_id: str,
+) -> None:
+    if project_variant_id != DYNAMIC_FLOOR_VARIANT_ID:
+        return
+    try:
+        DynamicFloorFeatureGate().ensure_allowed(
+            project_variant_id=project_variant_id,
+            user_id=user_id,
+        )
+    except FeatureFlagError as exc:
+        _raise_feature_flag(exc)
+    raise HTTPException(
+        409,
+        detail={"code": "dynamic_floor_structure_2_7_db_preview_required"},
+    )
 
 from app.core.estimate_types import (
     ESTIMATE_ITEM_TYPE_WORK,
@@ -281,6 +309,7 @@ async def upload_estimate(
     Парсинг сметы происходит в фоне. Гант строится отдельным действием со страницы сметы.
     Клиент опрашивает GET /jobs/{job_id} каждые 1-2 секунды.
     """
+    _forbid_dynamic_floor_legacy_redis_path(project_variant_id, current_user.id)
     parsed_clarification_answers = _parse_clarification_answers(clarification_answers)
     parsed_building_params = _parse_building_params(building_params)
     resolved_estimate_kind, hierarchy_selection = _resolve_upload_hierarchy_selection(
@@ -337,6 +366,7 @@ async def confirm_mapping(
     Принимает ручной маппинг колонок после того как авто-парсинг вернул 422.
     Запускает фоновую обработку с явным маппингом и возвращает job_id.
     """
+    _forbid_dynamic_floor_legacy_redis_path(body.project_variant_id, current_user.id)
     resolved_estimate_kind, hierarchy_selection = _resolve_upload_hierarchy_selection(
         body.estimate_type_id,
         body.project_variant_id,
@@ -398,6 +428,7 @@ async def preview_estimate(
     if parser_profile not in VALID_PARSER_PROFILES:
         raise HTTPException(400, f"Неизвестный профиль импорта: {parser_profile}")
 
+    _forbid_dynamic_floor_legacy_redis_path(project_variant_id, current_user.id)
     resolved_estimate_kind, hierarchy_selection = _resolve_preview_hierarchy_selection(
         estimate_type_id,
         project_variant_id,
@@ -706,6 +737,9 @@ async def list_estimate_batches(
                 project_variant_title=batch.project_variant_title,
                 project_variant_number=batch.project_variant_number,
                 taxonomy_dictionary_version=batch.taxonomy_dictionary_version,
+                import_status=batch.import_status,
+                calculation_status=batch.calculation_status,
+                calculation_block_reason=batch.calculation_block_reason,
                 clarification_answers=_public_clarification_answers(batch.clarification_answers),
                 estimates_count=estimates_count or 0,
                 gantt_tasks_count=gantt_tasks_count or 0,

@@ -143,7 +143,7 @@ def projection_group_descriptor(
     base_title = _text(raw_group.get("title")) or f"Группа {fallback_index}"
     title = base_title
     if stage_title:
-        title = f"{stage_number}. {stage_title}" if stage_number else stage_title
+        title = stage_title
 
     projected_sort = _float(projection.get("target_stage_sort_order"))
     base_sort = _float(raw_group.get("sort_order")) or float(fallback_index)

@@ -26,6 +26,7 @@ from app.services.taxonomy_snapshot_service import (
     load_target_dictionary,
     work_rate_catalog_hash,
 )
+from app.services.work_taxonomy_service import validate_project_hierarchy_selection
 
 
 PREVIEW_CONTENT_HASH_PAYLOAD_VERSION = 1
@@ -172,12 +173,22 @@ class EstimatePreviewService:
         *,
         owner_user_id: str,
         project_id: str,
+        estimate_type_id: str,
         project_variant_id: str,
         building_params: dict[str, Any],
         project_structure_options: dict[str, Any],
         raw_uploaded_bytes: bytes,
         parsed_rows: Iterable[Any],
     ) -> dict[str, Any]:
+        try:
+            hierarchy_selection = validate_project_hierarchy_selection(estimate_type_id, project_variant_id)
+        except ValueError as exc:
+            raise PreviewDomainError(
+                "invalid_project_hierarchy_selection",
+                422,
+                details={"error": str(exc)},
+            ) from exc
+        project_variant_id = str(hierarchy_selection["project_variant_id"])
         if project_variant_id != DYNAMIC_FLOOR_VARIANT_ID:
             raise PreviewDomainError("dynamic_floor_structure_2_7_required", 422)
         await self._ensure_project_member(project_id, owner_user_id)
@@ -322,13 +333,20 @@ class EstimatePreviewService:
             batch_id = str(uuid4())
             idempotency_key = f"estimate-import:{session.id}:{batch_id}"
             taxonomy_snapshot = snapshot_payload["taxonomy_snapshot"]
+            estimate_type_snapshot = taxonomy_snapshot.get("estimate_type") or {}
+            variant_snapshot = taxonomy_snapshot.get("variant") or {}
             batch = EstimateBatch(
                 id=batch_id,
                 project_id=session.project_id,
                 name="DB preview import",
-                estimate_kind=1,
+                estimate_kind=int(estimate_type_snapshot.get("estimate_kind") or 1),
                 source_filename=None,
+                estimate_type_id=estimate_type_snapshot.get("id"),
+                estimate_type_title=estimate_type_snapshot.get("title"),
+                estimate_type_number=estimate_type_snapshot.get("number"),
                 project_variant_id=session.project_variant_id,
+                project_variant_title=variant_snapshot.get("title"),
+                project_variant_number=variant_snapshot.get("number"),
                 taxonomy_dictionary_version=session.taxonomy_dictionary_version,
                 building_params=session.building_params,
                 project_structure_options=session.project_structure_options,

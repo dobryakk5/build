@@ -6,7 +6,11 @@ celery_app = Celery(
     "construction",
     broker  = settings.CELERY_BROKER_URL,
     backend = settings.CELERY_RESULT_BACKEND,
-    include = ["app.tasks.report_tasks", "app.tasks.foreman_email_tasks"],
+    include = [
+        "app.tasks.report_tasks",
+        "app.tasks.foreman_email_tasks",
+        "app.tasks.estimate_import_tasks",
+    ],
 )
 
 celery_app.conf.update(
@@ -18,6 +22,8 @@ celery_app.conf.update(
     result_expires=60 * 60 * 24,
     timezone="Europe/Moscow",
     enable_utc=True,
+    worker_prefetch_multiplier=1,
+    worker_concurrency=1,
 )
 
 celery_app.conf.beat_schedule = {

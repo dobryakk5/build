@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 import tempfile
@@ -55,6 +56,7 @@ from app.services.gantt_calculations import DEFAULT_HOURS_PER_DAY
 
 
 _parser = ExcelEstimateParser()
+logger = logging.getLogger(__name__)
 
 # Сколько времени (сек) храним tmp-файл в ожидании подтверждения маппинга
 # (после этого времени файл не будет найден и вернётся 404)
@@ -2157,7 +2159,12 @@ async def _create_and_run_job(
     await db.commit()
     await db.refresh(job)
 
-    asyncio.create_task(_process_upload(job.id))
+    try:
+        from app.tasks.estimate_import_tasks import process_legacy_estimate_upload_job
+
+        process_legacy_estimate_upload_job.delay(job.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("failed to enqueue legacy estimate upload job %s in celery: %s", job.id, exc)
     return job
 
 

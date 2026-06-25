@@ -300,6 +300,9 @@ class EstimateBatchResponse(BaseModel):
     project_variant_title: str | None = None
     project_variant_number: str | None = None
     taxonomy_dictionary_version: str | None = None
+    import_status: str | None = None
+    calculation_status: str | None = None
+    calculation_block_reason: str | None = None
     clarification_answers: dict | None = None
     estimates_count: int = 0
     gantt_tasks_count: int = 0

@@ -674,7 +674,18 @@ async def start_stage1_job(
     await db.commit()
     await db.refresh(session)
 
-    asyncio.create_task(_process_stage1(job.id))
+    try:
+        from app.tasks.estimate_import_tasks import process_ktp_estimate_stage1_job
+
+        process_ktp_estimate_stage1_job.delay(job.id)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("failed to enqueue KTP estimate stage1 job %s in celery: %s", job.id, exc)
+        job.status = "failed"
+        job.result = {"error": "Не удалось поставить построение КТП в очередь"}
+        job.finished_at = datetime.utcnow()
+        session.status = "stage1_failed"
+        session.error_message = job.result["error"]
+        await db.commit()
     return job, session
 
 
@@ -1154,10 +1165,27 @@ def _build_stage_aware_groups(
     diagnostics: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Build WBS groups from JSON v6 work_stage instead of estimate sections."""
+    if isinstance(batch.taxonomy_snapshot, dict):
+        estimate_type_snapshot = batch.taxonomy_snapshot.get("estimate_type") or {}
+        variant_snapshot = batch.taxonomy_snapshot.get("variant") or {}
+        if not batch.estimate_type_id and estimate_type_snapshot.get("id"):
+            batch.estimate_type_id = str(estimate_type_snapshot["id"])
+        if not batch.estimate_type_title and estimate_type_snapshot.get("title"):
+            batch.estimate_type_title = str(estimate_type_snapshot["title"])
+        if not batch.estimate_type_number and estimate_type_snapshot.get("number"):
+            batch.estimate_type_number = str(estimate_type_snapshot["number"])
+        if not batch.project_variant_id:
+            snapshot_variant_id = batch.taxonomy_snapshot.get("project_variant_id") or variant_snapshot.get("id")
+            if snapshot_variant_id:
+                batch.project_variant_id = str(snapshot_variant_id)
+        if not batch.project_variant_title and variant_snapshot.get("title"):
+            batch.project_variant_title = str(variant_snapshot["title"])
+        if not batch.project_variant_number and variant_snapshot.get("number"):
+            batch.project_variant_number = str(variant_snapshot["number"])
+
     if not batch.estimate_type_id or not batch.project_variant_id:
         raise ValueError(
-            "Для новой структуры работ нужен выбранный тип сметы и вариант объекта. "
-            "Выберите тип/подтип на шаге загрузки или включите «Оставить структуру сметы»."
+            "Некорректная Stage 10 смета: отсутствует зафиксированный тип сметы или вариант объекта."
         )
     legacy_taxonomy = batch_uses_legacy_taxonomy(batch, estimates)
     if legacy_taxonomy:
@@ -1167,6 +1195,24 @@ def _build_stage_aware_groups(
                 "В старой смете не сохранены названия этапов. "
                 "Автоматически разрешать её через новый справочник запрещено."
             )
+    elif isinstance(batch.building_params, dict) and batch.building_params.get("floors_count"):
+        try:
+            from app.services.work_taxonomy_service import get_project_variant_stage_instances
+
+            allowed_stages = get_project_variant_stage_instances(
+                str(batch.estimate_type_id),
+                str(batch.project_variant_id),
+                batch.building_params,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Выбранный тип сметы/вариант объекта не найден в справочнике JSON v6"
+            ) from exc
+    elif isinstance(batch.taxonomy_snapshot, dict) and isinstance(
+        (batch.taxonomy_snapshot.get("variant") or {}).get("stages"),
+        list,
+    ):
+        allowed_stages = copy.deepcopy(batch.taxonomy_snapshot["variant"]["stages"])
     else:
         try:
             allowed_stages = get_project_variant_stages(
@@ -1194,7 +1240,11 @@ def _build_stage_aware_groups(
             "mode": GROUPING_MODE_STAGE_AWARE,
             "estimate_type_id": batch.estimate_type_id,
             "project_variant_id": batch.project_variant_id,
-            "taxonomy_source": "persisted_snapshot" if legacy_taxonomy else "runtime_dictionary",
+            "taxonomy_source": (
+                "persisted_snapshot"
+                if legacy_taxonomy or isinstance(batch.taxonomy_snapshot, dict)
+                else "runtime_dictionary"
+            ),
             "legacy_taxonomy": legacy_taxonomy,
             "fallback_rows": [],
             "invalid_stage_rows": [],

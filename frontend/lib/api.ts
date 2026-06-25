@@ -49,6 +49,32 @@ import type {
 } from "./types";
 
 const BASE = "/api";
+const DYNAMIC_FLOOR_VARIANT_ID = "residential_construction_kirpichnye_doma";
+
+type Stage10PreviewRow = {
+  source_row_key: string;
+  source_row_index: number;
+  source_text: string;
+  parsed_data?: Record<string, any> | null;
+  classification_result?: Record<string, any> | null;
+};
+
+type Stage10PreviewResponse = {
+  preview_session_id: string;
+  project_id: string;
+  project_variant_id: string;
+  status: string;
+  preview_content_hash: string;
+  rows: Stage10PreviewRow[];
+};
+
+type Stage10ConfirmResponse = {
+  preview_session_id: string;
+  estimate_batch_id: string;
+  outbox_record_id: string;
+  idempotency_key: string;
+  snapshot_hash: string;
+};
 
 type AuthPayload = {
   user: User;
@@ -75,6 +101,86 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
   }
+}
+
+function apiErrorMessage(data: any, fallback: string): string {
+  const detail = data?.detail;
+  if (detail?.code === "dynamic_floor_structure_2_7_disabled") {
+    return "Вариант 2.7 выключен флагом DYNAMIC_FLOOR_STRUCTURE_2_7_MODE.";
+  }
+  if (detail?.code === "dynamic_floor_structure_2_7_not_allowed") {
+    return "Вариант 2.7 доступен только пользователям из allowlist.";
+  }
+  if (detail?.code === "dynamic_floor_structure_2_7_allowlist_invalid") {
+    return "Некорректная конфигурация allowlist для варианта 2.7.";
+  }
+  if (typeof detail === "string") return detail;
+  if (detail?.code) return detail.code;
+  if (detail?.detail) return detail.detail;
+  if (detail?.error) return detail.error;
+  return fallback;
+}
+
+function stage10PreviewToLegacyPreview(data: Stage10PreviewResponse, filename: string, parserProfile: string): PreviewResult {
+  const rows = (data.rows ?? []).map((row): any => {
+    const parsed = row.parsed_data ?? {};
+    const classification = row.classification_result ?? {};
+    const total = Number(parsed.total_price ?? parsed.total ?? 0);
+    return {
+      index: row.source_row_index,
+      row_order: row.source_row_index,
+      section: parsed.section ?? null,
+      item_type: classification.item_type ?? parsed.item_type ?? "work",
+      name: parsed.work_name ?? parsed.name ?? row.source_text,
+      unit: parsed.unit ?? null,
+      quantity: parsed.quantity ?? null,
+      total_price: Number.isFinite(total) ? total : 0,
+      confidence: classification.classification_confidence ?? null,
+      reason: classification.classification_review_reason ?? null,
+      row_hash: row.source_row_key,
+    };
+  });
+  const computedTotal = rows.reduce((sum, row) => sum + (Number(row.total_price) || 0), 0);
+  const type_breakdown = {
+    work: { count: 0, total: 0 },
+    material: { count: 0, total: 0 },
+    mechanism: { count: 0, total: 0 },
+    overhead: { count: 0, total: 0 },
+    unknown: { count: 0, total: 0 },
+  } as PreviewResult["type_breakdown"];
+  for (const row of rows) {
+    const key = row.item_type in type_breakdown ? row.item_type : "unknown";
+    type_breakdown[key as keyof typeof type_breakdown].count += 1;
+    type_breakdown[key as keyof typeof type_breakdown].total += Number(row.total_price) || 0;
+  }
+  return {
+    preview_id: data.preview_session_id,
+    preview_backend: "db_stage10",
+    preview_content_hash: data.preview_content_hash,
+    filename,
+    parser_profile: parserProfile,
+    detected_format: null,
+    strategy: "db-backed 2.7",
+    confidence: null,
+    type_breakdown,
+    computed_total_all_rows: computedTotal,
+    declared_total: null,
+    difference: null,
+    difference_reason: null,
+    unknown_count: type_breakdown.unknown.count,
+    unknown_rows: rows.filter((row) => row.item_type === "unknown"),
+    low_confidence_rows: [],
+    sample_rows: rows.slice(0, 20),
+    rows,
+    ignored_subtotal_rows_count: 0,
+    groups: [],
+    stage_groups: [],
+    hierarchy_suggestions: null,
+    stage_review_count: 0,
+    truncated: false,
+    no_section_count: rows.filter((row) => !row.section).length,
+    warnings: [],
+  };
 }
 
 type RequestBehavior = {
@@ -368,6 +474,16 @@ export const estimates = {
     buildGantt: boolean,
     clarificationAnswers?: Record<string, unknown>,
   ): Promise<PreviewResult> => {
+    if (projectVariantId === DYNAMIC_FLOOR_VARIANT_ID) {
+      return estimates.previewDbStage10(
+        pid,
+        file,
+        estimateTypeId,
+        projectVariantId,
+        parserProfile,
+        clarificationAnswers,
+      );
+    }
     const form = new FormData();
     form.append("file", file);
     if (clarificationAnswers) {
@@ -404,10 +520,54 @@ export const estimates = {
       return data as PreviewResult;
     });
   },
+  previewDbStage10: (
+    pid: string,
+    file: File,
+    estimateTypeId: string | null | undefined,
+    projectVariantId: string | null | undefined,
+    parserProfile: string,
+    clarificationAnswers?: Record<string, unknown>,
+  ): Promise<PreviewResult> => {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("metadata_json", JSON.stringify({
+      project_id: pid,
+      estimate_type_id: estimateTypeId,
+      project_variant_id: projectVariantId,
+      parser_profile: parserProfile,
+      building_params: clarificationAnswers ?? {},
+      project_structure_options: clarificationAnswers ?? {},
+    }));
+    return fetch(`${BASE}/api/estimate-previews`, {
+      method: "POST",
+      credentials: "include",
+      body: form,
+    }).then(async (r) => {
+      const data = await r.json().catch(() => ({}));
+      if (r.status === 401) {
+        const ok = await tryRefresh();
+        if (ok) {
+          return estimates.previewDbStage10(pid, file, estimateTypeId, projectVariantId, parserProfile, clarificationAnswers);
+        }
+      }
+      if (!r.ok) {
+        throw new Error(apiErrorMessage(data, `HTTP ${r.status}`));
+      }
+      return stage10PreviewToLegacyPreview(data as Stage10PreviewResponse, file.name, parserProfile);
+    });
+  },
   confirmImport: (pid: string, previewId: string, buildGantt?: boolean, edits?: PreviewEdits) =>
     request<{ job_id: string }>(`/projects/${pid}/estimates/upload/confirm`, {
       method: "POST",
       body: JSON.stringify({ preview_id: previewId, build_gantt: buildGantt ?? null, edits: edits ?? null }),
+    }),
+  confirmDbStage10: (previewId: string, expectedPreviewContentHash: string) =>
+    request<Stage10ConfirmResponse>(`/api/estimate-previews/${previewId}/confirm`, {
+      method: "POST",
+      body: JSON.stringify({
+        expected_preview_content_hash: expectedPreviewContentHash,
+        row_decisions: [],
+      }),
     }),
 };
 

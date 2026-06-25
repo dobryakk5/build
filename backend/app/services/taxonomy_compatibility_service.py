@@ -218,6 +218,24 @@ def is_legacy_taxonomy_record(record: Any, *, current_version: str | None = None
 
 def batch_uses_legacy_taxonomy(batch: Any, estimates: Iterable[Any]) -> bool:
     current = current_dictionary_version()
+    batch_snapshot = getattr(batch, "taxonomy_snapshot", None)
+    if not isinstance(batch_snapshot, dict):
+        raw_snapshot = _raw(batch).get("taxonomy_snapshot")
+        batch_snapshot = raw_snapshot if isinstance(raw_snapshot, dict) else None
+    snapshot_version = _clean(
+        batch_snapshot.get("source_dictionary_version")
+        if isinstance(batch_snapshot, dict)
+        else None
+    )
+    taxonomy_mode = _clean(_value(batch, "taxonomy_resolution_mode"))
+    variant_id = _clean(_value(batch, "project_variant_id"))
+    if (
+        variant_id == BRICK_HOUSE_VARIANT_ID
+        and taxonomy_mode == "persisted_snapshot"
+        and snapshot_version
+        and "v6_5_0" in snapshot_version
+    ):
+        return False
     if is_legacy_taxonomy_record(batch, current_version=current):
         return True
     return any(is_legacy_taxonomy_record(item, current_version=current) for item in estimates)

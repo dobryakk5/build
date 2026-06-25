@@ -124,10 +124,13 @@ export default function UploadPage() {
   const [ktpLoading, setKtpLoading] = useState<"estimate" | null>(null);
   const [resetting, setResetting] = useState(false);
   const [resetNotice, setResetNotice] = useState<string | null>(null);
+  const [stage10ImportNotice, setStage10ImportNotice] = useState<string | null>(null);
+  const [stage10PendingBatchId, setStage10PendingBatchId] = useState<string | null>(null);
 
   const { job, loading: polling } = useJobPoller(jobId);
   const status = job?.status;
   const result = job?.result;
+  const activeStatus = jobId ? status : undefined;
   const currentClarification = estimateKind ? CLARIFICATION_BY_KIND[estimateKind] : null;
   const estimateTypes = hierarchy?.estimate_types ?? [];
   const estimateTypeOptions = useMemo(() => {
@@ -314,6 +317,12 @@ export default function UploadPage() {
       setFile(nextFile);
       setJobId(null);
       setPreview(null);
+      setMappingPayload(null);
+      setUploading(false);
+      setConfirming(false);
+      setKtpLoading(null);
+      setStage10ImportNotice(null);
+      setStage10PendingBatchId(null);
       trackedJobTerminalStatusRef.current = null;
       autoStartedKtpBatchRef.current = null;
       trackActivity("ESTIMATE_FILE_SELECTED", {
@@ -336,6 +345,8 @@ export default function UploadPage() {
     if (!file || !canUpload || !estimateKind || !estimateTypeId) return;
 
     setUploading(true);
+    setStage10ImportNotice(null);
+    setStage10PendingBatchId(null);
     autoStartedKtpBatchRef.current = null;
     trackActivity("ESTIMATE_UPLOAD_STARTED", {
       projectId: id,
@@ -393,6 +404,29 @@ export default function UploadPage() {
     if (!preview) return;
     setConfirming(true);
     try {
+      if (preview.preview_backend === "db_stage10") {
+        if (!preview.preview_content_hash) {
+          throw new Error("Не найден hash DB preview");
+        }
+        const res = await estimates.confirmDbStage10(preview.preview_id, preview.preview_content_hash);
+        setPreview(null);
+        setJobId(null);
+        setStage10PendingBatchId(res.estimate_batch_id);
+        setStage10ImportNotice("Процесс распознавания больших смет может длится несколько минут");
+        trackActivity("ESTIMATE_UPLOAD_JOB_CREATED", {
+          projectId: id,
+          entityType: "estimate_batch",
+          entityId: res.estimate_batch_id,
+          metadata: {
+            estimate_batch_id: res.estimate_batch_id,
+            outbox_record_id: res.outbox_record_id,
+            idempotency_key: res.idempotency_key,
+            parser_profile: preview?.parser_profile,
+            preview_backend: preview.preview_backend,
+          },
+        });
+        return;
+      }
       const res = await estimates.confirmImport(id, preview.preview_id, buildGantt, edits);
       setPreview(null);
       setJobId(res.job_id);
@@ -423,6 +457,8 @@ export default function UploadPage() {
 
     setResetting(true);
     setResetNotice(null);
+    setStage10ImportNotice(null);
+    setStage10PendingBatchId(null);
     try {
       await ktpEstimate.resetSession(id, sessionIdFromQuery);
       setFile(null);
@@ -483,6 +519,8 @@ export default function UploadPage() {
     setJobId(null);
     setPreview(null);
     setMappingPayload(null);
+    setStage10ImportNotice(null);
+    setStage10PendingBatchId(null);
     autoStartedKtpBatchRef.current = null;
     clarificationStartedRef.current = false;
     wasAllClarificationsAnsweredRef.current = false;
@@ -568,6 +606,44 @@ export default function UploadPage() {
     autoStartedKtpBatchRef.current = batchId;
     void handleKtpEstimate(batchId);
   }, [handleKtpEstimate, result?.estimate_batch_id, status]);
+
+  useEffect(() => {
+    if (!stage10PendingBatchId || autoStartedKtpBatchRef.current === stage10PendingBatchId) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const batches = await estimates.batches(id);
+        if (cancelled) return;
+        const batch = batches.find((item) => item.id === stage10PendingBatchId);
+        if (!batch) return;
+        if (batch.import_status === "completed" || batch.calculation_status === "calculated") {
+          autoStartedKtpBatchRef.current = stage10PendingBatchId;
+          setStage10PendingBatchId(null);
+          setStage10ImportNotice("Анализируем смету");
+          void handleKtpEstimate(stage10PendingBatchId);
+        } else if (batch.import_status === "blocked" || batch.calculation_status === "blocked") {
+          setStage10PendingBatchId(null);
+          setStage10ImportNotice(
+            batch.calculation_block_reason
+              ? `Импорт остановлен: ${batch.calculation_block_reason}`
+              : "Импорт остановлен. Требуется проверка сметы.",
+          );
+        }
+      } catch {
+        // Keep polling; transient auth/network failures are handled by api.ts.
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [handleKtpEstimate, id, stage10PendingBatchId]);
 
   const importProgressTitle =
     status === "pending"
@@ -740,7 +816,7 @@ export default function UploadPage() {
         </div>
       </div>
 
-      {currentClarification && selectedEstimateType && !clarificationsConfirmed && !status && (
+      {currentClarification && selectedEstimateType && !clarificationsConfirmed && !activeStatus && (
         <div style={{ marginBottom: 20, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
           <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
             <div>
@@ -813,7 +889,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {currentClarification && selectedEstimateType && clarificationsConfirmed && !status && (
+      {currentClarification && selectedEstimateType && clarificationsConfirmed && !activeStatus && (
         <div style={{ marginBottom: 20, padding: "12px 14px", borderRadius: 8, border: "1px solid rgba(34,197,94,.25)", background: "rgba(34,197,94,.06)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
           <div style={{ fontSize: 12, color: "#166534" }}>
             Уточнения отмечены: {answeredCount} из {questionsCount}. Загрузка сметы доступна внизу.
@@ -868,7 +944,7 @@ export default function UploadPage() {
         ))}
       </div>
 
-      {!status && !mappingPayload && !preview && (
+      {!activeStatus && !mappingPayload && !preview && (
         <div style={{ marginBottom: 16 }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", cursor: "pointer" }}>
             <input type="checkbox" checked={buildGantt} onChange={(e) => setBuildGantt(e.target.checked)} />
@@ -877,7 +953,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {!status && !mappingPayload && !preview && (
+      {!activeStatus && !mappingPayload && !preview && (
         <div
           onClick={() => {
             if (canUpload) {
@@ -913,7 +989,10 @@ export default function UploadPage() {
             accept=".xlsx,.xls,.pdf"
             disabled={!canUpload}
             style={{ display: "none" }}
-            onChange={(e) => handleDrop(e.target.files)}
+          onChange={(e) => {
+            handleDrop(e.target.files);
+            e.currentTarget.value = "";
+          }}
           />
           <div style={{ fontSize: 36, marginBottom: 10 }}>{file ? "📊" : canUpload ? "⬆" : "🔒"}</div>
           <div style={{ fontSize: 15, fontWeight: 500, marginBottom: 6 }}>
@@ -929,7 +1008,41 @@ export default function UploadPage() {
         </div>
       )}
 
-      {file && !status && canUpload && !mappingPayload && !preview && (
+      {file && !activeStatus && canUpload && !mappingPayload && !preview && stage10ImportNotice && (
+        <div
+          style={{
+            marginTop: 16,
+            width: "100%",
+            padding: "11px 14px",
+            border: "1px solid rgba(59,130,246,.22)",
+            borderRadius: 6,
+            background: "rgba(59,130,246,.06)",
+            color: "var(--blue-dark)",
+            fontSize: 14,
+            fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 10,
+          }}
+        >
+          <span>{stage10ImportNotice}</span>
+          <span
+            aria-hidden="true"
+            style={{
+              width: 16,
+              height: 16,
+              border: "2px solid rgba(29,78,216,.25)",
+              borderTopColor: "var(--blue-dark)",
+              borderRadius: "50%",
+              animation: "ktp-spin .8s linear infinite",
+              flex: "0 0 auto",
+            }}
+          />
+        </div>
+      )}
+
+      {file && !activeStatus && canUpload && !mappingPayload && !preview && !stage10ImportNotice && (
         <button
           onClick={handleUpload}
           disabled={uploading || polling}
@@ -947,11 +1060,11 @@ export default function UploadPage() {
             opacity: uploading || polling ? 0.7 : 1,
           }}
         >
-          {uploading ? "Распознаём..." : "→ Показать превью"}
+          {uploading ? "Распознаём..." : "→ Показать работы"}
         </button>
       )}
 
-      {preview && !status && !mappingPayload && (
+      {preview && !activeStatus && !mappingPayload && (
         <EditablePreviewPanel
           preview={preview}
           confirming={confirming}
@@ -963,7 +1076,7 @@ export default function UploadPage() {
         />
       )}
 
-      {mappingPayload && estimateKind && estimateTypeId && !status && (
+      {mappingPayload && estimateKind && estimateTypeId && !activeStatus && (
         <div style={{ marginTop: 18, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "0 16px" }}>
           <ColumnMapper
             payload={mappingPayload}
@@ -987,7 +1100,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {(status === "pending" || status === "processing") && (
+      {(activeStatus === "pending" || activeStatus === "processing") && (
         <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(59,130,246,.06)", border: "1px solid rgba(59,130,246,.2)", borderRadius: 6 }}>
           <div style={{ fontSize: 13, color: "var(--blue-dark)", fontWeight: 500 }}>
             ⏳ {importProgressTitle}
@@ -996,7 +1109,7 @@ export default function UploadPage() {
         </div>
       )}
 
-      {status === "done" && result && (
+      {activeStatus === "done" && result && (
         <div style={{ marginTop: 16, padding: "16px", background: "rgba(34,197,94,.06)", border: "1px solid rgba(34,197,94,.2)", borderRadius: 6 }}>
           <div style={{ color: "#15803d", fontWeight: 600, fontSize: 14, marginBottom: 10 }}>✓ Смета успешно обработана</div>
           <div style={{ display: "flex", gap: 20, fontSize: 12, color: "var(--muted)", flexWrap: "wrap" }}>
@@ -1030,13 +1143,13 @@ export default function UploadPage() {
                 opacity: ktpLoading !== null ? 0.7 : 1,
               }}
             >
-              {ktpLoading === "estimate" ? "ИИ анализирует смету..." : "КТП по смете"}
+              {ktpLoading === "estimate" ? "Анализируем смету..." : "КТП по смете"}
             </button>
           </div>
         </div>
       )}
 
-      {status === "failed" && (
+      {activeStatus === "failed" && (
         <div style={{ marginTop: 16, padding: "14px 16px", background: "rgba(239,68,68,.06)", border: "1px solid rgba(239,68,68,.2)", borderRadius: 6 }}>
           <div style={{ color: "var(--red)", fontWeight: 600, fontSize: 13 }}>❌ Ошибка обработки</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{result?.error}</div>

@@ -1,7 +1,8 @@
 redis-server /opt/homebrew/etc/redis.conf
 cd backend
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
+redis-server
+celery -A app.tasks.celery_app.celery_app worker --loglevel=info --concurrency=1
 
 ## 🚀 Деплой без Docker
 
@@ -115,7 +116,7 @@ EnvironmentFile=/srv/app/backend/.env
 ExecStart=/srv/app/backend/venv/bin/python scripts/run_with_weekly_logs.py \
           --log-dir /srv/app/backend/logs --log-name celery-worker -- \
           /srv/app/backend/venv/bin/celery -A app.tasks.celery_app.celery_app \
-          worker --loglevel=info --concurrency=4
+          worker --loglevel=info --concurrency=1
 Restart=always
 
 [Install]

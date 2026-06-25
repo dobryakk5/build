@@ -56,6 +56,9 @@ export interface EstimateBatch {
   project_variant_title?: string | null;
   project_variant_number?: string | null;
   taxonomy_dictionary_version?: string | null;
+  import_status?: string | null;
+  calculation_status?: string | null;
+  calculation_block_reason?: string | null;
   clarification_answers?: Record<string, unknown> | null;
   estimates_count: number;
   gantt_tasks_count: number;
@@ -181,6 +184,8 @@ export interface PreviewGroup {
 
 export interface PreviewResult {
   preview_id: string;
+  preview_backend?: "legacy_redis" | "db_stage10";
+  preview_content_hash?: string | null;
   filename: string;
   parser_profile: string;
   detected_format?: string | null;
