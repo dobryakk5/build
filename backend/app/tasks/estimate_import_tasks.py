@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 from datetime import datetime, timezone
 
@@ -144,7 +145,7 @@ async def _process_stage10_estimate_import_queue_async() -> dict[str, int | str]
         completed = 0
         blocked = 0
         try:
-            published = await TransactionalOutboxPublisher(db).publish_due(limit=100)
+            published = await TransactionalOutboxPublisher(db).publish_due(limit=1)
             now = datetime.now(timezone.utc)
             job_ids = list(
                 await db.scalars(
@@ -152,13 +153,17 @@ async def _process_stage10_estimate_import_queue_async() -> dict[str, int | str]
                     .where(EstimateImportJob.status.in_(("queued", "retrying")))
                     .where(or_(EstimateImportJob.next_attempt_at.is_(None), EstimateImportJob.next_attempt_at <= now))
                     .order_by(EstimateImportJob.queued_at, EstimateImportJob.id)
-                    .limit(100)
+                    .limit(1)
                     .with_for_update(skip_locked=True)
                 )
             )
             worker = EstimateImportWorker(db)
             for job_id in job_ids:
-                result = await worker.run_job(str(job_id))
+                try:
+                    result = await worker.run_job(str(job_id))
+                finally:
+                    db.sync_session.expunge_all()
+                    gc.collect()
                 if result.status == "completed":
                     completed += 1
                 elif result.status in {"blocked", "failed"}:

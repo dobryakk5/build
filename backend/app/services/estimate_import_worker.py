@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -8,17 +7,18 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.models import Estimate, EstimateBatch
-from app.models.stage10 import EstimateImportJob, EstimatePreviewSession, TransactionalOutbox
-from app.services.canonical_json_service import CanonicalJsonServiceV2
+from app.models.stage10 import EstimateImportJob, EstimatePreviewRow, EstimatePreviewSession, TransactionalOutbox
 from app.services.dynamic_floor_feature_flag import DynamicFloorFeatureGate
 from app.services.source_identity_service import resolve_work_scope_key
 
 
 OUTBOX_MAX_PUBLICATION_ATTEMPTS = 6
+MATERIALIZATION_ROW_BATCH_SIZE = 250
 
 
 def utcnow() -> datetime:
@@ -193,6 +193,29 @@ def _prepare_stage10_rows_for_materialization(
         )
         _apply_stage10_text_overrides(materialized_rows, batch)
     return materialized_rows
+
+
+def _snapshot_row_from_preview_row(row: EstimatePreviewRow) -> dict[str, Any]:
+    return {
+        "source_row_key": row.source_row_key,
+        "source_scope_id": row.source_scope_id,
+        "source_row_index": row.source_row_index,
+        "source_text": row.source_text,
+        "parsed_data": row.parsed_data,
+        "classification_result": row.classification_result,
+        "confirmation_approved": row.confirmation_approved,
+        "confirmation_manual_override": row.confirmation_manual_override,
+    }
+
+
+def _estimate_insert_values(est: Estimate) -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    for column in Estimate.__table__.columns:
+        value = getattr(est, column.name)
+        if value is None and (column.default is not None or column.server_default is not None):
+            continue
+        values[column.name] = value
+    return values
 
 
 _FLOOR_WORDS: dict[str, int] = {
@@ -563,6 +586,7 @@ class EstimateImportWorker:
 
         session = await self.db.scalar(
             select(EstimatePreviewSession)
+            .options(defer(EstimatePreviewSession.snapshot_payload))
             .where(EstimatePreviewSession.id == job.preview_session_id)
             .with_for_update()
         )
@@ -575,11 +599,8 @@ class EstimateImportWorker:
             if session is None or batch is None or session.status != "confirmed":
                 raise RuntimeError("preview_session_not_confirmed")
             self.feature_gate.ensure_allowed(project_variant_id=session.project_variant_id, user_id=session.owner_user_id)
-            snapshot = session.snapshot_payload or {}
-            actual_hash = hashlib.sha256(CanonicalJsonServiceV2.dump_bytes(snapshot)).hexdigest()
-            if actual_hash != job.snapshot_hash:
+            if not session.snapshot_hash or session.snapshot_hash != job.snapshot_hash:
                 raise RuntimeError("preview_snapshot_integrity_mismatch")
-            rows = snapshot.get("rows") or []
             existing_count = len(
                 list(
                     await self.db.scalars(
@@ -589,21 +610,58 @@ class EstimateImportWorker:
             )
             created = 0
             if existing_count == 0:
-                materialized_rows = _prepare_stage10_rows_for_materialization(rows, batch)
-                for index, item in enumerate(materialized_rows):
-                    row = item.stage10_snapshot_row
-                    raw = item.raw_data if isinstance(item.raw_data, dict) else {}
-                    source_row_key = row.get("source_row_key")
-                    est = _estimate_from_stage10_row(
-                        item,
-                        row=row,
-                        raw=raw,
-                        batch=batch,
-                        row_order=index,
-                        source_row_key=source_row_key,
+                last_row_index: int | None = None
+                last_row_key: str | None = None
+                while True:
+                    rows_query = (
+                        select(EstimatePreviewRow)
+                        .where(EstimatePreviewRow.preview_session_id == session.id)
+                        .order_by(EstimatePreviewRow.source_row_index, EstimatePreviewRow.source_row_key)
+                        .limit(MATERIALIZATION_ROW_BATCH_SIZE)
                     )
-                    self.db.add(est)
-                    created += 1
+                    if last_row_index is not None and last_row_key is not None:
+                        rows_query = rows_query.where(
+                            or_(
+                                EstimatePreviewRow.source_row_index > last_row_index,
+                                and_(
+                                    EstimatePreviewRow.source_row_index == last_row_index,
+                                    EstimatePreviewRow.source_row_key > last_row_key,
+                                ),
+                            )
+                        )
+                    preview_rows = list(
+                        await self.db.scalars(rows_query)
+                    )
+                    if not preview_rows:
+                        break
+
+                    snapshot_rows = [_snapshot_row_from_preview_row(row) for row in preview_rows]
+                    materialized_rows = _prepare_stage10_rows_for_materialization(snapshot_rows, batch)
+                    values: list[dict[str, Any]] = []
+                    for item in materialized_rows:
+                        row = item.stage10_snapshot_row
+                        raw = item.raw_data if isinstance(item.raw_data, dict) else {}
+                        source_row_key = row.get("source_row_key")
+                        est = _estimate_from_stage10_row(
+                            item,
+                            row=row,
+                            raw=raw,
+                            batch=batch,
+                            row_order=created,
+                            source_row_key=source_row_key,
+                        )
+                        values.append(_estimate_insert_values(est))
+                        created += 1
+                    if values:
+                        await self.db.execute(insert(Estimate), values)
+                        await self.db.flush()
+                    last_row = preview_rows[-1]
+                    last_row_index = last_row.source_row_index
+                    last_row_key = last_row.source_row_key
+                    for preview_row in preview_rows:
+                        self.db.expunge(preview_row)
+                if created == 0:
+                    raise RuntimeError("preview_rows_missing")
             await self.db.execute(
                 EstimateBatch.__table__.update()
                 .where(EstimateBatch.project_id == batch.project_id)
