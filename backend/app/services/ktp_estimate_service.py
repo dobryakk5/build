@@ -3862,6 +3862,7 @@ def _rate_projection_attrs() -> tuple[str, ...]:
         "resolved_labor_hours",
         "rate_catalog_version",
         "rate_catalog_file",
+        "rate_trace",
     )
 
 
@@ -3871,6 +3872,7 @@ def _clear_rate_projection(row: KtpSessionSubtype, reason: str | None) -> None:
     row.rate_auto_applicable = False
     row.rate_needs_review = True
     row.rate_review_reason = reason
+    row.rate_trace = {"selection_result": reason} if reason else None
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -3895,6 +3897,64 @@ def _per_item_labor(
     if labor is None or factor is None:
         return None
     return round(labor * factor / base, 6)
+
+
+def _rate_candidate_trace(
+    *,
+    candidate: dict[str, Any],
+    rate_item: Any,
+    rate_mapping_id: str | None,
+    source: Any,
+    normalized_value: float | None,
+) -> dict[str, Any]:
+    payload = rate_item.source_payload if rate_item is not None and isinstance(rate_item.source_payload, dict) else {}
+    source_labor = payload.get("source_labor") if isinstance(payload.get("source_labor"), dict) else {}
+    measurement = payload.get("measurement") if isinstance(payload.get("measurement"), dict) else {}
+    source_value = source_labor.get("value")
+    source_unit = source_labor.get("unit")
+    shift_hours = source_labor.get("shift_duration_hours")
+    measurement_raw = measurement.get("raw") or getattr(rate_item, "unit_raw", None)
+    unit_code = getattr(rate_item, "unit_code", None)
+    if source_unit and unit_code:
+        source_unit = f"{source_unit}/{unit_code}"
+    elif source_unit and measurement_raw:
+        source_unit = f"{source_unit}/{measurement_raw}"
+    normalized_unit = None
+    if rate_item is not None and getattr(rate_item, "unit_code", None):
+        normalized_unit = f"person_hour/{rate_item.unit_code}"
+    approval_status = (
+        getattr(rate_item, "resolution_status", None)
+        or getattr(rate_item, "review_status", None)
+        or candidate.get("approval_status")
+    )
+    return {
+        "rate_item_id": getattr(rate_item, "id", None) or candidate.get("rate_item_id"),
+        "rate_mapping_id": rate_mapping_id or candidate.get("rate_mapping_id"),
+        "name": candidate.get("name") or getattr(rate_item, "name", None),
+        "source_file": getattr(source, "source_file", None),
+        "source_kind": getattr(source, "source_kind", None),
+        "source_rate_id": getattr(rate_item, "source_rate_id", None) or candidate.get("source_rate_id"),
+        "source_value": source_value,
+        "source_unit": source_unit,
+        "shift_duration_hours": shift_hours,
+        "normalized_value": normalized_value,
+        "normalized_unit": normalized_unit,
+        "norm_base_quantity": getattr(rate_item, "norm_base_quantity", None) or candidate.get("norm_base_quantity"),
+        "rate_context_code": candidate.get("rate_context_code"),
+        "approval_status": approval_status,
+        "rate_value_mode": getattr(rate_item, "rate_value_mode", None),
+        "labor_basis": getattr(rate_item, "labor_basis", None),
+        "auto_applicable": bool(getattr(rate_item, "auto_applicable", False)) if rate_item is not None else False,
+        "approved_as_rate": bool(getattr(rate_item, "approved_as_rate", False)) if rate_item is not None else False,
+        "selected_target_code": payload.get("selected_target_code"),
+        "all_target_codes": payload.get("all_target_codes") or [],
+        "target_kind": payload.get("target_kind"),
+        "diagnostics": {
+            "metadata_provisional": approval_status == "requires_manual_approval",
+            "source_provisional": payload.get("norm_status") in {"provisional_typical", "provisional"},
+            "requires_verification": bool(payload.get("requires_verification")),
+        },
+    }
 
 
 @lru_cache(maxsize=4)
@@ -3938,6 +3998,7 @@ async def _attach_session_subtype_rate_projection(
     session = await db.get(KtpEstimateSession, session_id)
     batch = await db.get(EstimateBatch, session.estimate_batch_id) if session else None
     hours_per_day = float(batch.hours_per_day) if batch and batch.hours_per_day else 8.0
+    batch_crew = int(batch.workers_count) if batch and batch.workers_count else None
     project_variant_id = None
 
     item_ids = [row.item_id for row in rows if row.item_id]
@@ -3954,8 +4015,12 @@ async def _attach_session_subtype_rate_projection(
 
     selector = WorkRateSelectionService(_work_rate_operation_packages())
     item_by_rate_id = {item.id: item for item in catalog.items if item.is_active}
+    source_by_id = {source.id: source for source in catalog.sources if source.is_active}
 
     for row in rows:
+        if row.crew_size is None and batch_crew is not None:
+            row.crew_size = batch_crew
+            row.crew_source = "estimate"
         item = items_by_id.get(str(row.item_id)) if row.item_id else None
         estimate = estimates_by_id.get(str(item.estimate_id)) if item and item.estimate_id else None
         raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
@@ -3984,6 +4049,7 @@ async def _attach_session_subtype_rate_projection(
             or (estimate.unit if estimate else None)
             or row.unit
         )
+        detected_operations: list[str] = []
 
         if not operation_code and item:
             detected = detect_operation_detailed(
@@ -3994,10 +4060,27 @@ async def _attach_session_subtype_rate_projection(
                 unit_code=unit_code,
             )
             operation_code = detected.operation_code
+            detected_operations = [
+                code
+                for code in [
+                    detected.operation_code,
+                    getattr(detected, "suggested_operation_code", None),
+                    *list(detected.multi_operation_codes or ()),
+                ]
+                if code
+            ]
+        elif operation_code:
+            detected_operations = [operation_code]
 
         if not taxonomy_code or taxonomy_code == UNKNOWN_SUBTYPE_CODE or not operation_code:
             _clear_rate_projection(row, "taxonomy_or_operation_missing")
             row.item_unit_code = unit_code
+            row.rate_trace = {
+                "source_row_text": item.name if item else row.subtype_name,
+                "detected_operations": detected_operations,
+                "rate_candidates": [],
+                "selection_result": "taxonomy_or_operation_missing",
+            }
             continue
 
         quantity = _float_or_none(item.quantity if item else None) or _float_or_none(row.volume)
@@ -4055,6 +4138,50 @@ async def _attach_session_subtype_rate_projection(
             norm_base_quantity=selection.norm_base_quantity,
             unit_conversion_factor=conversion_factor,
         )
+        candidate_rows = list(selection.candidates or [])
+        if rate_item is not None and not any(c.get("rate_item_id") == rate_item.id for c in candidate_rows if isinstance(c, dict)):
+            candidate_rows.insert(
+                0,
+                {
+                    "rate_item_id": rate_item.id,
+                    "rate_mapping_id": selection.rate_mapping_id,
+                    "name": rate_item.name,
+                    "unit_code": rate_item.unit_code,
+                    "norm_base_quantity": rate_item.norm_base_quantity,
+                    "rate_context_code": selection.rate_context_code,
+                    "labor_avg": rate_item.labor_avg,
+                    "conversion_factor": conversion_factor,
+                },
+            )
+        trace_candidates: list[dict[str, Any]] = []
+        for candidate in candidate_rows[:10]:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_item = item_by_rate_id.get(candidate.get("rate_item_id"))
+            candidate_conversion = candidate.get("conversion_factor")
+            if candidate_conversion is None and candidate_item is not None:
+                candidate_conversion = WorkRateSelectionService.unit_conversion_factor(unit_code, candidate_item.unit_code)
+            normalized_candidate_value = _per_item_labor(
+                getattr(candidate_item, "labor_avg", None) if candidate_item is not None else candidate.get("labor_avg"),
+                norm_base_quantity=(
+                    getattr(candidate_item, "norm_base_quantity", None)
+                    if candidate_item is not None
+                    else candidate.get("norm_base_quantity")
+                ),
+                unit_conversion_factor=candidate_conversion,
+            )
+            source = source_by_id.get(candidate_item.source_id) if candidate_item is not None else None
+            trace_candidate = _rate_candidate_trace(
+                candidate=candidate,
+                rate_item=candidate_item,
+                rate_mapping_id=candidate.get("rate_mapping_id"),
+                source=source,
+                normalized_value=normalized_candidate_value,
+            )
+            trace_candidates.append(trace_candidate)
+            for code in trace_candidate.get("all_target_codes") or []:
+                if code and code not in detected_operations:
+                    detected_operations.append(code)
 
         catalog_total = calculation.get("labor_avg_total")
         resolved_labor_hours = catalog_total if selection.rate_auto_applicable else None
@@ -4085,6 +4212,14 @@ async def _attach_session_subtype_rate_projection(
             or getattr(catalog, "FORMAT_VERSION", "1.4.0")
         )
         row.rate_catalog_file = catalog_path.name
+        row.rate_trace = {
+            "source_row_text": item.name if item else row.subtype_name,
+            "taxonomy_code": str(taxonomy_code),
+            "operation_code": selection.operation_code or operation_code,
+            "detected_operations": detected_operations,
+            "rate_candidates": trace_candidates,
+            "selection_result": selection.review_reason or ("auto_applicable" if selection.rate_auto_applicable else None),
+        }
 
         if (
             selection.rate_auto_applicable

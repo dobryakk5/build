@@ -965,6 +965,36 @@ export interface KtpSessionSubtype {
   resolved_labor_hours?: number | null;
   rate_catalog_version?: string | null;
   rate_catalog_file?: string | null;
+  rate_trace?: {
+    source_row_text?: string | null;
+    detected_operations?: string[];
+    rate_candidates?: {
+      rate_item_id?: string | null;
+      rate_mapping_id?: string | null;
+      name?: string | null;
+      source_file?: string | null;
+      source_kind?: string | null;
+      source_rate_id?: string | null;
+      source_value?: number | null;
+      source_unit?: string | null;
+      shift_duration_hours?: number | null;
+      normalized_value?: number | null;
+      normalized_unit?: string | null;
+      norm_base_quantity?: number | null;
+      rate_context_code?: string | null;
+      approval_status?: string | null;
+      rate_value_mode?: string | null;
+      labor_basis?: string | null;
+      auto_applicable?: boolean;
+      approved_as_rate?: boolean;
+      selected_target_code?: string | null;
+      all_target_codes?: string[];
+      target_kind?: string | null;
+      diagnostics?: Record<string, unknown>;
+    }[];
+    selection_result?: string | null;
+    [key: string]: unknown;
+  } | null;
 }
 
 export interface KtpWbs {

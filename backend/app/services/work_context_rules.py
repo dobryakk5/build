@@ -11,6 +11,7 @@ class MasonryContextResult:
     context_code: str | None
     needs_review: bool = False
     review_reason: str | None = None
+    applicability: dict[str, str] | None = None
 
 
 def has_any(text: str, fragments: tuple[str, ...]) -> bool:
@@ -104,3 +105,37 @@ def resolve_masonry_context(text: str) -> MasonryContextResult:
     if has_interior:
         return MasonryContextResult("interior_wall")
     return MasonryContextResult(None, True, "masonry_location_not_resolved")
+
+
+def resolve_roof_covering_context(text: str) -> MasonryContextResult:
+    """Resolve roof-covering material context before generic roof installation rates."""
+    normalized = normalize_name(text)
+    has_metal_tile = has_any(normalized, ("металлочерепиц", "металлическ черепиц"))
+    has_flexible_shingles = has_any(
+        normalized,
+        (
+            "гибк черепиц",
+            "битумн черепиц",
+            "мягк черепиц",
+            "мягк кровл",
+        ),
+    )
+    if has_metal_tile and has_flexible_shingles:
+        return MasonryContextResult(None, True, "roof_covering_material_conflict")
+    if has_metal_tile:
+        return MasonryContextResult(
+            "metal_tile",
+            applicability={
+                "roof_covering_material": "metal_tile",
+                "base_type": "sparse_batten",
+            },
+        )
+    if has_flexible_shingles:
+        return MasonryContextResult(
+            "flexible_shingles",
+            applicability={
+                "roof_covering_material": "flexible_shingles",
+                "base_type": "solid_deck",
+            },
+        )
+    return MasonryContextResult(None, True, "roof_covering_material_not_resolved")

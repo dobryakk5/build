@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, Download } from "lucide-react";
+import { ArrowUp, Check, Download } from "lucide-react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { ktpEstimate, workTaxonomy } from "@/lib/api";
@@ -1866,6 +1866,8 @@ const RATE_REVIEW_REASON_LABELS: Record<string, string> = {
   user_rate_input_required: "нужно ввести пользовательскую норму",
   user_rate_identity_required: "нужен пользователь для нормы по факту",
   special_masonry_operation_mismatch: "операция кладки не совпадает с типом работы",
+  roof_covering_material_conflict: "конфликт материала кровли",
+  roof_covering_material_not_resolved: "материал кровли не определён",
   brick_pillar_rate_not_available: "нет расценки для кладки столбов",
   vent_shaft_masonry_rate_not_available: "нет расценки для кладки вентканалов",
   facade_cladding_rate_not_available: "нет расценки для облицовки фасада",
@@ -1874,6 +1876,31 @@ const RATE_REVIEW_REASON_LABELS: Record<string, string> = {
 function rateReviewLabel(reason: string | null | undefined): string {
   if (!reason) return "нет применимой каталожной нормы";
   return RATE_REVIEW_REASON_LABELS[reason] || reason;
+}
+
+function acceptedCatalogOutput(row: KtpSessionSubtype): number | null {
+  const labor = row.effective_labor_hours_per_unit_avg ?? row.labor_hours_per_unit_avg;
+  const crew = row.crew_size;
+  if (!labor || labor <= 0 || !crew || crew <= 0) return null;
+  return Math.round((crew * 8 / labor) * 10000) / 10000;
+}
+
+function rateTraceTitle(row: KtpSessionSubtype): string {
+  const trace = row.rate_trace;
+  const first = trace?.rate_candidates?.[0];
+  const lines = [
+    `Результат: ${rateReviewLabel(row.rate_review_reason)}`,
+    trace?.source_row_text ? `Строка: ${trace.source_row_text}` : null,
+    trace?.detected_operations?.length ? `Операции: ${trace.detected_operations.join(", ")}` : null,
+    first?.rate_context_code ? `Контекст: ${first.rate_context_code}` : null,
+    first?.source_file ? `Источник: ${first.source_file}` : null,
+    first?.source_rate_id ? `ID нормы: ${first.source_rate_id}` : null,
+    first?.source_value != null ? `Исходно: ${first.source_value} ${first.source_unit ?? ""}`.trim() : null,
+    first?.normalized_value != null ? `Нормализовано: ${first.normalized_value} ${first.normalized_unit ?? ""}`.trim() : null,
+    first?.approval_status ? `Статус: ${first.approval_status}` : null,
+    first?.target_kind === "multi_operation" ? "Проверьте декомпозицию: исходная норма относится к нескольким операциям." : null,
+  ].filter(Boolean);
+  return lines.join("\n");
 }
 
 function StageProductivity({
@@ -2178,6 +2205,10 @@ function StageProductivity({
                   s.session_calculated_labor_hours_max,
                 );
                 const catalogWarning = s.rate_auto_applicable === false ? rateReviewLabel(s.rate_review_reason) : null;
+                const isProvisionalRate = s.rate_review_reason === "provisional_rate_requires_approval";
+                const provisionalConfirmed = isProvisionalRate && s.output_source === "manual" && s.output_per_day != null;
+                const provisionalOutput = isProvisionalRate ? acceptedCatalogOutput(s) : null;
+                const traceTitle = s.rate_trace ? rateTraceTitle(s) : undefined;
                 return (
                   <div
                     key={s.id}
@@ -2273,8 +2304,47 @@ function StageProductivity({
                           ) : null}
                           {sessionLabor ? <div>По объёму: {sessionLabor} чел-ч</div> : null}
                           {catalogWarning ? (
-                            <div style={{ color: "var(--red)", fontWeight: 600 }}>
-                              Каталог не применён: {catalogWarning}
+                            <div
+                              title={traceTitle}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 6,
+                                flexWrap: "wrap",
+                                color: provisionalConfirmed ? "#15803d" : isProvisionalRate ? "#b45309" : "var(--red)",
+                                fontWeight: 600,
+                              }}
+                            >
+                              <span>
+                                {provisionalConfirmed
+                                  ? "Каталог подтверждён оператором"
+                                  : isProvisionalRate
+                                    ? "Каталог требует подтверждения"
+                                    : `Каталог не применён: ${catalogWarning}`}
+                              </span>
+                              {isProvisionalRate && !provisionalConfirmed && provisionalOutput != null ? (
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => void saveField(s.id, { output_per_day: provisionalOutput })}
+                                  title={`${traceTitle ?? catalogWarning}\n\nПринять: ${fmtMetric(provisionalOutput) ?? provisionalOutput} ${s.unit || "ед."}/см`}
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                    width: 22,
+                                    height: 22,
+                                    padding: 0,
+                                    borderRadius: 5,
+                                    border: "1px solid #16a34a55",
+                                    background: busy ? "#e5e7eb" : "#22c55e22",
+                                    color: busy ? "#64748b" : "#15803d",
+                                    cursor: busy ? "not-allowed" : "pointer",
+                                  }}
+                                >
+                                  <Check size={14} strokeWidth={3} />
+                                </button>
+                              ) : null}
                             </div>
                           ) : null}
                         </div>

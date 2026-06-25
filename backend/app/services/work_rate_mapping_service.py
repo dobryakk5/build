@@ -170,6 +170,16 @@ class WorkRateMappingService:
                 return "exterior_wall"
             if "внутренн" in text:
                 return "interior_wall"
+        if operation_code == "roof_covering_installation":
+            if "металлочерепиц" in text or "металлическ черепиц" in text:
+                return "metal_tile"
+            if (
+                "гибк черепиц" in text
+                or "битумн черепиц" in text
+                or "мягк черепиц" in text
+                or "мягк кровл" in text
+            ):
+                return "flexible_shingles"
         return None
 
     def _rules_for_operation(self, operation_code: str) -> list[dict[str, Any]]:

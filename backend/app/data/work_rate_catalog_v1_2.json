@@ -15090,6 +15090,10 @@
         "raw_name": "Монтаж металлочерепицы (крепление саморезами)",
         "raw_notes": "[reference:5][reference:6]",
         "raw_unit": "м²",
+        "applicability": {
+          "roof_covering_material": "metal_tile",
+          "base_type": "sparse_batten"
+        },
         "formula_diagnostics": {
           "price_min": {
             "formula_text": null,
@@ -15129,7 +15133,11 @@
         }
       },
       "created_at": "2026-06-22T09:40:45.263754+00:00",
-      "updated_at": "2026-06-22T09:40:45.263756+00:00"
+      "updated_at": "2026-06-22T09:40:45.263756+00:00",
+      "applicability_json": {
+        "roof_covering_material": "metal_tile",
+        "base_type": "sparse_batten"
+      }
     },
     {
       "id": "a5fe8ed2-d30e-479a-a98f-43524f979e05",
@@ -15157,6 +15165,10 @@
       "labor_avg": 0.94,
       "hourly_rate": 800.0,
       "labor_basis": "derived_from_price",
+      "applicability_json": {
+        "roof_covering_material": "flexible_shingles",
+        "base_type": "solid_deck"
+      },
       "mapping_status": "mapped",
       "has_active_mapping": true,
       "is_package_candidate": false,
@@ -15172,6 +15184,10 @@
         "raw_name": "Монтаж гибкой черепицы (на сплошное основание)",
         "raw_notes": "[reference:7]",
         "raw_unit": "м²",
+        "applicability": {
+          "roof_covering_material": "flexible_shingles",
+          "base_type": "solid_deck"
+        },
         "formula_diagnostics": {
           "price_min": {
             "formula_text": null,
@@ -35919,7 +35935,9 @@
         ],
         "template_stage_numbers": [
           "2.7.14"
-        ]
+        ],
+        "roof_covering_material": "metal_tile",
+        "base_type": "sparse_batten"
       },
       "mapping_status": "partially_mapped",
       "has_active_mapping": true,
@@ -35962,7 +35980,9 @@
           ],
           "template_stage_numbers": [
             "2.7.14"
-          ]
+          ],
+          "roof_covering_material": "metal_tile",
+          "base_type": "sparse_batten"
         },
         "user_rate_binding": null
       },
@@ -45957,7 +45977,7 @@
       },
       "created_at": "2026-06-22T09:40:45.614985+00:00",
       "updated_at": "2026-06-22T09:40:45.614990+00:00",
-      "rate_context_code": null
+      "rate_context_code": "metal_tile"
     },
     {
       "id": "978b0278-6177-4de3-86bd-b4cc537b75c9",
@@ -45984,7 +46004,7 @@
       },
       "created_at": "2026-06-22T09:40:45.615937+00:00",
       "updated_at": "2026-06-22T09:40:45.615939+00:00",
-      "rate_context_code": null
+      "rate_context_code": "flexible_shingles"
     },
     {
       "id": "3d4b24b1-694f-4741-ad8b-0e53e275a582",
@@ -52429,7 +52449,7 @@
       "taxonomy_subtype_id": null,
       "taxonomy_code": null,
       "object_scope_code": null,
-      "rate_context_code": null,
+      "rate_context_code": "metal_tile",
       "mapping_mode": "direct",
       "priority": 100,
       "confidence": 1.0,

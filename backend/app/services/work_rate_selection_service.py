@@ -9,6 +9,7 @@ from typing import Any, Iterable
 from app.services.work_context_rules import (
     build_rate_context_text,
     resolve_masonry_context,
+    resolve_roof_covering_context,
     resolve_special_masonry_operation,
 )
 from app.services.user_work_rate_override_service import (
@@ -105,6 +106,18 @@ class WorkRateSelectionService:
                 return False
             if allowed and value is not None and value not in set(allowed):
                 return False
+        for expected_key in ("roof_covering_material", "base_type"):
+            expected_value = expected.get(expected_key)
+            if expected_value in (None, ""):
+                continue
+            actual_value = actual.get(expected_key)
+            if actual_value in (None, ""):
+                return False
+            if isinstance(expected_value, list | tuple | set):
+                if actual_value not in set(expected_value):
+                    return False
+            elif actual_value != expected_value:
+                return False
         return True
 
     @staticmethod
@@ -190,6 +203,14 @@ class WorkRateSelectionService:
                     rate_auto_applicable=False,
                 )
             effective_operation = special_operation
+        effective_applicability = dict(applicability or {})
+        roof_context_result = None
+        if effective_operation == "roof_covering_installation":
+            roof_context_result = resolve_roof_covering_context(source_context_text)
+            if roof_context_result.context_code:
+                effective_applicability.setdefault("rate_context_code", roof_context_result.context_code)
+            for key, value in (roof_context_result.applicability or {}).items():
+                effective_applicability.setdefault(key, value)
 
         item_by_id = {item.id: item for item in items if item.is_active}
         source_by_id = {source.id: source for source in sources if source.is_active}
@@ -218,7 +239,7 @@ class WorkRateSelectionService:
                 continue
             if source.source_kind == SOURCE_OBSERVATION and not item.approved_as_rate:
                 continue
-            if not self._item_applicability_matches(item, applicability):
+            if not self._item_applicability_matches(item, effective_applicability):
                 continue
             operation_candidates.append((item, mapping, source))
 
@@ -316,6 +337,29 @@ class WorkRateSelectionService:
             no_context = [row for row in compatible if row[1].rate_context_code is None]
             compatible = exact if exact else no_context
             selected_context = "brick_arm_belt"
+        elif effective_operation == "roof_covering_installation":
+            selected_context = roof_context_result.context_code if roof_context_result else None
+            contextual_codes = {
+                mapping.rate_context_code
+                for _item, mapping, _source, _factor in compatible
+                if mapping.rate_context_code in {"metal_tile", "flexible_shingles"}
+            }
+            if selected_context:
+                exact = [row for row in compatible if row[1].rate_context_code == selected_context]
+                no_context = [row for row in compatible if row[1].rate_context_code is None]
+                compatible = exact if exact else no_context
+            elif contextual_codes:
+                return RateSelectionResult(
+                    operation_code=effective_operation,
+                    suggested_operation_code=suggested_operation,
+                    taxonomy_code=taxonomy_code,
+                    object_scope_code=object_scope_code,
+                    rate_context_code=None,
+                    unit_code=unit_code,
+                    needs_review=True,
+                    review_reason=(roof_context_result.review_reason if roof_context_result else "roof_covering_material_not_resolved"),
+                    rate_auto_applicable=False,
+                )
 
         # A source row marked "по факту" is a hard user-scoped gate.
         # It must never silently fall through to a global rate.
@@ -328,7 +372,7 @@ class WorkRateSelectionService:
                     operation_code=effective_operation,
                     user_id=user_id,
                     user_overrides=user_overrides,
-                    applicability=applicability,
+                    applicability=effective_applicability,
                 )
                 placeholder_candidates.append({
                     "rate_item_id": item.id,
@@ -367,7 +411,7 @@ class WorkRateSelectionService:
                         user_override_scope="user",
                         user_override_owner_id=override.user_id,
                         applicability_hash=override.applicability_hash,
-                        applicability_json=normalize_applicability(applicability),
+                        applicability_json=normalize_applicability(effective_applicability),
                         needs_review=quantity_missing,
                         review_reason="quantity_missing" if quantity_missing else None,
                         candidates=placeholder_candidates,
@@ -390,8 +434,8 @@ class WorkRateSelectionService:
                 rate_value_mode=item.rate_value_mode,
                 resolution_status="requires_user_input",
                 requires_user_input=True,
-                applicability_hash=canonical_applicability_hash(applicability),
-                applicability_json=normalize_applicability(applicability),
+                applicability_hash=canonical_applicability_hash(effective_applicability),
+                applicability_json=normalize_applicability(effective_applicability),
                 needs_review=True,
                 review_reason="user_rate_input_required" if user_id else "user_rate_identity_required",
                 candidates=placeholder_candidates,
@@ -439,6 +483,7 @@ class WorkRateSelectionService:
                     "rate_item_id": r[2].id, "rate_mapping_id": r[3].id,
                     "source_rate_id": r[2].source_rate_id, "name": r[2].name,
                     "unit_code": r[2].unit_code, "norm_base_quantity": r[2].norm_base_quantity,
+                    "rate_context_code": r[3].rate_context_code,
                     "labor_avg": r[2].labor_avg, "confidence": r[1],
                     "conversion_factor": r[4],
                 } for r in provisional[:10]],
@@ -467,6 +512,11 @@ class WorkRateSelectionService:
             row for row in ranked
             if row[0] == top_priority and abs(row[1] - top_confidence) < 0.02
         ]
+        candidate_rows = list(ranked[:10])
+        for row in provisional:
+            if len(candidate_rows) >= 10:
+                break
+            candidate_rows.append(row)
         candidates = [
             {
                 "rate_item_id": item.id,
@@ -482,7 +532,7 @@ class WorkRateSelectionService:
                 "confidence": confidence,
                 "conversion_factor": factor,
             }
-            for _, confidence, item, mapping, factor in ranked[:10]
+            for _, confidence, item, mapping, factor in candidate_rows
         ]
         if len(equivalent) > 1:
             return RateSelectionResult(

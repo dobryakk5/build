@@ -260,6 +260,7 @@ class SessionSubtypeOut(BaseModel):
     resolved_labor_hours: float | None = None
     rate_catalog_version: str | None = None
     rate_catalog_file: str | None = None
+    rate_trace: dict | None = None
 
     @classmethod
     def of(cls, s) -> "SessionSubtypeOut":
@@ -309,6 +310,7 @@ class SessionSubtypeOut(BaseModel):
             resolved_labor_hours=_float_attr("resolved_labor_hours"),
             rate_catalog_version=getattr(s, "rate_catalog_version", None),
             rate_catalog_file=getattr(s, "rate_catalog_file", None),
+            rate_trace=getattr(s, "rate_trace", None),
         )
 
 

@@ -636,6 +636,11 @@ export default function UploadPage() {
           throw new Error("Не найден hash DB preview");
         }
         const res = await estimates.confirmDbStage10(preview.preview_id, preview.preview_content_hash);
+        const workersCount = Number(workers) > 0 ? Number(workers) : 3;
+        await estimates.updateBatchSchedule(id, res.estimate_batch_id, {
+          workers_count: workersCount,
+          hours_per_day: 8,
+        });
         restoredPreviewRef.current = preview.preview_id;
         clearStage10PreviewRestore(id);
         replacePreviewQuery(null);
