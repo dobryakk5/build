@@ -1922,6 +1922,9 @@ function rateIssueDifficulty(row: KtpSessionSubtype): string {
     return "Трудность: строка не сведена к одной операции; нужна корректировка mapping или разбиение на операции.";
   }
   if (reason === "no_approved_compatible_rate") {
+    if (trace?.selection_sub_reason === "package_expansion_required") {
+      return "Трудность: строка описывает полный цикл, а в каталоге есть ставки только на отдельные компоненты; нужно разложить работу или подтвердить частичный расчёт.";
+    }
     return "Трудность: утверждённой auto-ставки нет; нужна ставка, package-разложение или подтверждение provisional нормы.";
   }
   if (reason === "provisional_rate_requires_approval") {
@@ -1965,6 +1968,22 @@ function equivalentRateCandidates(row: KtpSessionSubtype): RateTraceCandidate[] 
     .filter((candidate) => {
       const targetUnit = candidateUnitCode(candidate);
       return typeof candidate.normalized_value === "number" && (!sourceUnit || !targetUnit || sourceUnit === targetUnit);
+    })
+    .slice(0, 3);
+}
+
+function packageComponentRateCandidates(row: KtpSessionSubtype): RateTraceCandidate[] {
+  const trace = row.rate_trace;
+  if (trace?.selection_sub_reason !== "package_expansion_required") return [];
+  const sourceUnit = row.item_unit_code || null;
+  return (trace.rate_candidates || [])
+    .filter((candidate) => {
+      const targetUnit = candidateUnitCode(candidate);
+      return (
+        (candidate as any).candidate_scope === "package_component" &&
+        typeof candidate.normalized_value === "number" &&
+        (!sourceUnit || !targetUnit || sourceUnit === targetUnit)
+      );
     })
     .slice(0, 3);
 }
@@ -2395,6 +2414,7 @@ function StageProductivity({
                 const provisionalOutput = isProvisionalRate ? acceptedCatalogOutput(s) : null;
                 const traceTitle = s.rate_trace ? rateTraceTitle(s) : undefined;
                 const equivalentCandidates = equivalentRateCandidates(s);
+                const componentCandidates = packageComponentRateCandidates(s);
                 const numericCandidate = firstNumericRateCandidate(s);
                 const targetUnitCode = candidateUnitCode(numericCandidate);
                 const sourceUnitCode = s.item_unit_code || null;
@@ -2643,6 +2663,89 @@ function StageProductivity({
                                         selected_rate_mapping_id: candidate.rate_mapping_id || null,
                                       })}
                                       title={candidateOutput == null ? "Нужен размер бригады для расчёта производительности" : `Применить: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см`}
+                                      style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        width: 24,
+                                        height: 24,
+                                        padding: 0,
+                                        borderRadius: 5,
+                                        border: "1px solid #16a34a55",
+                                        background: busy || candidateOutput == null ? "#e5e7eb" : "#22c55e22",
+                                        color: busy || candidateOutput == null ? "#64748b" : "#15803d",
+                                        cursor: busy || candidateOutput == null ? "not-allowed" : "pointer",
+                                      }}
+                                    >
+                                      <Check size={14} strokeWidth={3} />
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : null}
+                          {componentCandidates.length > 0 && !operatorRateConfirmed ? (
+                            <div
+                              style={{
+                                marginTop: 6,
+                                display: "grid",
+                                gap: 6,
+                                padding: "8px 9px",
+                                border: "1px solid #f59e0b55",
+                                borderRadius: 6,
+                                background: "#fffbeb",
+                                color: "#78350f",
+                              }}
+                            >
+                              <div style={{ fontWeight: 700 }}>
+                                Полной нормы нет. Найдена ставка на компонент пакета
+                              </div>
+                              <div>
+                                Можно применить предварительно только к указанному компоненту; полный цикл нужно разложить или проверить вручную.
+                              </div>
+                              {componentCandidates.map((candidate) => {
+                                const candidateOutput = outputFromCandidate(s, candidate);
+                                const candidateUnit = candidateUnitCode(candidate);
+                                const componentCode = String((candidate as any).component_operation_code || "компонент");
+                                const limitation = String((candidate as any).limitation || "");
+                                const title = [
+                                  candidate.name,
+                                  `Компонент: ${componentCode}`,
+                                  candidate.source_file ? `Источник: ${candidate.source_file}` : null,
+                                  candidate.source_rate_id ? `ID: ${candidate.source_rate_id}` : null,
+                                  limitation || null,
+                                  candidate.normalized_value != null ? `Ставка: ${fmtNumber(candidate.normalized_value)} чел-ч/${unitLabel(candidateUnit)}` : null,
+                                  candidateOutput != null ? `Производительность: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : null,
+                                ].filter(Boolean).join("\n");
+                                return (
+                                  <div
+                                    key={`${componentCode}:${candidate.rate_item_id || candidate.source_rate_id || candidate.name}`}
+                                    style={{
+                                      display: "grid",
+                                      gridTemplateColumns: "minmax(0, 1fr) auto",
+                                      gap: 8,
+                                      alignItems: "center",
+                                    }}
+                                  >
+                                    <div title={title} style={{ minWidth: 0 }}>
+                                      <div style={{ fontWeight: 650, color: "var(--text)" }}>
+                                        {candidate.name || "Кандидат нормы"}
+                                      </div>
+                                      <div style={{ color: "#92400e" }}>
+                                        {componentCode}: {fmtNumber(candidate.normalized_value)} чел-ч/{unitLabel(candidateUnit)}
+                                        {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : ""}
+                                        {candidate.source_file ? ` · ${candidate.source_file}` : ""}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={busy || candidateOutput == null}
+                                      onClick={() => candidateOutput != null && void saveField(s.id, {
+                                        output_per_day: candidateOutput,
+                                        selected_rate_item_id: candidate.rate_item_id || null,
+                                        selected_rate_mapping_id: candidate.rate_mapping_id || null,
+                                      })}
+                                      title={candidateOutput == null ? "Нужен размер бригады для расчёта производительности" : `Применить предварительно: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см`}
                                       style={{
                                         display: "inline-flex",
                                         alignItems: "center",

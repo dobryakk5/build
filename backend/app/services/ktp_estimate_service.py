@@ -4059,6 +4059,112 @@ def _suggest_rate_unit_conversion(
     return None
 
 
+def _package_component_rate_candidates(
+    *,
+    selector: Any,
+    package_code: str | None,
+    taxonomy_code: str,
+    object_scope_code: str | None,
+    quantity: float | None,
+    unit_code: str | None,
+    work_name: str | None,
+    item_text: str | None,
+    spec: str | None,
+    section_title: str | None,
+    section_description: str | None,
+    section_parent_context: str | None,
+    catalog: Any,
+    applicability: dict[str, Any],
+    unit_conversion_overrides: dict[tuple[str, str], float] | None,
+) -> list[dict[str, Any]]:
+    if not package_code:
+        return []
+    package = getattr(selector, "operation_packages", {}).get(package_code)
+    if not isinstance(package, dict):
+        return []
+    components = [str(code) for code in package.get("included_operations") or [] if code]
+    if not components:
+        return []
+
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None, str]] = set()
+    for component_code in components:
+        component_selection = selector.select_rate(
+            taxonomy_code=taxonomy_code,
+            operation_code=component_code,
+            object_scope_code=object_scope_code,
+            quantity=quantity,
+            unit_code=unit_code,
+            work_name=work_name,
+            item_text=item_text,
+            spec=spec,
+            section_title=section_title,
+            section_description=section_description,
+            section_parent_context=section_parent_context,
+            items=catalog.items,
+            mappings=catalog.mappings,
+            sources=catalog.sources,
+            applicability=applicability,
+            unit_conversion_overrides=unit_conversion_overrides,
+        )
+        component_rows = list(component_selection.candidates or [])
+        if component_selection.rate_item_id and not any(
+            isinstance(row, dict) and row.get("rate_item_id") == component_selection.rate_item_id
+            for row in component_rows
+        ):
+            component_rows.insert(
+                0,
+                {
+                    "rate_item_id": component_selection.rate_item_id,
+                    "rate_mapping_id": component_selection.rate_mapping_id,
+                    "source_rate_id": component_selection.source_rate_id,
+                    "name": None,
+                    "unit_code": component_selection.unit_code,
+                    "norm_base_quantity": component_selection.norm_base_quantity,
+                    "rate_context_code": component_selection.rate_context_code,
+                    "labor_avg": component_selection.labor_avg,
+                    "conversion_factor": selector.unit_conversion_factor(unit_code, component_selection.unit_code),
+                },
+            )
+        for row in component_rows:
+            if not isinstance(row, dict):
+                continue
+            key = (row.get("rate_item_id"), row.get("rate_mapping_id"), component_code)
+            if key in seen:
+                continue
+            seen.add(key)
+            enriched = dict(row)
+            enriched.setdefault("conversion_factor", selector.unit_conversion_factor(unit_code, enriched.get("unit_code")))
+            enriched["candidate_scope"] = "package_component"
+            enriched["package_operation_code"] = package_code
+            enriched["component_operation_code"] = component_code
+            enriched["component_selection_result"] = (
+                component_selection.review_reason
+                or ("auto_applicable" if component_selection.rate_auto_applicable else None)
+            )
+            enriched["component_selection_sub_reason"] = component_selection.review_sub_reason
+            enriched["limitation"] = (
+                "Ставка относится только к компоненту пакета; полный цикл нужно разложить "
+                "на опалубку, арматуру, бетонирование и распалубку либо подтвердить частичный расчёт."
+            )
+            candidates.append(enriched)
+    def sort_key(candidate: dict[str, Any]) -> tuple[int, int, int, int]:
+        component = str(candidate.get("component_operation_code") or "")
+        same_unit = bool(unit_code and candidate.get("unit_code") == unit_code)
+        has_labor = candidate.get("labor_avg") is not None
+        rejected = bool(candidate.get("rejected_reason"))
+        concrete_for_volume = bool(unit_code == "m3" and component == "concrete_placement")
+        return (
+            0 if same_unit else 1,
+            0 if concrete_for_volume else 1,
+            0 if has_labor else 1,
+            1 if rejected else 0,
+        )
+
+    candidates.sort(key=sort_key)
+    return candidates[:10]
+
+
 @lru_cache(maxsize=4)
 def _load_work_rate_catalog_cached(path_text: str):
     from app.services.work_rate_catalog_service import WorkRateCatalog
@@ -4220,6 +4326,14 @@ async def _attach_session_subtype_rate_projection(
             if confirmed_conversion and unit_code
             else None
         )
+        rate_applicability = {
+            "project_variant_id": row_project_variant_id,
+            "template_stage_number": raw.get("template_stage_number") or raw.get("work_stage_number"),
+            "semantic_stage_option_id": raw.get("semantic_stage_option_id") or raw.get("preferred_stage_option_id"),
+            "floor_number": raw.get("floor_number"),
+            "floor_kind": raw.get("floor_kind"),
+            "rate_context_code": raw.get("rate_context_code"),
+        }
         selection = selector.select_rate(
             taxonomy_code=str(taxonomy_code),
             operation_code=str(operation_code),
@@ -4235,14 +4349,7 @@ async def _attach_session_subtype_rate_projection(
             items=catalog.items,
             mappings=catalog.mappings,
             sources=catalog.sources,
-            applicability={
-                "project_variant_id": row_project_variant_id,
-                "template_stage_number": raw.get("template_stage_number") or raw.get("work_stage_number"),
-                "semantic_stage_option_id": raw.get("semantic_stage_option_id") or raw.get("preferred_stage_option_id"),
-                "floor_number": raw.get("floor_number"),
-                "floor_kind": raw.get("floor_kind"),
-                "rate_context_code": raw.get("rate_context_code"),
-            },
+            applicability=rate_applicability,
             unit_conversion_overrides=unit_conversion_overrides,
         )
         rate_item = item_by_rate_id.get(selection.rate_item_id) if selection.rate_item_id else None
@@ -4290,6 +4397,26 @@ async def _attach_session_subtype_rate_projection(
             unit_conversion_factor=conversion_factor,
         )
         candidate_rows = list(selection.candidates or [])
+        package_component_candidates = []
+        if selection.review_sub_reason == "package_expansion_required":
+            package_component_candidates = _package_component_rate_candidates(
+                selector=selector,
+                package_code=selection.operation_code or operation_code,
+                taxonomy_code=str(taxonomy_code),
+                object_scope_code=raw.get("selected_object_scope_code") or raw.get("object_scope_code"),
+                quantity=quantity,
+                unit_code=unit_code,
+                work_name=(item.name if item else None) or row.subtype_name,
+                item_text=raw.get("item_text"),
+                spec=raw.get("spec"),
+                section_title=section_title,
+                section_description=section_description,
+                section_parent_context=raw.get("section_parent_context"),
+                catalog=catalog,
+                applicability=rate_applicability,
+                unit_conversion_overrides=unit_conversion_overrides,
+            )
+            candidate_rows.extend(package_component_candidates)
         if rate_item is not None and not any(c.get("rate_item_id") == rate_item.id for c in candidate_rows if isinstance(c, dict)):
             candidate_rows.insert(
                 0,
@@ -4334,6 +4461,17 @@ async def _attach_session_subtype_rate_projection(
                 source=source,
                 normalized_value=normalized_candidate_value,
             )
+            for key in (
+                "candidate_scope",
+                "package_operation_code",
+                "component_operation_code",
+                "component_selection_result",
+                "component_selection_sub_reason",
+                "limitation",
+                "rejected_reason",
+            ):
+                if candidate.get(key) is not None:
+                    trace_candidate[key] = candidate.get(key)
             trace_candidates.append(trace_candidate)
             for code in trace_candidate.get("all_target_codes") or []:
                 if code and code not in detected_operations:
