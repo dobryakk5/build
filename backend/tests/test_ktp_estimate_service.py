@@ -1,5 +1,6 @@
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -234,6 +235,86 @@ def test_stage_aware_groups_put_rows_without_stage_to_fallback():
     assert groups[-1]["title"] == STAGE_AWARE_FALLBACK_TITLE
     assert groups[-1]["items"][0]["row_key"] == "R001"
     assert diagnostics["stage_grouping"]["fallback_rows"][0]["reason"] == "missing_work_stage_number"
+
+
+def test_stage_aware_groups_add_catalog_recommendations_by_template_stage(monkeypatch, tmp_path):
+    import app.services.ktp_estimate_service as svc
+    from app.services.ktp_estimate_service import _build_stage_aware_groups
+
+    catalog_file = tmp_path / "catalog.json"
+    catalog_file.write_text("{}", encoding="utf-8")
+    catalog = SimpleNamespace(
+        sources=[
+            SimpleNamespace(
+                id="src-brick",
+                is_active=True,
+                metadata_json={"variant_id": "residential_construction_kirpichnye_doma"},
+            )
+        ],
+        items=[
+            SimpleNamespace(
+                id="rate-1",
+                source_id="src-brick",
+                source_row=1,
+                name="Подача кирпича и раствора",
+                is_active=True,
+                row_role="work",
+                source_rate_id="labor:8:66",
+                source_payload={"stage_number": "2.7.8", "selected_target_code": "brick_material_lifting"},
+                applicability_json={"template_stage_numbers": ["2.7.8"]},
+            )
+        ],
+        mappings=[
+            SimpleNamespace(
+                id="map-1",
+                rate_item_id="rate-1",
+                is_active=True,
+                is_primary=True,
+                priority=100,
+                confidence=0.99,
+                operation_code="brick_material_lifting",
+                diagnostics={"preferred_stage_number": "2.7.8"},
+            )
+        ],
+    )
+    monkeypatch.setattr(svc, "resolve_config_path", lambda _path: catalog_file)
+    monkeypatch.setattr(svc, "_load_work_rate_catalog_cached", lambda _path: catalog)
+
+    e1 = make_est("e1", "Кладка стен", row_order=1)
+    e1.work_stage_number = "2.7.F1.10"
+    e1.template_stage_number = "2.7.8"
+    e1.work_stage_title = "Кладка наружных и внутренних несущих стен из кирпича"
+    e1.work_subtype_code = "load_bearing_walls/brick_walls"
+    e1.section_id = "load_bearing_walls"
+    e1.subtype_id = "brick_walls"
+    batch = MagicMock()
+    batch.estimate_type_id = "residential_construction"
+    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    batch.work_rate_catalog_version = "1.2"
+    batch.building_params = {"floors_count": 1}
+    diagnostics = _make_diag()
+
+    groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
+
+    target = next(g for g in groups if g.get("template_stage_number") == "2.7.8")
+    added = [it for it in target["items"] if it["origin"] == "ai_added"]
+    assert added == [
+        {
+            "name": "Подача кирпича и раствора",
+            "origin": "ai_added",
+            "row_key": None,
+            "review_status": "pending",
+            "ai_reason": "Рекомендовано из загруженного справочника работ",
+            "recommendation_source": "work_rate_catalog",
+            "source_rate_id": "labor:8:66",
+            "rate_item_id": "rate-1",
+            "rate_mapping_id": "map-1",
+            "operation_code": "brick_material_lifting",
+            "semantic_stage_option_id": None,
+            "stage_option_source": "work_rate_catalog",
+        }
+    ]
+    assert diagnostics["catalog_recommendations"][0]["preferred_stage_number"] == "2.7.8"
 
 
 def test_stage_confidence_percent_uses_score_and_delta_caps():

@@ -155,6 +155,7 @@ def projection_group_descriptor(
         sort_order=sort_order,
         stage_instance_id=stage_instance_id,
         template_stage_number=_text(projection.get("target_template_stage_number"))
+        or _text(raw_group.get("template_stage_number"))
         or _text(raw_group.get("work_stage_number")),
         stage_number=stage_number or _text(raw_group.get("work_stage_number")),
         canonical_stage_id=_text(projection.get("canonical_stage_id"))

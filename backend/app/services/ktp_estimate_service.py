@@ -49,6 +49,7 @@ from app.services.openrouter_embeddings import create_chat_completion, parse_jso
 from app.services.work_taxonomy_service import (
     UNKNOWN_SUBTYPE_CODE,
     build_work_section_palette,
+    get_project_variant_definition,
     get_project_variant_stages,
     normalize_text,
 )
@@ -90,6 +91,7 @@ PROJECT_GAP_FILL_MAX_UNASSIGNED = 10
 KTP_STAGE3_CLARIFICATION_KEY = "stage3"
 LEGACY_KTP_STAGE3_CLARIFICATION_KEY = "__ktp_stage3"
 MAX_PROMPT_CLARIFICATION_LINES = 80
+CATALOG_RECOMMENDATION_SOURCE = "work_rate_catalog"
 
 
 def _normalize_section_title(raw: Any) -> str:
@@ -848,6 +850,8 @@ async def _process_stage1(job_id: str) -> None:
                 "repeated_sections": diagnostics.get("repeated_sections") or [],
                 "unassigned_ai_items": diagnostics.get("unassigned_ai_items") or [],
                 "gap_fill_duplicates": diagnostics.get("gap_fill_duplicates") or [],
+                "catalog_recommendations": diagnostics.get("catalog_recommendations") or [],
+                "catalog_recommendation_duplicates": diagnostics.get("catalog_recommendation_duplicates") or [],
             }
             session.llm_model = settings.KTP_GENERATION_MODEL
             session.prompt_version = PROMPT_VERSION
@@ -1191,6 +1195,288 @@ def _estimate_work_type_review_reason(est: Estimate, raw: dict[str, Any]) -> str
     return None
 
 
+def _estimate_operation_codes(est: Estimate) -> set[str]:
+    raw = est.raw_data if isinstance(est.raw_data, dict) else {}
+    values: list[Any] = [
+        raw.get("operation_code"),
+        raw.get("selected_operation_code"),
+        raw.get("suggested_operation_code"),
+        raw.get("operation_package_code"),
+    ]
+    for key in ("operation_multi_codes", "all_target_codes"):
+        extra = raw.get(key)
+        if isinstance(extra, list):
+            values.extend(extra)
+    return {str(value).strip() for value in values if str(value or "").strip()}
+
+
+def _catalog_item_operation_codes(item: Any, mapping: Any | None) -> set[str]:
+    payload = item.source_payload if isinstance(getattr(item, "source_payload", None), dict) else {}
+    diagnostics = mapping.diagnostics if mapping and isinstance(getattr(mapping, "diagnostics", None), dict) else {}
+    values: list[Any] = [
+        getattr(mapping, "operation_code", None) if mapping else None,
+        payload.get("selected_target_code"),
+    ]
+    for source in (diagnostics, payload):
+        extra = source.get("all_target_codes")
+        if isinstance(extra, list):
+            values.extend(extra)
+    return {str(value).strip() for value in values if str(value or "").strip()}
+
+
+def _catalog_item_stage_option_id(item: Any, mapping: Any | None) -> str | None:
+    payload = item.source_payload if isinstance(getattr(item, "source_payload", None), dict) else {}
+    diagnostics = mapping.diagnostics if mapping and isinstance(getattr(mapping, "diagnostics", None), dict) else {}
+    value = diagnostics.get("semantic_stage_option_id") or payload.get("semantic_stage_option_id")
+    value = str(value or "").strip()
+    return value or None
+
+
+def _preferred_catalog_stage_number(item: Any, mapping: Any | None) -> str | None:
+    payload = item.source_payload if isinstance(getattr(item, "source_payload", None), dict) else {}
+    diagnostics = mapping.diagnostics if mapping and isinstance(getattr(mapping, "diagnostics", None), dict) else {}
+    applicability = item.applicability_json if isinstance(getattr(item, "applicability_json", None), dict) else {}
+    candidates: list[Any] = [
+        diagnostics.get("preferred_stage_number"),
+        payload.get("stage_number"),
+    ]
+    template_numbers = applicability.get("template_stage_numbers")
+    if isinstance(template_numbers, list):
+        candidates.extend(template_numbers)
+    for value in candidates:
+        text_value = str(value or "").strip()
+        if text_value:
+            return text_value
+    return None
+
+
+def _primary_catalog_mapping(item_id: str, mappings_by_item: dict[str, list[Any]]) -> Any | None:
+    mappings = mappings_by_item.get(item_id) or []
+    if not mappings:
+        return None
+    return sorted(
+        mappings,
+        key=lambda m: (
+            0 if bool(getattr(m, "is_primary", False)) else 1,
+            int(getattr(m, "priority", 100) or 100),
+            -float(getattr(m, "confidence", 0.0) or 0.0),
+        ),
+    )[0]
+
+
+def _variant_stage_titles(estimate_type_id: str | None, project_variant_id: str | None) -> dict[str, str]:
+    if not estimate_type_id or not project_variant_id:
+        return {}
+    try:
+        variant = get_project_variant_definition(str(estimate_type_id), str(project_variant_id))
+    except Exception:  # noqa: BLE001
+        return {}
+    return {
+        str(stage.get("number") or ""): str(stage.get("title") or "").strip()
+        for stage in variant.get("stages") or []
+        if stage.get("number") and stage.get("title")
+    }
+
+
+def _catalog_recommendation_group(
+    *,
+    preferred_stage_number: str,
+    groups: dict[str, dict[str, Any]],
+    stage_by_number: dict[str, dict[str, Any]],
+    stage_title_by_number: dict[str, str],
+) -> dict[str, Any] | None:
+    for group in groups.values():
+        if group.get("work_stage_number") == preferred_stage_number:
+            return group
+    for group in groups.values():
+        if group.get("template_stage_number") == preferred_stage_number:
+            return group
+
+    stage = stage_by_number.get(preferred_stage_number)
+    title = (
+        _stage_title(preferred_stage_number, stage.get("title") if stage else None)
+        if stage
+        else _stage_title(preferred_stage_number, stage_title_by_number.get(preferred_stage_number))
+    )
+    section_key = _stage_section_key(f"{preferred_stage_number}_catalog")
+    if section_key in groups:
+        return groups[section_key]
+    sort_order = float(len(groups) + 1) * 1000.0 + 500.0
+    if stage is not None:
+        try:
+            sort_order = float(stage.get("sort_order") or sort_order)
+        except (TypeError, ValueError):
+            pass
+    group = {
+        "title": title,
+        "sort_order": sort_order,
+        "wt_code": None,
+        "work_section_code": None,
+        "work_section_name": None,
+        "section_key": section_key,
+        "work_stage_number": preferred_stage_number,
+        "template_stage_number": preferred_stage_number,
+        "stage_number": preferred_stage_number,
+        "work_stage_title": stage_title_by_number.get(preferred_stage_number) or (stage.get("title") if stage else None),
+        "canonical_stage_id": stage.get("canonical_stage_id") if stage else None,
+        "stage_options_mode": stage.get("stage_options_mode") if stage else "none",
+        "items": [],
+    }
+    groups[section_key] = group
+    return group
+
+
+def _append_catalog_recommendations(
+    *,
+    groups: dict[str, dict[str, Any]],
+    estimates: list[Estimate],
+    batch: EstimateBatch,
+    stage_by_number: dict[str, dict[str, Any]],
+    diagnostics: dict[str, Any],
+) -> None:
+    catalog_version = getattr(batch, "work_rate_catalog_version", None)
+    if not isinstance(catalog_version, str) or not catalog_version.strip():
+        return
+
+    catalog_path = resolve_config_path(settings.WORK_RATE_CATALOG_PATH)
+    if not catalog_path.exists():
+        return
+
+    try:
+        catalog = _load_work_rate_catalog_cached(str(catalog_path))
+    except Exception as exc:  # noqa: BLE001
+        diagnostics.setdefault("chunk_errors", []).append(
+            {"chunk": "catalog_recommendations/load", "error": str(exc)}
+        )
+        return
+
+    project_variant_id = str(batch.project_variant_id or "")
+    if not project_variant_id:
+        return
+    active_source_ids = {
+        source.id
+        for source in getattr(catalog, "sources", [])
+        if getattr(source, "is_active", True)
+        and isinstance(getattr(source, "metadata_json", None), dict)
+        and str(source.metadata_json.get("variant_id") or "") == project_variant_id
+    }
+    if not active_source_ids:
+        return
+
+    mappings_by_item: dict[str, list[Any]] = {}
+    for mapping in getattr(catalog, "mappings", []):
+        if getattr(mapping, "is_active", True):
+            mappings_by_item.setdefault(str(mapping.rate_item_id), []).append(mapping)
+
+    existing_names: set[str] = set()
+    existing_stage_ops: set[tuple[str | None, str]] = set()
+    existing_stage_options: set[tuple[str | None, str]] = set()
+    for est in estimates:
+        norm = _normalize_work_name(est.work_name)
+        if norm:
+            existing_names.add(norm)
+        raw = est.raw_data if isinstance(est.raw_data, dict) else {}
+        stage_key = (
+            str(getattr(est, "template_stage_number", None) or raw.get("template_stage_number") or "")
+            or str(getattr(est, "work_stage_number", None) or raw.get("work_stage_number") or "")
+            or None
+        )
+        for code in _estimate_operation_codes(est):
+            existing_stage_ops.add((stage_key, code))
+        option_id = str(
+            getattr(est, "stage_option_id", None)
+            or raw.get("semantic_stage_option_id")
+            or raw.get("stage_option_id")
+            or ""
+        ).strip()
+        if option_id:
+            existing_stage_options.add((stage_key, option_id))
+    for group in groups.values():
+        for raw_item in group.get("items") or []:
+            norm = _normalize_work_name(raw_item.get("name"))
+            if norm:
+                existing_names.add(norm)
+
+    stage_title_by_number = _variant_stage_titles(batch.estimate_type_id, batch.project_variant_id)
+    added = diagnostics.setdefault("catalog_recommendations", [])
+    skipped = diagnostics.setdefault("catalog_recommendation_duplicates", [])
+    seen_catalog_names: set[str] = set()
+
+    catalog_items = sorted(
+        (
+            item
+            for item in getattr(catalog, "items", [])
+            if getattr(item, "is_active", True)
+            and getattr(item, "row_role", "work") == "work"
+            and str(getattr(item, "source_id", "")) in active_source_ids
+        ),
+        key=lambda item: (
+            _preferred_catalog_stage_number(item, _primary_catalog_mapping(str(item.id), mappings_by_item)) or "",
+            int(getattr(item, "source_row", 0) or 0),
+            str(getattr(item, "name", "")),
+        ),
+    )
+
+    for item in catalog_items:
+        mapping = _primary_catalog_mapping(str(item.id), mappings_by_item)
+        preferred_stage_number = _preferred_catalog_stage_number(item, mapping)
+        if not preferred_stage_number:
+            continue
+        norm = _normalize_work_name(getattr(item, "name", ""))
+        if not norm or norm in existing_names or norm in seen_catalog_names:
+            skipped.append({"name": getattr(item, "name", ""), "reason": "name_exists"})
+            continue
+        operation_codes = _catalog_item_operation_codes(item, mapping)
+        stage_option_id = _catalog_item_stage_option_id(item, mapping)
+        if (
+            not operation_codes
+            and stage_option_id
+            and (preferred_stage_number, stage_option_id) in existing_stage_options
+        ):
+            skipped.append({"name": item.name, "reason": "stage_option_exists"})
+            continue
+        if operation_codes and any((preferred_stage_number, code) in existing_stage_ops for code in operation_codes):
+            skipped.append({"name": item.name, "reason": "operation_exists"})
+            continue
+        target_group = _catalog_recommendation_group(
+            preferred_stage_number=preferred_stage_number,
+            groups=groups,
+            stage_by_number=stage_by_number,
+            stage_title_by_number=stage_title_by_number,
+        )
+        if target_group is None:
+            continue
+        raw_item = {
+            "name": item.name,
+            "origin": "ai_added",
+            "row_key": None,
+            "review_status": "pending",
+            "ai_reason": "Рекомендовано из загруженного справочника работ",
+            "recommendation_source": CATALOG_RECOMMENDATION_SOURCE,
+            "source_rate_id": getattr(item, "source_rate_id", None),
+            "rate_item_id": item.id,
+            "rate_mapping_id": getattr(mapping, "id", None) if mapping else None,
+            "operation_code": sorted(operation_codes)[0] if operation_codes else None,
+            "semantic_stage_option_id": stage_option_id,
+            "stage_option_source": CATALOG_RECOMMENDATION_SOURCE,
+        }
+        target_group.setdefault("items", []).append(raw_item)
+        existing_names.add(norm)
+        seen_catalog_names.add(norm)
+        for code in operation_codes:
+            existing_stage_ops.add((preferred_stage_number, code))
+        if stage_option_id:
+            existing_stage_options.add((preferred_stage_number, stage_option_id))
+        added.append(
+            {
+                "name": item.name,
+                "preferred_stage_number": preferred_stage_number,
+                "section_key": target_group.get("section_key"),
+                "rate_item_id": item.id,
+            }
+        )
+
+
 def _build_stage_aware_groups(
     estimates: list[Estimate],
     estimate_to_row_key: dict[str, str],
@@ -1300,8 +1586,16 @@ def _build_stage_aware_groups(
             "work_section_name": None,
             "section_key": section_key,
             "work_stage_number": stage_number,
+            "template_stage_number": stage.get("template_stage_number") or stage_number,
+            "stage_number": stage_number,
             "work_stage_title": stage.get("title"),
             "canonical_stage_id": stage.get("canonical_stage_id"),
+            "stage_instance_id": stage.get("stage_instance_id"),
+            "floor_number": stage.get("floor_number"),
+            "floor_kind": stage.get("floor_kind"),
+            "floor_label": stage.get("floor_label"),
+            "floor_component": stage.get("floor_component"),
+            "component_role": stage.get("component_role"),
             "stage_options_mode": stage.get("stage_options_mode") or "none",
             "items": [],
         }
@@ -1363,19 +1657,16 @@ def _build_stage_aware_groups(
             {"name": est.work_name, "origin": "from_estimate", "row_key": row_key}
         )
 
-    result = sorted(groups.values(), key=lambda item: (float(item["sort_order"]), item["section_key"]))
     if fallback_items:
-        result.append(
-            {
-                "title": STAGE_AWARE_FALLBACK_TITLE,
-                "sort_order": float(10**9),
-                "wt_code": None,
-                "work_section_code": None,
-                "work_section_name": None,
-                "section_key": FALLBACK_SECTION_KEY,
-                "items": fallback_items,
-            }
-        )
+        groups[FALLBACK_SECTION_KEY] = {
+            "title": STAGE_AWARE_FALLBACK_TITLE,
+            "sort_order": float(10**9),
+            "wt_code": None,
+            "work_section_code": None,
+            "work_section_name": None,
+            "section_key": FALLBACK_SECTION_KEY,
+            "items": fallback_items,
+        }
         diagnostics["coverage"].append(
             {
                 "kind": "stage_aware_fallback",
@@ -1383,6 +1674,17 @@ def _build_stage_aware_groups(
                 "unknown": [],
             }
         )
+    _append_catalog_recommendations(
+        groups=groups,
+        estimates=estimates,
+        batch=batch,
+        stage_by_number=stage_by_number,
+        diagnostics=diagnostics,
+    )
+    result = sorted(
+        groups.values(),
+        key=lambda item: (float(item["sort_order"]), item["section_key"]),
+    )
     return result
 
 
@@ -2773,6 +3075,24 @@ def _materialize_wbs(
                     "unit": None,
                     "quantity_source": None,
                     "needs_review": False,
+                    "target_stage_instance_id": raw_g.get("stage_instance_id"),
+                    "target_template_stage_number": raw_g.get("template_stage_number")
+                    or raw_g.get("work_stage_number"),
+                    "target_stage_number": raw_g.get("stage_number")
+                    or raw_g.get("work_stage_number"),
+                    "target_stage_title": raw_g.get("work_stage_title")
+                    or raw_g.get("title"),
+                    "target_stage_sort_order": raw_g.get("sort_order"),
+                    "canonical_stage_id": raw_g.get("canonical_stage_id"),
+                    "floor_number": raw_g.get("floor_number"),
+                    "floor_kind": raw_g.get("floor_kind"),
+                    "floor_label": raw_g.get("floor_label"),
+                    "floor_component": raw_g.get("floor_component"),
+                    "component_role": raw_g.get("component_role"),
+                    "operation_code": raw_it.get("operation_code"),
+                    "semantic_stage_option_id": raw_it.get("semantic_stage_option_id"),
+                    "stage_option_source": raw_it.get("stage_option_source"),
+                    "work_scope_key": raw_it.get("source_rate_id") or raw_it.get("rate_item_id"),
                 }]
 
             for projection_index, projection in enumerate(projection_payloads, start=1):
