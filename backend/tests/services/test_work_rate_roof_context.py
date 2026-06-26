@@ -9,6 +9,7 @@ from app.services.work_rate_models import (
     WorkRateSource,
 )
 from app.services.work_rate_selection_service import WorkRateSelectionService
+from app.services.work_taxonomy_service import detect_operation_detailed
 
 
 def test_roof_covering_material_context_filters_equivalent_candidates():
@@ -133,3 +134,88 @@ def test_confirmed_volume_to_area_conversion_enables_rate_selection_and_labor():
         unit_conversion_factor_override=5.0,
     )
     assert totals["labor_avg_total"] == pytest.approx(12.0)
+
+
+def test_operation_detector_prefers_tz_atomic_and_package_rules():
+    variant = "residential_construction_kirpichnye_doma"
+
+    excavation = detect_operation_detailed(
+        "Разработка котлована экскаватором с погрузкой грунта",
+        project_variant_id=variant,
+    )
+    assert excavation.operation_package_code == "excavation_with_loading_package"
+    assert set(excavation.multi_operation_codes) == {"excavation", "soil_loading"}
+
+    formwork = detect_operation_detailed(
+        "Монтаж опалубки монолитной фундаментной плиты",
+        project_variant_id=variant,
+    )
+    assert formwork.operation_code == "formwork_installation"
+
+    rebar = detect_operation_detailed(
+        "Армирование монолитного перекрытия",
+        project_variant_id=variant,
+    )
+    assert rebar.operation_code == "rebar_installation"
+
+    package = detect_operation_detailed(
+        "Устройство монолитного железобетонного перекрытия",
+        project_variant_id=variant,
+    )
+    assert package.operation_package_code == "monolithic_floor_slab_package"
+
+
+def test_insulation_context_filters_material_before_scoring():
+    selector = WorkRateSelectionService()
+    source = WorkRateSource(source_file="catalog.xlsx")
+    mineral = WorkRateItem(
+        source_id=source.id,
+        name="Утепление фасадных стен минераловатными плитами",
+        normalized_name="утепление фасадных стен минераловатными плитами",
+        unit_code="m2",
+        labor_avg=1.0,
+        has_active_mapping=True,
+        auto_applicable=True,
+        row_content_hash="mineral",
+    )
+    xps = WorkRateItem(
+        source_id=source.id,
+        name="Утепление XPS под фундаментной плитой",
+        normalized_name="утепление xps под фундаментной плитой",
+        unit_code="m2",
+        labor_avg=0.5,
+        has_active_mapping=True,
+        auto_applicable=True,
+        row_content_hash="xps",
+    )
+    mappings = [
+        WorkRateMapping(
+            rate_item_id=mineral.id,
+            operation_code="thermal_insulation",
+            taxonomy_code="insulation/facade_wall_insulation",
+            mapping_mode=MAPPING_DIRECT,
+            confidence=0.92,
+        ),
+        WorkRateMapping(
+            rate_item_id=xps.id,
+            operation_code="thermal_insulation",
+            taxonomy_code="insulation/facade_wall_insulation",
+            mapping_mode=MAPPING_DIRECT,
+            confidence=0.92,
+        ),
+    ]
+
+    result = selector.select_rate(
+        taxonomy_code="insulation/facade_wall_insulation",
+        operation_code="thermal_insulation",
+        object_scope_code=None,
+        quantity=50,
+        unit_code="m2",
+        work_name="Утепление наружных кирпичных стен минераловатными плитами",
+        items=[mineral, xps],
+        mappings=mappings,
+        sources=[source],
+    )
+
+    assert result.rate_item_id == mineral.id
+    assert result.review_reason is None

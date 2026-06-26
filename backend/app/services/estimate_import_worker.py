@@ -305,6 +305,12 @@ def _stage10_text_stage_number(text: str, building_params: dict[str, Any]) -> tu
         return "2.7.1", False
     if re.search(r"(обратн\w*\s+отсыпк|засыпк\w*\s+пазух)", text):
         return "2.7.6", False
+    if re.search(r"\bотсечн\w*\s+гидроизоляц\w*", text) and re.search(r"\b(кирпич|стен|цокол|цоколь)\w*", text):
+        return "2.7.3", False
+    if re.search(r"\b(сборн\w*\s+)?железобетонн\w*\s+перемыч", text) and re.search(r"\b(цокол|цоколь|подвал)\w*", text):
+        return "2.7.9", False
+    if re.search(r"\b(кладк\w*\s+)?(?:внутренн\w*\s+)?перегород", text) and re.search(r"\b(цокол|цоколь|подвал)\w*", text):
+        return "2.7.11", False
     if re.search(r"\b(стропил|кровл|пароизоляц|гидроветр|металлочереп|мембран)\w*", text):
         return f"2.7.T{int(building_params.get('floors_count') or 1)}.60", False
     if re.search(r"\b(утеплен|утепл)\w*", text) and re.search(r"(фасад|наружн\w*\s+кирпичн\w*\s+стен)", text):
@@ -454,6 +460,19 @@ def _apply_stage10_text_overrides(rows: list[SimpleNamespace], batch: EstimateBa
                 "stage_option_required_for_autofill",
             }:
                 raw["review_reason"] = None
+            if re.search(r"\b(цокол|цоколь|подвал)\w*", text) and stage_number in {"2.7.9", "2.7.11"}:
+                raw["floor_number"] = 0
+                raw["floor_kind"] = "basement"
+            if stage_number == "2.7.9" and re.search(r"\bперемыч", text):
+                raw["semantic_stage_option_id"] = "precast_reinforced_concrete"
+                raw["stage_option_source"] = "stage10_text_rule"
+            if stage_number == "2.7.11" and re.search(r"\b(газобетон|блок)\w*", text):
+                raw["semantic_stage_option_id"] = "aerated_concrete_block"
+                raw["stage_option_source"] = "stage10_text_rule"
+            if stage_number == "2.7.3" and re.search(r"\bотсечн\w*\s+гидроизоляц\w*", text):
+                raw["semantic_stage_option_id"] = "brick"
+                raw["stage_option_source"] = "stage10_text_rule"
+                raw["operation_code"] = "cutoff_waterproofing_installation"
 
         subtype_code = _stage10_text_subtype_code(text)
         if subtype_code:

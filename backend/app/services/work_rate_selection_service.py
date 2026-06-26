@@ -8,10 +8,15 @@ from typing import Any, Iterable
 
 from app.services.work_context_rules import (
     build_rate_context_text,
+    has_any,
     resolve_masonry_context,
+    resolve_insulation_context,
+    resolve_membrane_context,
     resolve_roof_covering_context,
+    resolve_roof_structure_context,
     resolve_special_masonry_operation,
 )
+from app.services.work_rate_import_service import normalize_name
 from app.services.user_work_rate_override_service import (
     UserWorkRateOverride,
     canonical_applicability_hash,
@@ -83,11 +88,84 @@ class WorkRateSelectionService:
         return 0
 
     @staticmethod
+    def _inferred_item_applicability(item: WorkRateItem, mapping: WorkRateMapping | None = None) -> dict[str, str]:
+        text = normalize_name(" ".join(
+            value
+            for value in (
+                item.name,
+                item.normalized_name,
+                item.notes,
+                item.normalized_notes,
+            )
+            if value
+        ))
+        inferred: dict[str, str] = {}
+        if has_any(text, ("металлочерепиц", "металлическ черепиц")):
+            inferred.setdefault("roof_covering_material", "metal_tile")
+            inferred.setdefault("base_type", "sparse_batten")
+        elif has_any(text, ("гибк черепиц", "битумн черепиц", "мягк черепиц", "мягк кровл")):
+            inferred.setdefault("roof_covering_material", "flexible_shingles")
+            inferred.setdefault("base_type", "solid_deck")
+
+        if has_any(text, ("минват", "минераловат", "каменн ват", "базальтов")):
+            inferred.setdefault("insulation_material", "mineral_wool")
+        elif has_any(text, ("эппс", "xps", "экструдирован")):
+            inferred.setdefault("insulation_material", "xps")
+        elif has_any(text, ("пенополистирол", "ппс", "eps")):
+            inferred.setdefault("insulation_material", "eps")
+        elif has_any(text, ("ппу", "пенополиуретан")):
+            inferred.setdefault("insulation_material", "polyurethane_foam")
+        if has_any(text, ("фасад", "наружн стен", "кирпичн стен")):
+            inferred.setdefault("insulation_location", "facade")
+        elif has_any(text, ("цокол", "фундамент", "подземн стен")):
+            inferred.setdefault("insulation_location", "foundation_wall")
+        elif has_any(text, ("под плит", "под фундаментн", "под ушп")):
+            inferred.setdefault("insulation_location", "under_slab")
+        elif has_any(text, ("кровл", "стропил", "чердак", "мансард")):
+            inferred.setdefault("insulation_location", "roof")
+        elif has_any(text, ("внутренн стен", "изнутри", "со стороны помещения")):
+            inferred.setdefault("insulation_location", "internal_wall")
+
+        if has_any(text, ("лстк", "легк стальн", "тонкостенн")):
+            inferred.setdefault("roof_structure_material", "light_gauge_steel")
+        elif has_any(text, ("дерев", "пиломат", "брус", "дос")):
+            inferred.setdefault("roof_structure_material", "timber")
+        elif has_any(text, ("клеен", "glulam")):
+            inferred.setdefault("roof_structure_material", "glulam")
+
+        has_vapor = has_any(text, ("пароизоляц", "пароизоляцион"))
+        has_wind_waterproof = has_any(text, ("гидроветр", "ветрозащит", "ветро", "диффузион", "мембран"))
+        if has_vapor and has_wind_waterproof:
+            inferred.setdefault("membrane_type", "combined_membrane")
+        elif has_vapor:
+            inferred.setdefault("membrane_type", "vapor_barrier")
+        elif has_wind_waterproof:
+            inferred.setdefault("membrane_type", "wind_waterproof_membrane")
+        if has_any(text, ("со стороны помещения", "внутренн")):
+            inferred.setdefault("installation_position", "interior_side")
+        elif has_any(text, ("кровл", "скатн", "чердак", "мансард", "стропил")):
+            inferred.setdefault("installation_position", "roof_assembly")
+        elif has_any(text, ("наружн", "снаружи")):
+            inferred.setdefault("installation_position", "exterior_side")
+
+        if mapping and mapping.rate_context_code:
+            inferred.setdefault("rate_context_code", mapping.rate_context_code)
+        return inferred
+
+    @classmethod
+    def _item_applicability(cls, item: WorkRateItem, mapping: WorkRateMapping | None = None) -> dict[str, Any]:
+        expected = dict(item.applicability_json or (item.source_payload or {}).get("applicability") or {})
+        for key, value in cls._inferred_item_applicability(item, mapping).items():
+            expected.setdefault(key, value)
+        return expected
+
+    @staticmethod
     def _item_applicability_matches(
         item: WorkRateItem,
         actual: dict[str, Any] | None,
+        expected: dict[str, Any] | None = None,
     ) -> bool:
-        expected = item.applicability_json or (item.source_payload or {}).get("applicability") or {}
+        expected = expected or item.applicability_json or (item.source_payload or {}).get("applicability") or {}
         if not expected:
             return True
         actual = actual or {}
@@ -106,7 +184,15 @@ class WorkRateSelectionService:
                 return False
             if allowed and value is not None and value not in set(allowed):
                 return False
-        for expected_key in ("roof_covering_material", "base_type"):
+        for expected_key in (
+            "roof_covering_material",
+            "base_type",
+            "insulation_location",
+            "insulation_material",
+            "roof_structure_material",
+            "membrane_type",
+            "installation_position",
+        ):
             expected_value = expected.get(expected_key)
             if expected_value in (None, ""):
                 continue
@@ -212,10 +298,24 @@ class WorkRateSelectionService:
                 effective_applicability.setdefault("rate_context_code", roof_context_result.context_code)
             for key, value in (roof_context_result.applicability or {}).items():
                 effective_applicability.setdefault(key, value)
+        elif effective_operation == "thermal_insulation":
+            context_result = resolve_insulation_context(source_context_text)
+            for key, value in (context_result.applicability or {}).items():
+                effective_applicability.setdefault(key, value)
+        elif effective_operation == "roof_structure_installation":
+            context_result = resolve_roof_structure_context(source_context_text)
+            for key, value in (context_result.applicability or {}).items():
+                effective_applicability.setdefault(key, value)
+        elif effective_operation in {"membrane_installation", "wind_membrane_installation"}:
+            context_result = resolve_membrane_context(source_context_text)
+            for key, value in (context_result.applicability or {}).items():
+                effective_applicability.setdefault(key, value)
 
         item_by_id = {item.id: item for item in items if item.is_active}
         source_by_id = {source.id: source for source in sources if source.is_active}
         operation_candidates: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource]] = []
+        rejected_applicability: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource]] = []
+        rejected_stage: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource]] = []
 
         for mapping in mappings:
             if not mapping.is_active:
@@ -240,7 +340,20 @@ class WorkRateSelectionService:
                 continue
             if source.source_kind == SOURCE_OBSERVATION and not item.approved_as_rate:
                 continue
-            if not self._item_applicability_matches(item, effective_applicability):
+            item_applicability = self._item_applicability(item, mapping)
+            stage_keys = ("template_stage_numbers", "semantic_stage_option_ids", "floor_numbers", "floor_kinds")
+            if any(item_applicability.get(key) for key in stage_keys) and not self._item_applicability_matches(
+                item,
+                {
+                    key: effective_applicability.get(key)
+                    for key in ("template_stage_number", "semantic_stage_option_id", "floor_number", "floor_kind")
+                },
+                {key: item_applicability.get(key) for key in stage_keys if item_applicability.get(key)},
+            ):
+                rejected_stage.append((item, mapping, source))
+                continue
+            if not self._item_applicability_matches(item, effective_applicability, item_applicability):
+                rejected_applicability.append((item, mapping, source))
                 continue
             operation_candidates.append((item, mapping, source))
 
@@ -250,6 +363,15 @@ class WorkRateSelectionService:
                 "vent_shaft_masonry": "vent_shaft_masonry_rate_not_available",
                 "facade_cladding": "facade_cladding_rate_not_available",
             }.get(effective_operation, "no_approved_compatible_rate")
+            sub_reason = (
+                "stage_assignment_mismatch"
+                if rejected_stage
+                else "applicability_mismatch"
+                if rejected_applicability
+                else "package_expansion_required"
+                if effective_operation in self.operation_packages
+                else "atomic_rate_missing"
+            )
             return RateSelectionResult(
                 operation_code=effective_operation,
                 suggested_operation_code=suggested_operation,
@@ -258,7 +380,23 @@ class WorkRateSelectionService:
                 unit_code=unit_code,
                 needs_review=True,
                 review_reason=reason,
+                review_sub_reason=sub_reason,
                 rate_auto_applicable=False,
+                candidates=[
+                    {
+                        "rate_item_id": item.id,
+                        "rate_mapping_id": mapping.id,
+                        "source_rate_id": item.source_rate_id,
+                        "name": item.name,
+                        "unit_code": item.unit_code,
+                        "norm_base_quantity": item.norm_base_quantity,
+                        "rate_context_code": mapping.rate_context_code,
+                        "labor_avg": item.labor_avg,
+                        "rejected_reason": sub_reason,
+                        "applicability": self._item_applicability(item, mapping),
+                    }
+                    for item, mapping, _source in [*rejected_stage, *rejected_applicability][:10]
+                ],
             )
 
         compatible: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource, float]] = []
@@ -278,6 +416,7 @@ class WorkRateSelectionService:
                 unit_code=unit_code,
                 needs_review=True,
                 review_reason="unit_incompatible",
+                review_sub_reason="quantity_conversion_required",
                 rate_auto_applicable=False,
                 candidates=[
                     {
@@ -484,6 +623,7 @@ class WorkRateSelectionService:
                 resolution_status=item.resolution_status,
                 needs_review=True,
                 review_reason="provisional_rate_requires_approval",
+                review_sub_reason="only_provisional_rate_available",
                 candidates=[{
                     "rate_item_id": r[2].id, "rate_mapping_id": r[3].id,
                     "source_rate_id": r[2].source_rate_id, "name": r[2].name,
@@ -509,6 +649,7 @@ class WorkRateSelectionService:
                 unit_code=unit_code,
                 needs_review=True,
                 review_reason=reason,
+                review_sub_reason="package_expansion_required" if effective_operation in self.operation_packages else "atomic_rate_missing",
                 rate_auto_applicable=False,
             )
 

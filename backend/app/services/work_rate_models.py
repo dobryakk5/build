@@ -237,6 +237,7 @@ class RateSelectionResult:
     applicability_json: dict[str, Any] = field(default_factory=dict)
     needs_review: bool = False
     review_reason: str | None = None
+    review_sub_reason: str | None = None
     candidates: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:

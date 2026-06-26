@@ -950,6 +950,8 @@ export const ktpEstimate = {
       crew_size: number | null;
       lag_after_days: number;
       rate_unit_conversion: KtpSessionSubtype["rate_unit_conversion"] | null;
+      selected_rate_item_id: string | null;
+      selected_rate_mapping_id: string | null;
     }>,
   ) =>
     request<KtpWbs>(

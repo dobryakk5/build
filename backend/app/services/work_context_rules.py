@@ -139,3 +139,87 @@ def resolve_roof_covering_context(text: str) -> MasonryContextResult:
             },
         )
     return MasonryContextResult(None, True, "roof_covering_material_not_resolved")
+
+
+def resolve_insulation_context(text: str) -> MasonryContextResult:
+    """Resolve insulation location/material dimensions before scoring."""
+    normalized = normalize_name(text)
+    applicability: dict[str, str] = {}
+    if has_any(normalized, ("минват", "минераловат", "каменн ват", "базальтов")):
+        applicability["insulation_material"] = "mineral_wool"
+    elif has_any(normalized, ("эппс", "xps", "экструдирован")):
+        applicability["insulation_material"] = "xps"
+    elif has_any(normalized, ("пенополистирол", "ппс", "eps")):
+        applicability["insulation_material"] = "eps"
+    elif has_any(normalized, ("ппу", "пенополиуретан")):
+        applicability["insulation_material"] = "polyurethane_foam"
+
+    if has_any(normalized, ("фасад", "наружн", "кирпичн стен")):
+        applicability["insulation_location"] = "facade"
+    elif has_any(normalized, ("цокол", "фундамент", "подземн стен")):
+        applicability["insulation_location"] = "foundation_wall"
+    elif has_any(normalized, ("под плит", "под фундаментн", "под ушп")):
+        applicability["insulation_location"] = "under_slab"
+    elif has_any(normalized, ("кровл", "стропил", "чердак", "мансард")):
+        applicability["insulation_location"] = "roof"
+    elif has_any(normalized, ("внутренн стен", "изнутри", "со стороны помещения")):
+        applicability["insulation_location"] = "internal_wall"
+
+    return MasonryContextResult(
+        "_".join(
+            value
+            for value in (
+                applicability.get("insulation_location"),
+                applicability.get("insulation_material"),
+            )
+            if value
+        ) or None,
+        applicability=applicability or None,
+    )
+
+
+def resolve_roof_structure_context(text: str) -> MasonryContextResult:
+    normalized = normalize_name(text)
+    if has_any(normalized, ("лстк", "легк стальн", "тонкостенн")):
+        return MasonryContextResult(
+            "light_gauge_steel",
+            applicability={"roof_structure_material": "light_gauge_steel"},
+        )
+    if has_any(normalized, ("дерев", "пиломат", "брус", "дос")):
+        return MasonryContextResult(
+            "timber",
+            applicability={"roof_structure_material": "timber"},
+        )
+    if has_any(normalized, ("клеен", "glulam")):
+        return MasonryContextResult(
+            "glulam",
+            applicability={"roof_structure_material": "glulam"},
+        )
+    return MasonryContextResult(None, True, "roof_structure_material_not_resolved")
+
+
+def resolve_membrane_context(text: str) -> MasonryContextResult:
+    normalized = normalize_name(text)
+    has_vapor = has_any(normalized, ("пароизоляц", "пароизоляцион"))
+    has_wind_waterproof = has_any(normalized, ("гидроветр", "ветрозащит", "ветро", "диффузион", "мембран"))
+    applicability: dict[str, str] = {}
+    if has_vapor and has_wind_waterproof:
+        applicability["membrane_type"] = "combined_membrane"
+    elif has_vapor:
+        applicability["membrane_type"] = "vapor_barrier"
+    elif has_wind_waterproof:
+        applicability["membrane_type"] = "wind_waterproof_membrane"
+
+    if has_any(normalized, ("со стороны помещения", "внутренн")):
+        applicability["installation_position"] = "interior_side"
+    elif has_any(normalized, ("кровл", "скатн", "чердак", "мансард", "стропил")):
+        applicability["installation_position"] = "roof_assembly"
+    elif has_any(normalized, ("наружн", "снаружи")):
+        applicability["installation_position"] = "exterior_side"
+
+    return MasonryContextResult(
+        applicability.get("membrane_type"),
+        needs_review=not bool(applicability),
+        review_reason=None if applicability else "membrane_type_not_resolved",
+        applicability=applicability or None,
+    )

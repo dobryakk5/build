@@ -3983,6 +3983,50 @@ def _confirmed_rate_unit_conversion(
     return result
 
 
+def _suggest_rate_unit_conversion(
+    *,
+    text: str | None,
+    source_quantity: float | None,
+    source_unit: str | None,
+    target_unit: str | None,
+    operation_code: str | None,
+) -> dict[str, Any] | None:
+    if not text or not source_quantity or source_quantity <= 0 or not source_unit or not target_unit:
+        return None
+    normalized = text.lower().replace("ё", "е")
+    if source_unit == "m2" and target_unit == "m3" and operation_code in {"block_masonry", "brick_masonry"}:
+        match = re.search(r"\b(\d{2,3}(?:[,.]\d+)?)\s*мм\b", normalized)
+        if not match:
+            return {
+                "conversion_status": "requires_user_input",
+                "conversion_method": "area_to_volume_by_thickness",
+                "input_quantity": source_quantity,
+                "source_quantity": source_quantity,
+                "input_unit": source_unit,
+                "source_unit": source_unit,
+                "target_unit": target_unit,
+                "parameters": {},
+                "formula_version": "1",
+            }
+        thickness_m = float(match.group(1).replace(",", ".")) / 1000.0
+        factor = thickness_m
+        derived_quantity = source_quantity * factor
+        return {
+            "conversion_status": "requires_confirmation",
+            "conversion_method": "area_to_volume_by_thickness",
+            "input_quantity": source_quantity,
+            "source_quantity": source_quantity,
+            "input_unit": source_unit,
+            "source_unit": source_unit,
+            "target_unit": target_unit,
+            "parameters": {"thickness_m": round(thickness_m, 6)},
+            "formula_version": "1",
+            "conversion_factor": round(factor, 6),
+            "derived_quantity": round(derived_quantity, 6),
+        }
+    return None
+
+
 @lru_cache(maxsize=4)
 def _load_work_rate_catalog_cached(path_text: str):
     from app.services.work_rate_catalog_service import WorkRateCatalog
@@ -3992,9 +4036,11 @@ def _load_work_rate_catalog_cached(path_text: str):
 
 @lru_cache(maxsize=1)
 def _work_rate_operation_packages() -> dict[str, Any]:
-    from app.services.work_taxonomy_service import _load_dictionary
+    from app.services.work_taxonomy_service import _load_dictionary, _tz_operation_package_additions
 
-    return dict((_load_dictionary().get("operation_object_resolution_policy") or {}).get("operation_packages") or {})
+    packages = dict((_load_dictionary().get("operation_object_resolution_policy") or {}).get("operation_packages") or {})
+    packages.update(_tz_operation_package_additions())
+    return packages
 
 
 async def _attach_session_subtype_rate_projection(
@@ -4044,6 +4090,8 @@ async def _attach_session_subtype_rate_projection(
     source_by_id = {source.id: source for source in catalog.sources if source.is_active}
 
     for row in rows:
+        operator_selected_rate_item_id = row.selected_rate_item_id if row.output_source == "manual" else None
+        operator_selected_rate_mapping_id = row.selected_rate_mapping_id if row.output_source == "manual" else None
         if row.crew_size is None and batch_crew is not None:
             row.crew_size = batch_crew
             row.crew_source = "estimate"
@@ -4077,6 +4125,7 @@ async def _attach_session_subtype_rate_projection(
         )
         detected_operations: list[str] = []
 
+        operation_sub_reason: str | None = None
         if not operation_code and item:
             detected = detect_operation_detailed(
                 item.name,
@@ -4086,6 +4135,7 @@ async def _attach_session_subtype_rate_projection(
                 unit_code=unit_code,
             )
             operation_code = detected.operation_code
+            operation_sub_reason = detected.reason
             detected_operations = [
                 code
                 for code in [
@@ -4099,13 +4149,29 @@ async def _attach_session_subtype_rate_projection(
             detected_operations = [operation_code]
 
         if not taxonomy_code or taxonomy_code == UNKNOWN_SUBTYPE_CODE or not operation_code:
-            _clear_rate_projection(row, "taxonomy_or_operation_missing")
+            reason = "operation_resolution_failed"
+            sub_reason = (
+                "operation_mapping_missing"
+                if not operation_code
+                else "taxonomy_mapping_missing"
+            )
+            if operation_sub_reason in {
+                "multi_operation_row_requires_package_or_split",
+                "work_operation_ambiguous",
+            }:
+                sub_reason = (
+                    "multi_operation_row_requires_package_or_split"
+                    if operation_sub_reason == "multi_operation_row_requires_package_or_split"
+                    else "ambiguous_atomic_operations"
+                )
+            _clear_rate_projection(row, reason)
             row.item_unit_code = unit_code
             row.rate_trace = {
                 "source_row_text": item.name if item else row.subtype_name,
                 "detected_operations": detected_operations,
                 "rate_candidates": [],
-                "selection_result": "taxonomy_or_operation_missing",
+                "selection_result": reason,
+                "selection_sub_reason": sub_reason,
             }
             continue
 
@@ -4154,6 +4220,17 @@ async def _attach_session_subtype_rate_projection(
         )
         if conversion_factor is None and confirmed_conversion and selection.unit_code == confirmed_conversion["target_unit"]:
             conversion_factor = confirmed_conversion["conversion_factor"]
+        suggested_conversion = (
+            _suggest_rate_unit_conversion(
+                text=" ".join(str(part or "") for part in (item.name if item else None, raw.get("item_text"), raw.get("spec"))),
+                source_quantity=quantity,
+                source_unit=unit_code,
+                target_unit=selection.unit_code,
+                operation_code=selection.operation_code or operation_code,
+            )
+            if selection.review_reason == "unit_incompatible"
+            else None
+        )
         calculation = (
             WorkRateSelectionService.calculate_labor(
                 quantity=quantity,
@@ -4233,8 +4310,8 @@ async def _attach_session_subtype_rate_projection(
         resolved_labor_hours = catalog_total if selection.rate_auto_applicable else None
         resolved_labor_source = "catalog_independent" if resolved_labor_hours else None
 
-        row.selected_rate_item_id = selection.rate_item_id
-        row.selected_rate_mapping_id = selection.rate_mapping_id
+        row.selected_rate_item_id = operator_selected_rate_item_id or selection.rate_item_id
+        row.selected_rate_mapping_id = operator_selected_rate_mapping_id or selection.rate_mapping_id
         row.rate_unit_code = selection.unit_code
         row.item_unit_code = unit_code
         row.unit_conversion_factor = conversion_factor
@@ -4265,9 +4342,16 @@ async def _attach_session_subtype_rate_projection(
             "detected_operations": detected_operations,
             "rate_candidates": trace_candidates,
             "selection_result": selection.review_reason or ("auto_applicable" if selection.rate_auto_applicable else None),
-            "rate_unit_conversion": confirmed_conversion or getattr(row, "rate_unit_conversion", None),
+            "selection_sub_reason": selection.review_sub_reason,
+            "rate_unit_conversion": confirmed_conversion or getattr(row, "rate_unit_conversion", None) or suggested_conversion,
             "conversion_required": selection.review_reason == "unit_incompatible",
         }
+        if operator_selected_rate_item_id or operator_selected_rate_mapping_id:
+            row.rate_trace["operator_selection"] = {
+                "selected_rate_item_id": operator_selected_rate_item_id,
+                "selected_rate_mapping_id": operator_selected_rate_mapping_id,
+                "output_per_day": row.output_per_day,
+            }
 
         if (
             selection.rate_auto_applicable
@@ -4453,6 +4537,20 @@ async def update_session_subtype(
             raise ValueError("Производительность должна быть больше нуля")
         row.output_per_day = float(v) if v is not None else None
         row.output_source = "manual"
+        if "selected_rate_item_id" in patch:
+            row.selected_rate_item_id = str(patch["selected_rate_item_id"] or "").strip() or None
+        if "selected_rate_mapping_id" in patch:
+            row.selected_rate_mapping_id = str(patch["selected_rate_mapping_id"] or "").strip() or None
+        if row.selected_rate_item_id or row.selected_rate_mapping_id:
+            trace = row.rate_trace if isinstance(row.rate_trace, dict) else {}
+            trace["operator_selection"] = {
+                "selected_rate_item_id": row.selected_rate_item_id,
+                "selected_rate_mapping_id": row.selected_rate_mapping_id,
+                "output_per_day": row.output_per_day,
+                "confirmed_by_user_id": user_id,
+                "confirmed_at": _now().isoformat(),
+            }
+            row.rate_trace = trace
         if row.output_per_day is not None and row.item_id:
             item = await db.get(KtpWbsItem, row.item_id)
             if item and (item.operator_review_required or item.work_type_needs_review):

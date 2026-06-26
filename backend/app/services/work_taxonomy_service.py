@@ -2642,6 +2642,69 @@ def _operation_resolution_policy(payload: dict[str, Any] | None = None) -> dict[
     return policy if isinstance(policy, dict) else {}
 
 
+def _tz_operation_package_additions() -> dict[str, dict[str, Any]]:
+    return {
+        "excavation_with_loading_package": {
+            "code": "excavation_with_loading_package",
+            "kind": "package",
+            "included_operations": ["excavation", "soil_loading"],
+            "component_units": {"excavation": "m3", "soil_loading": "m3"},
+        },
+        "monolithic_floor_slab_package": {
+            "code": "monolithic_floor_slab_package",
+            "kind": "package",
+            "included_operations": [
+                "formwork_installation",
+                "rebar_installation",
+                "concrete_placement",
+                "concrete_curing",
+                "formwork_stripping",
+            ],
+            "component_units": {
+                "formwork_installation": "m2",
+                "rebar_installation": "t",
+                "concrete_placement": "m3",
+                "concrete_curing": "m2",
+                "formwork_stripping": "m2",
+            },
+        },
+        "monolithic_lintel_package": {
+            "code": "monolithic_lintel_package",
+            "kind": "package",
+            "included_operations": [
+                "formwork_installation",
+                "rebar_installation",
+                "concrete_placement",
+                "formwork_stripping",
+            ],
+            "component_units": {
+                "formwork_installation": "m2",
+                "rebar_installation": "t",
+                "concrete_placement": "m3",
+                "formwork_stripping": "m2",
+            },
+        },
+        "mauerlat_installation_package": {
+            "code": "mauerlat_installation_package",
+            "kind": "package",
+            "included_operations": ["mauerlat_installation", "antiseptic_treatment"],
+            "component_units": {"mauerlat_installation": "m", "antiseptic_treatment": "m3"},
+        },
+        "basement_wall_protection_package": {
+            "code": "basement_wall_protection_package",
+            "kind": "package",
+            "included_operations": [
+                "foundation_wall_waterproofing",
+                "foundation_wall_thermal_insulation",
+            ],
+            "component_units": {
+                "foundation_wall_waterproofing": "m2",
+                "foundation_wall_thermal_insulation": "m2",
+            },
+        },
+    }
+
+
 @lru_cache(maxsize=16)
 def _variant_operation_alias_catalog(project_variant_id: str) -> dict[str, Any]:
     payload = _load_dictionary()
@@ -2663,7 +2726,8 @@ def _variant_operation_alias_catalog(project_variant_id: str) -> dict[str, Any]:
 
     registry = variant.get("operation_registry") or {}
     operations = registry.get("operations") or {}
-    packages = registry.get("operation_packages") or {}
+    packages = dict(registry.get("operation_packages") or {})
+    packages.update(_tz_operation_package_additions())
     alias_catalog = variant.get("classification_catalog") or {}
     stages = variant.get("stages") or []
 
@@ -2924,6 +2988,178 @@ def _find_covering_package(
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _rule_operation_result(
+    *,
+    code: str | None,
+    kind: str,
+    score: float,
+    matched_term: str,
+    reason: str,
+    needs_review: bool = False,
+    target_codes: tuple[str, ...] = (),
+    preferred_stage_number: str | None = None,
+) -> OperationDetectionResult:
+    candidate = OperationDetectionCandidate(
+        code=code,
+        kind=kind,
+        score=score,
+        matched_terms=(matched_term,),
+        source="tz_rate_resolution_rule",
+        stage_numbers=(preferred_stage_number,) if preferred_stage_number else (),
+        target_codes=target_codes,
+        exact=True,
+        context_gate_matched=True,
+    )
+    return OperationDetectionResult(
+        operation_code=code if kind != "multi_operation" else None,
+        operation_package_code=code if kind == "package" else None,
+        confidence_score=score,
+        matched_terms=(matched_term,),
+        candidates=(candidate,),
+        needs_review=needs_review,
+        reason=reason,
+        preferred_stage_number=preferred_stage_number,
+        multi_operation_codes=target_codes,
+    )
+
+
+def _tz_operation_detection_override(item_text: str, haystack: str) -> OperationDetectionResult | None:
+    """Address known operation-resolution failures from TZ_rate_resolution_fixes.md."""
+    if not haystack:
+        return None
+
+    has_conjunction = bool(re.search(r"(?:,|;|\+|\s/\s|\bи\b)", haystack))
+    if (
+        has_conjunction
+        and "мауэрлат" in haystack
+        and re.search(r"\bмонтаж\w*", haystack)
+        and re.search(r"\bантисепт\w*", haystack)
+    ):
+        return _rule_operation_result(
+            code="mauerlat_installation_package",
+            kind="package",
+            score=0.995,
+            matched_term=item_text,
+            reason="operation_package_match",
+            target_codes=("mauerlat_installation", "antiseptic_treatment"),
+        )
+    if (
+        has_conjunction
+        and re.search(r"\bгидроизоляц\w*", haystack)
+        and re.search(r"\bутепл\w*", haystack)
+        and re.search(r"\b(цокол|цоколь|фундамент|наружн\w*\s+стен)\w*", haystack)
+    ):
+        return _rule_operation_result(
+            code="basement_wall_protection_package",
+            kind="package",
+            score=0.995,
+            matched_term=item_text,
+            reason="operation_package_match",
+            target_codes=("foundation_wall_waterproofing", "foundation_wall_thermal_insulation"),
+        )
+    if (
+        re.search(r"\b(котлован|транше)\w*", haystack)
+        and re.search(r"\b(погрузк|вывоз)\w*", haystack)
+        and re.search(r"\b(грунт|разработк|выемк)\w*", haystack)
+    ):
+        return _rule_operation_result(
+            code="excavation_with_loading_package",
+            kind="package",
+            score=0.995,
+            matched_term=item_text,
+            reason="operation_package_match",
+            target_codes=("excavation", "soil_loading"),
+        )
+    if re.search(r"\b(монтаж|устройств|установк)\w*\s+опалубк\w*", haystack):
+        return _rule_operation_result(
+            code="formwork_installation",
+            kind="atomic",
+            score=0.99,
+            matched_term=item_text,
+            reason="variant_operation_alias_match",
+        )
+    if re.search(r"\bустройств\w*\s+монолитн\w*\s+(?:железобетонн\w*\s+)?перекрыт\w*", haystack):
+        return _rule_operation_result(
+            code="monolithic_floor_slab_package",
+            kind="package",
+            score=0.985,
+            matched_term=item_text,
+            reason="operation_package_match",
+            target_codes=(
+                "formwork_installation",
+                "rebar_installation",
+                "concrete_placement",
+                "concrete_curing",
+                "formwork_stripping",
+            ),
+        )
+    if re.search(r"\bустройств\w*\s+монолитн\w*\s+(?:железобетонн\w*\s+|жб\s+)?перемыч", haystack):
+        return _rule_operation_result(
+            code="monolithic_lintel_package",
+            kind="package",
+            score=0.985,
+            matched_term=item_text,
+            reason="operation_package_match",
+            target_codes=(
+                "formwork_installation",
+                "rebar_installation",
+                "concrete_placement",
+                "formwork_stripping",
+            ),
+        )
+    if re.search(r"\bпесчан\w*\s+подготовк\w*", haystack):
+        return _rule_operation_result(
+            code="sand_base_installation",
+            kind="atomic",
+            score=0.99,
+            matched_term=item_text,
+            reason="variant_operation_alias_match",
+        )
+    if re.search(r"\bармирован\w*", haystack):
+        return _rule_operation_result(
+            code="rebar_installation",
+            kind="atomic",
+            score=0.99,
+            matched_term=item_text,
+            reason="variant_operation_alias_match",
+        )
+    if re.search(r"\bбетонирован\w*", haystack):
+        return _rule_operation_result(
+            code="concrete_placement",
+            kind="atomic",
+            score=0.99,
+            matched_term=item_text,
+            reason="variant_operation_alias_match",
+        )
+    if re.search(r"\bраспалубк\w*", haystack):
+        return _rule_operation_result(
+            code="formwork_stripping",
+            kind="atomic",
+            score=0.99,
+            matched_term=item_text,
+            reason="variant_operation_alias_match",
+        )
+    if re.search(r"\bантисепт\w*", haystack):
+        return _rule_operation_result(
+            code="antiseptic_treatment",
+            kind="atomic",
+            score=0.99,
+            matched_term=item_text,
+            reason="variant_operation_alias_match",
+        )
+    if (
+        re.search(r"\b(утепленн\w*\s+шведск\w*\s+плит|ушп|тепл\w*\s+пол|ребр\w*\s+жесткост|инженерн\w*\s+выпуск)\w*", haystack)
+    ):
+        return _rule_operation_result(
+            code="foundation_usp_complete",
+            kind="package",
+            score=0.99,
+            matched_term=item_text,
+            reason="operation_package_match",
+        )
+    return None
+
+
 def _legacy_operation_detection(item_text: str, payload: dict[str, Any]) -> OperationDetectionResult:
     policy = _operation_resolution_policy(payload)
     haystack = normalize_text(item_text or "")
@@ -2982,6 +3218,9 @@ def detect_operation_detailed(
     tokens = item_haystack.split()
     if not item_haystack:
         return OperationDetectionResult(None, None, None, ())
+    override = _tz_operation_detection_override(item_text or "", item_haystack)
+    if override is not None:
+        return override
 
     policy = catalog.get("alias_policy") or {}
     exact_bonus = float(policy.get("exact_phrase_bonus", 0.07))

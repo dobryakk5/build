@@ -425,6 +425,8 @@ class SessionSubtypePatch(BaseModel):
     crew_size: int | None = None
     lag_after_days: int | None = None
     rate_unit_conversion: dict | None = None
+    selected_rate_item_id: str | None = None
+    selected_rate_mapping_id: str | None = None
 
 
 def _value_error(exc: ValueError) -> HTTPException:

@@ -1859,6 +1859,7 @@ const RATE_REVIEW_REASON_LABELS: Record<string, string> = {
   package_conflict: "конфликт пакетной расценки",
   package_conflict_unresolved: "конфликт пакетной и атомарных расценок",
   taxonomy_or_operation_missing: "нет таксономии или операции",
+  operation_resolution_failed: "не удалось определить операцию",
   rate_not_approved: "расценка не утверждена",
   catalog_labor_not_available: "нет каталожной трудоёмкости",
   provisional_rate_requires_approval: "расценка требует утверждения",
@@ -1888,10 +1889,14 @@ function acceptedCatalogOutput(row: KtpSessionSubtype): number | null {
 function rateTraceTitle(row: KtpSessionSubtype): string {
   const trace = row.rate_trace;
   const first = trace?.rate_candidates?.[0];
+  const candidateCount = trace?.rate_candidates?.length || 0;
   const lines = [
     `Результат: ${rateReviewLabel(row.rate_review_reason)}`,
+    typeof trace?.selection_sub_reason === "string" ? `Подпричина: ${trace.selection_sub_reason}` : null,
+    rateIssueDifficulty(row),
     trace?.source_row_text ? `Строка: ${trace.source_row_text}` : null,
     trace?.detected_operations?.length ? `Операции: ${trace.detected_operations.join(", ")}` : null,
+    candidateCount ? `Кандидатов ставок: ${candidateCount}` : null,
     first?.rate_context_code ? `Контекст: ${first.rate_context_code}` : null,
     first?.source_file ? `Источник: ${first.source_file}` : null,
     first?.source_rate_id ? `ID нормы: ${first.source_rate_id}` : null,
@@ -1901,6 +1906,28 @@ function rateTraceTitle(row: KtpSessionSubtype): string {
     first?.target_kind === "multi_operation" ? "Проверьте декомпозицию: исходная норма относится к нескольким операциям." : null,
   ].filter(Boolean);
   return lines.join("\n");
+}
+
+function rateIssueDifficulty(row: KtpSessionSubtype): string {
+  const reason = row.rate_review_reason;
+  const trace = row.rate_trace;
+  const candidateCount = trace?.rate_candidates?.length || 0;
+  if (reason === "multiple_equivalent_rate_candidates") {
+    return `Трудность: найдено ${candidateCount} равнозначных ставок, нужен выбор оператора.`;
+  }
+  if (reason === "unit_incompatible") {
+    return "Трудность: норма найдена, но единицы разных измерений; нужен параметр, точный объём или коэффициент.";
+  }
+  if (reason === "taxonomy_or_operation_missing" || reason === "operation_resolution_failed") {
+    return "Трудность: строка не сведена к одной операции; нужна корректировка mapping или разбиение на операции.";
+  }
+  if (reason === "no_approved_compatible_rate") {
+    return "Трудность: утверждённой auto-ставки нет; нужна ставка, package-разложение или подтверждение provisional нормы.";
+  }
+  if (reason === "provisional_rate_requires_approval") {
+    return "Трудность: норма есть, но источник требует ручного подтверждения.";
+  }
+  return "Трудность: требуется проверка оператора.";
 }
 
 function unitLabel(code: string | null | undefined): string {
@@ -1931,9 +1958,55 @@ function firstNumericRateCandidate(row: KtpSessionSubtype) {
   return row.rate_trace?.rate_candidates?.find((candidate) => typeof candidate.normalized_value === "number") || null;
 }
 
+function equivalentRateCandidates(row: KtpSessionSubtype): RateTraceCandidate[] {
+  if (row.rate_review_reason !== "multiple_equivalent_rate_candidates") return [];
+  const sourceUnit = row.item_unit_code || null;
+  return (row.rate_trace?.rate_candidates || [])
+    .filter((candidate) => {
+      const targetUnit = candidateUnitCode(candidate);
+      return typeof candidate.normalized_value === "number" && (!sourceUnit || !targetUnit || sourceUnit === targetUnit);
+    })
+    .slice(0, 3);
+}
+
+function outputFromCandidate(row: KtpSessionSubtype, candidate: RateTraceCandidate): number | null {
+  const labor = candidate.normalized_value;
+  const crew = row.crew_size;
+  if (typeof labor !== "number" || labor <= 0 || !crew || crew <= 0) return null;
+  return Math.round((crew * 8 / labor) * 10000) / 10000;
+}
+
 function fmtNumber(value: number | null | undefined, digits = 4): string {
   if (value == null || !Number.isFinite(value)) return "—";
   return String(Math.round(value * 10 ** digits) / 10 ** digits).replace(".", ",");
+}
+
+function workDaysInfo(row: KtpSessionSubtype): { days: number | null; title: string } {
+  const volume = row.volume;
+  const output = row.output_per_day;
+  const labor = row.session_calculated_labor_hours_avg;
+  const crew = row.crew_size;
+  const lines: string[] = [];
+  let exactDays: number | null = null;
+
+  if (volume && volume > 0 && output && output > 0) {
+    exactDays = volume / output;
+    lines.push(`${fmtNumber(volume)} ${row.unit || "ед."} / ${fmtNumber(output)} ${row.unit || "ед."}/день = ${fmtNumber(exactDays)} дн.`);
+  }
+
+  if (labor && labor > 0 && crew && crew > 0) {
+    const laborDays = labor / (crew * 8);
+    if (exactDays == null) exactDays = laborDays;
+    lines.push(`${fmtNumber(labor)} чел-ч / (${crew} чел × 8 ч) = ${fmtNumber(laborDays)} дн.`);
+  }
+
+  if (exactDays == null || exactDays <= 0) {
+    return { days: null, title: "Нужны объём и производительность либо трудоёмкость и бригада" };
+  }
+
+  const days = Math.max(1, Math.ceil(exactDays));
+  lines.push(`Округление вверх: ${days} дн.`);
+  return { days, title: lines.join("\n") };
 }
 
 function StageProductivity({
@@ -2045,6 +2118,8 @@ function StageProductivity({
       crew_size: number | null;
       lag_after_days: number;
       rate_unit_conversion: KtpSessionSubtype["rate_unit_conversion"] | null;
+      selected_rate_item_id: string | null;
+      selected_rate_mapping_id: string | null;
     }>,
   ) {
     setBusy(true);
@@ -2076,7 +2151,7 @@ function StageProductivity({
   async function applyRateUnitConversion(
     row: KtpSessionSubtype,
     candidate: RateTraceCandidate,
-    method: "volume_to_area_by_thickness" | "exact_target_quantity" | "manual_coefficient",
+    method: "volume_to_area_by_thickness" | "area_to_volume_by_thickness" | "exact_target_quantity" | "manual_coefficient",
   ) {
     const sourceQuantity = row.volume;
     const sourceUnit = row.item_unit_code || row.unit || null;
@@ -2088,10 +2163,12 @@ function StageProductivity({
     let derivedQuantity: number | null = null;
     let parameters: Record<string, number> = {};
 
-    if (method === "volume_to_area_by_thickness") {
-      const thickness = parseDraftNumber(draft.thickness);
+    if (method === "volume_to_area_by_thickness" || method === "area_to_volume_by_thickness") {
+      const suggestedConversion = row.rate_trace?.rate_unit_conversion as any;
+      const suggestedThickness = Number(suggestedConversion?.parameters?.thickness_m);
+      const thickness = parseDraftNumber(draft.thickness) || (Number.isFinite(suggestedThickness) && suggestedThickness > 0 ? suggestedThickness : null);
       if (!thickness) return;
-      factor = 1 / thickness;
+      factor = method === "volume_to_area_by_thickness" ? 1 / thickness : thickness;
       derivedQuantity = sourceQuantity * factor;
       parameters = { thickness_m: thickness };
     } else if (method === "exact_target_quantity") {
@@ -2219,7 +2296,7 @@ function StageProductivity({
     <div>
       <Header
         title="Производительность работ"
-        hint="Для каждого вида работ задайте объём, производительность бригады за смену, размер бригады и технологическую паузу после. Длительность считается как объём ÷ производительность."
+        hint="Для каждого вида работ задайте объём, производительность бригады за смену и размер бригады. Колонка дней считается для 8-часового рабочего дня."
         right={
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
             <button type="button" style={buttonStyle("ghost", busy)} disabled={busy} onClick={() => void rebuild()}>
@@ -2269,7 +2346,7 @@ function StageProductivity({
             <div>Объём{`, `}ед.</div>
             <div>Произв./смену</div>
             <div>Бригада</div>
-            <div>Пауза, дн.</div>
+            <div>Дней</div>
           </div>
           {groupedSubtypes.map((group) => (
             <div key={group.key}>
@@ -2313,9 +2390,11 @@ function StageProductivity({
                 );
                 const catalogWarning = s.rate_auto_applicable === false ? rateReviewLabel(s.rate_review_reason) : null;
                 const isProvisionalRate = s.rate_review_reason === "provisional_rate_requires_approval";
-                const provisionalConfirmed = isProvisionalRate && s.output_source === "manual" && s.output_per_day != null;
+                const operatorRateConfirmed = s.output_source === "manual" && Boolean(s.selected_rate_item_id) && s.output_per_day != null;
+                const provisionalConfirmed = isProvisionalRate && operatorRateConfirmed;
                 const provisionalOutput = isProvisionalRate ? acceptedCatalogOutput(s) : null;
                 const traceTitle = s.rate_trace ? rateTraceTitle(s) : undefined;
+                const equivalentCandidates = equivalentRateCandidates(s);
                 const numericCandidate = firstNumericRateCandidate(s);
                 const targetUnitCode = candidateUnitCode(numericCandidate);
                 const sourceUnitCode = s.item_unit_code || null;
@@ -2327,13 +2406,22 @@ function StageProductivity({
                   Boolean(targetUnitCode) &&
                   sourceUnitCode !== targetUnitCode;
                 const conversionDraft = conversionDrafts[s.id] || {};
-                const thickness = parseDraftNumber(conversionDraft.thickness);
+                const suggestedConversion = s.rate_trace?.rate_unit_conversion as any;
+                const suggestedThickness = Number(suggestedConversion?.parameters?.thickness_m);
+                const defaultThickness = Number.isFinite(suggestedThickness) && suggestedThickness > 0 ? suggestedThickness : null;
+                const thickness = parseDraftNumber(conversionDraft.thickness) || defaultThickness;
                 const exactTargetQuantity = parseDraftNumber(conversionDraft.exact);
                 const manualCoefficient = parseDraftNumber(conversionDraft.coefficient);
-                const thicknessFactor = thickness ? 1 / thickness : null;
+                const thicknessFactor =
+                  thickness && sourceUnitCode === "m3" && targetUnitCode === "m2"
+                    ? 1 / thickness
+                    : thickness && sourceUnitCode === "m2" && targetUnitCode === "m3"
+                      ? thickness
+                      : null;
                 const thicknessDerived = thicknessFactor && s.volume ? s.volume * thicknessFactor : null;
                 const exactFactor = exactTargetQuantity && s.volume ? exactTargetQuantity / s.volume : null;
                 const coefficientDerived = manualCoefficient && s.volume ? s.volume * manualCoefficient : null;
+                const daysInfo = workDaysInfo(s);
                 return (
                   <div
                     key={s.id}
@@ -2430,28 +2518,56 @@ function StageProductivity({
                           {sessionLabor ? <div>По объёму: {sessionLabor} чел-ч</div> : null}
                           {catalogWarning ? (
                             <div
-                              title={traceTitle}
                               style={{
                                 display: "flex",
                                 alignItems: "center",
                                 gap: 6,
                                 flexWrap: "wrap",
-                                color: provisionalConfirmed ? "#15803d" : isProvisionalRate ? "#b45309" : "var(--red)",
-                                fontWeight: 600,
                               }}
                             >
-                              <span>
-                                {provisionalConfirmed
+                              <button
+                                type="button"
+                                title={traceTitle}
+                                style={{
+                                  display: "inline-flex",
+                                  alignItems: "center",
+                                  gap: 6,
+                                  maxWidth: "100%",
+                                  padding: "3px 7px",
+                                  borderRadius: 5,
+                                  border: operatorRateConfirmed
+                                    ? "1px solid #16a34a55"
+                                    : isProvisionalRate
+                                      ? "1px solid #f59e0b66"
+                                      : "1px solid #ef444466",
+                                  background: operatorRateConfirmed
+                                    ? "#22c55e12"
+                                    : isProvisionalRate
+                                      ? "#f59e0b14"
+                                      : "#ef444414",
+                                  color: operatorRateConfirmed ? "#15803d" : isProvisionalRate ? "#b45309" : "var(--red)",
+                                  fontSize: 11,
+                                  fontWeight: 700,
+                                  lineHeight: 1.25,
+                                  textAlign: "left",
+                                  cursor: "help",
+                                }}
+                              >
+                                {operatorRateConfirmed
                                   ? "Каталог подтверждён оператором"
                                   : isProvisionalRate
                                     ? "Каталог требует подтверждения"
                                     : `Каталог не применён: ${catalogWarning}`}
-                              </span>
+                              </button>
                               {isProvisionalRate && !provisionalConfirmed && provisionalOutput != null ? (
                                 <button
                                   type="button"
                                   disabled={busy}
-                                  onClick={() => void saveField(s.id, { output_per_day: provisionalOutput })}
+                                  onClick={() => void saveField(s.id, {
+                                    output_per_day: provisionalOutput,
+                                    selected_rate_item_id: numericCandidate?.rate_item_id || s.selected_rate_item_id || null,
+                                    selected_rate_mapping_id: numericCandidate?.rate_mapping_id || s.selected_rate_mapping_id || null,
+                                  })}
                                   title={`${traceTitle ?? catalogWarning}\n\nПринять: ${fmtMetric(provisionalOutput) ?? provisionalOutput} ${s.unit || "ед."}/см`}
                                   style={{
                                     display: "inline-flex",
@@ -2470,6 +2586,82 @@ function StageProductivity({
                                   <Check size={14} strokeWidth={3} />
                                 </button>
                               ) : null}
+                            </div>
+                          ) : null}
+                          {equivalentCandidates.length > 0 && !operatorRateConfirmed ? (
+                            <div
+                              style={{
+                                marginTop: 6,
+                                display: "grid",
+                                gap: 6,
+                                padding: "8px 9px",
+                                border: "1px solid #f59e0b55",
+                                borderRadius: 6,
+                                background: "#fffbeb",
+                                color: "#78350f",
+                              }}
+                            >
+                              <div style={{ fontWeight: 700 }}>
+                                Выберите ставку: найдено {equivalentCandidates.length} равнозначных варианта
+                              </div>
+                              {equivalentCandidates.map((candidate) => {
+                                const candidateOutput = outputFromCandidate(s, candidate);
+                                const candidateUnit = candidateUnitCode(candidate);
+                                const title = [
+                                  candidate.name,
+                                  candidate.source_file ? `Источник: ${candidate.source_file}` : null,
+                                  candidate.source_rate_id ? `ID: ${candidate.source_rate_id}` : null,
+                                  candidate.normalized_value != null ? `Ставка: ${fmtNumber(candidate.normalized_value)} чел-ч/${unitLabel(candidateUnit)}` : null,
+                                  candidateOutput != null ? `Производительность: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : null,
+                                ].filter(Boolean).join("\n");
+                                return (
+                                  <div
+                                    key={candidate.rate_item_id || candidate.name || candidate.source_rate_id || title}
+                                    style={{
+                                      display: "grid",
+                                      gridTemplateColumns: "minmax(0, 1fr) auto",
+                                      gap: 8,
+                                      alignItems: "center",
+                                    }}
+                                  >
+                                    <div title={title} style={{ minWidth: 0 }}>
+                                      <div style={{ fontWeight: 650, color: "var(--text)" }}>
+                                        {candidate.name || "Кандидат нормы"}
+                                      </div>
+                                      <div style={{ color: "#92400e" }}>
+                                        {fmtNumber(candidate.normalized_value)} чел-ч/{unitLabel(candidateUnit)}
+                                        {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : ""}
+                                        {candidate.source_file ? ` · ${candidate.source_file}` : ""}
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      disabled={busy || candidateOutput == null}
+                                      onClick={() => candidateOutput != null && void saveField(s.id, {
+                                        output_per_day: candidateOutput,
+                                        selected_rate_item_id: candidate.rate_item_id || null,
+                                        selected_rate_mapping_id: candidate.rate_mapping_id || null,
+                                      })}
+                                      title={candidateOutput == null ? "Нужен размер бригады для расчёта производительности" : `Применить: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см`}
+                                      style={{
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        width: 24,
+                                        height: 24,
+                                        padding: 0,
+                                        borderRadius: 5,
+                                        border: "1px solid #16a34a55",
+                                        background: busy || candidateOutput == null ? "#e5e7eb" : "#22c55e22",
+                                        color: busy || candidateOutput == null ? "#64748b" : "#15803d",
+                                        cursor: busy || candidateOutput == null ? "not-allowed" : "pointer",
+                                      }}
+                                    >
+                                      <Check size={14} strokeWidth={3} />
+                                    </button>
+                                  </div>
+                                );
+                              })}
                             </div>
                           ) : null}
                           {needsUnitConversion && numericCandidate && sourceUnitCode && targetUnitCode ? (
@@ -2492,14 +2684,14 @@ function StageProductivity({
                               <div>
                                 Норма в {unitLabel(targetUnitCode)}, объём сметы указан в {unitLabel(sourceUnitCode)}. Без параметра конструкции автоматически не конвертирую.
                               </div>
-                              {sourceUnitCode === "m3" && targetUnitCode === "m2" ? (
+                              {((sourceUnitCode === "m3" && targetUnitCode === "m2") || (sourceUnitCode === "m2" && targetUnitCode === "m3")) ? (
                                 <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                                   <span>Толщина</span>
                                   <input
                                     value={conversionDraft.thickness || ""}
                                     disabled={busy}
                                     onChange={(e) => setConversionDraft(s.id, "thickness", e.target.value)}
-                                    placeholder="0,20"
+                                    placeholder={defaultThickness ? fmtNumber(defaultThickness) : "0,20"}
                                     inputMode="decimal"
                                     style={{ ...inputLike, width: 72, height: 28, padding: "4px 7px" }}
                                   />
@@ -2508,12 +2700,21 @@ function StageProductivity({
                                     <span>
                                       {fmtNumber(s.volume)} {unitLabel(sourceUnitCode)} × {fmtNumber(thicknessFactor)} {unitLabel(targetUnitCode)}/{unitLabel(sourceUnitCode)} = {fmtNumber(thicknessDerived)} {unitLabel(targetUnitCode)};
                                       трудоёмкость ≈ {fmtNumber(thicknessDerived * (numericCandidate.normalized_value || 0))} чел-ч
+                                      {defaultThickness && !conversionDraft.thickness ? " (толщина извлечена из текста)" : ""}
                                     </span>
                                   ) : null}
                                   <button
                                     type="button"
                                     disabled={busy || !thickness}
-                                    onClick={() => void applyRateUnitConversion(s, numericCandidate, "volume_to_area_by_thickness")}
+                                    onClick={() =>
+                                      void applyRateUnitConversion(
+                                        s,
+                                        numericCandidate,
+                                        sourceUnitCode === "m3" && targetUnitCode === "m2"
+                                          ? "volume_to_area_by_thickness"
+                                          : "area_to_volume_by_thickness",
+                                      )
+                                    }
                                     title="Применить предварительный расчёт по толщине"
                                     style={buttonStyle("ghost", busy || !thickness)}
                                   >
@@ -2656,16 +2857,19 @@ function StageProductivity({
                       source={s.crew_source}
                       onSave={(v) => void saveField(s.id, { crew_size: v })}
                     />
-                    <NumCell
-                      value={s.lag_after_days}
-                      suffix="дн"
-                      disabled={busy}
-                      allowZero
-                      // Пауза по умолчанию 0 и необязательна — не помечаем как ≈,
-                      // показываем зелёным только если оператор сам её задал.
-                      source={s.lag_source === "manual" ? "manual" : undefined}
-                      onSave={(v) => void saveField(s.id, { lag_after_days: v ?? 0 })}
-                    />
+                    <div
+                      title={daysInfo.title}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "flex-start",
+                        minHeight: 30,
+                        color: daysInfo.days == null ? "var(--muted)" : "var(--text)",
+                        fontWeight: daysInfo.days == null ? 500 : 700,
+                      }}
+                    >
+                      {daysInfo.days == null ? "—" : `${daysInfo.days} дн.`}
+                    </div>
                   </div>
                 );
               })}

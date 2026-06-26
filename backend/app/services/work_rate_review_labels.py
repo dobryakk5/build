@@ -37,6 +37,9 @@ RATE_REVIEW_LABELS = {
     "multiple_equivalent_rate_candidates": (
         "Найдено несколько равноценных расценок."
     ),
+    "operation_resolution_failed": (
+        "Не удалось однозначно определить операцию для подбора расценки."
+    ),
 }
 
 
