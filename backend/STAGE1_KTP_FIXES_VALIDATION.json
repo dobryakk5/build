@@ -1,0 +1,20 @@
+{
+  "valid": true,
+  "compileall": "passed",
+  "focused_tests": {
+    "collected": 13,
+    "passed": 13,
+    "failed": 0
+  },
+  "taxonomy_source": "batch_snapshot_dynamic",
+  "dynamic_stage_count": 25,
+  "floor0_has_2_7_9": true,
+  "floor0_has_2_7_11": true,
+  "floor0_has_forbidden_2_7_8": false,
+  "limitations": [
+    "No live PostgreSQL concurrency run",
+    "No live Celery duplicate-delivery run",
+    "SQL migration contract must be converted to repository Alembic revision",
+    "Original archive did not include full backend test suite"
+  ]
+}

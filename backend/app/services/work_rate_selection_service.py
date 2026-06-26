@@ -310,6 +310,15 @@ class WorkRateSelectionService:
             context_result = resolve_membrane_context(source_context_text)
             for key, value in (context_result.applicability or {}).items():
                 effective_applicability.setdefault(key, value)
+        elif effective_operation == "brick_masonry":
+            context_result = resolve_masonry_context(source_context_text)
+            if context_result.context_code:
+                effective_applicability.setdefault("rate_context_code", context_result.context_code)
+            if not context_result.needs_review:
+                if context_result.context_code == "interior_wall":
+                    effective_applicability.setdefault("installation_position", "interior_side")
+                elif context_result.context_code == "exterior_wall":
+                    effective_applicability.setdefault("installation_position", "exterior_side")
 
         item_by_id = {item.id: item for item in items if item.is_active}
         source_by_id = {source.id: source for source in sources if source.is_active}
@@ -402,7 +411,7 @@ class WorkRateSelectionService:
         compatible: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource, float]] = []
         for item, mapping, source in operation_candidates:
             factor = self.unit_conversion_factor(unit_code, item.unit_code)
-            if factor is None and unit_code and item.unit_code and unit_conversion_overrides:
+            if factor is None and item.unit_code and unit_conversion_overrides:
                 factor = unit_conversion_overrides.get((unit_code, item.unit_code))
             if factor is not None:
                 compatible.append((item, mapping, source, factor))

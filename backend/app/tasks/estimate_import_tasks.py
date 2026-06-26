@@ -17,6 +17,7 @@ from app.tasks.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 STAGE10_IMPORT_ADVISORY_LOCK_ID = 2700010
+STAGE10_IMPORT_DRAIN_MAX_ITERATIONS = 50
 
 
 def run_async(coro):
@@ -145,20 +146,26 @@ async def _process_stage10_estimate_import_queue_async() -> dict[str, int | str]
         completed = 0
         blocked = 0
         try:
-            published = await TransactionalOutboxPublisher(db).publish_due(limit=1)
-            now = datetime.now(timezone.utc)
-            job_ids = list(
-                await db.scalars(
-                    select(EstimateImportJob.id)
-                    .where(EstimateImportJob.status.in_(("queued", "retrying")))
-                    .where(or_(EstimateImportJob.next_attempt_at.is_(None), EstimateImportJob.next_attempt_at <= now))
-                    .order_by(EstimateImportJob.queued_at, EstimateImportJob.id)
-                    .limit(1)
-                    .with_for_update(skip_locked=True)
-                )
-            )
             worker = EstimateImportWorker(db)
-            for job_id in job_ids:
+            for _ in range(STAGE10_IMPORT_DRAIN_MAX_ITERATIONS):
+                published_now = await TransactionalOutboxPublisher(db).publish_due(limit=10)
+                published += published_now
+                now = datetime.now(timezone.utc)
+                job_ids = list(
+                    await db.scalars(
+                        select(EstimateImportJob.id)
+                        .where(EstimateImportJob.status.in_(("queued", "retrying")))
+                        .where(or_(EstimateImportJob.next_attempt_at.is_(None), EstimateImportJob.next_attempt_at <= now))
+                        .order_by(EstimateImportJob.queued_at, EstimateImportJob.id)
+                        .limit(1)
+                        .with_for_update(skip_locked=True)
+                    )
+                )
+                if not job_ids:
+                    if published_now == 0:
+                        break
+                    continue
+                job_id = job_ids[0]
                 try:
                     result = await worker.run_job(str(job_id))
                 finally:

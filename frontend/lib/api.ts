@@ -842,6 +842,10 @@ export const ktpEstimate = {
       method: "PATCH",
       body: JSON.stringify(patch),
     }),
+  acceptStage1Items: (projectId: string, sessionId: string) =>
+    request<KtpWbs>(`/projects/${projectId}/ktp-estimate/sessions/${sessionId}/accept-stage1-items`, {
+      method: "POST",
+    }),
   createItem: (
     projectId: string,
     groupId: string,
@@ -945,6 +949,7 @@ export const ktpEstimate = {
     projectId: string,
     subtypeId: string,
     patch: Partial<{
+      unit: string | null;
       volume: number | null;
       output_per_day: number | null;
       crew_size: number | null;

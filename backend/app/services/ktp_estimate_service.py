@@ -16,11 +16,12 @@ import re
 import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
@@ -29,6 +30,7 @@ from sqlalchemy.orm import selectinload
 from app.core.clarifications import UNKNOWN_CLARIFICATION_MARKERS
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
+from app.core.time import utc_now
 from app.models import (
     Estimate,
     EstimateBatch,
@@ -54,16 +56,31 @@ from app.services.work_taxonomy_service import (
     normalize_text,
 )
 from app.services.taxonomy_compatibility_service import (
+    BRICK_HOUSE_VARIANT_ID,
     assert_reclassification_allowed,
     batch_uses_legacy_taxonomy,
     build_persisted_stage_catalog,
     resolved_stage_title,
 )
-from app.services.taxonomy_snapshot_service import resolve_config_path
+from app.services.taxonomy_snapshot_service import (
+    TaxonomySnapshotIntegrityError,
+    load_immutable_taxonomy_snapshot,
+    resolve_config_path,
+)
+from app.services.floor_structure_service import build_stage_instances, validate_building_params
+from app.services.ktp_errors import (
+    InvalidStageAwareRowReference,
+    KtpNotFoundError,
+    Stage1JobAlreadyRunning,
+    Stage1ReviewRequired,
+    Stage1RunSuperseded,
+    TaxonomySnapshotIntegrity,
+    TaxonomySnapshotRequired,
+)
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "estimate-v6.4"
+PROMPT_VERSION = "estimate-v6.5-stage1-snapshot"
 GROUPING_MODE_STAGE_AWARE = "stage_aware"
 GROUPING_MODE_ESTIMATE_STRUCTURE = "estimate_structure"
 
@@ -129,7 +146,7 @@ def _normalize_work_name(raw: Any) -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return utc_now()
 
 
 def _uuid() -> str:
@@ -144,8 +161,11 @@ def gpr_blocker(item: KtpWbsItem) -> bool:
     """
     if getattr(item, "duration_block_reason", None) == "user_rate_input_required":
         return True
+    operator_required = bool(
+        getattr(item, "_computed_operator_review_required", item.operator_review_required)
+    )
     return bool(
-        (item.operator_review_required or item.work_type_needs_review)
+        (operator_required or item.work_type_needs_review)
         and not item.gpr_confirmed
     )
 
@@ -353,8 +373,11 @@ def _format_estimate_rows_for_prompt(estimates: list[Estimate]) -> str:
     if not estimates:
         return ""
 
+    configured_limit = int(getattr(settings, "KTP_ESTIMATE_CHUNK_ROWS", 80) or 80)
+    limit = max(1, configured_limit)
+    included = estimates[:limit]
     lines: list[str] = []
-    for idx, estimate in enumerate(estimates[:80], start=1):
+    for idx, estimate in enumerate(included, start=1):
         qty = (
             f"{float(estimate.quantity):.3f} {estimate.unit or ''}".strip()
             if estimate.quantity is not None
@@ -389,6 +412,12 @@ def _format_estimate_rows_for_prompt(estimates: list[Estimate]) -> str:
                 parts.append("; ".join(raw_parts[:3]))
         lines.append(" | ".join(parts))
 
+    truncated = len(estimates) - len(included)
+    if truncated > 0:
+        lines.append(
+            f"... не включено {truncated} строк из {len(estimates)}; "
+            "переданный контекст неполный, выводы о полноте сметы запрещены."
+        )
     return "\n".join(lines)
 
 
@@ -412,26 +441,48 @@ async def _load_work_estimates(
 async def get_session(
     db: AsyncSession, project_id: str, estimate_batch_id: str
 ) -> KtpEstimateSession | None:
-    session = await _get_session_raw(db, project_id, estimate_batch_id)
-    if session:
-        await _expire_stale_stage1_session(db, session)
-    return session
+    # Read endpoints are side-effect free. Stale job transitions are performed
+    # by the explicit start/recovery path or a background watchdog, not by GET.
+    return await _get_session_raw(db, project_id, estimate_batch_id)
 
 
 async def _get_session_raw(
-    db: AsyncSession, project_id: str, estimate_batch_id: str
+    db: AsyncSession,
+    project_id: str,
+    estimate_batch_id: str,
+    *,
+    for_update: bool = False,
 ) -> KtpEstimateSession | None:
-    return await db.scalar(
+    stmt = (
         select(KtpEstimateSession)
         .where(KtpEstimateSession.project_id == project_id)
         .where(KtpEstimateSession.estimate_batch_id == estimate_batch_id)
     )
+    if for_update:
+        stmt = stmt.with_for_update()
+    return await db.scalar(stmt.execution_options(populate_existing=True))
 
 
 async def reset_session(
     db: AsyncSession, project_id: str, session_id: str
 ) -> None:
-    session = await get_session_by_id(db, project_id, session_id)
+    session = await db.scalar(
+        select(KtpEstimateSession)
+        .where(KtpEstimateSession.id == session_id)
+        .where(KtpEstimateSession.project_id == project_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not session:
+        raise KtpNotFoundError(
+            f"Сеанс КТП {session_id} не найден в проекте {project_id}"
+        )
+    job = await db.get(Job, session.stage1_job_id) if session.stage1_job_id else None
+    if job and job.status in {"pending", "processing"}:
+        raise Stage1JobAlreadyRunning(
+            "Нельзя удалить сеанс, пока Stage 1 выполняется.",
+            details={"session_id": session.id, "job_id": job.id},
+        )
     await db.delete(session)
     await db.commit()
 
@@ -445,13 +496,14 @@ async def get_session_by_id(
         .where(KtpEstimateSession.project_id == project_id)
     )
     if not session:
-        raise ValueError(f"Сеанс КТП {session_id} не найден в проекте {project_id}")
+        raise KtpNotFoundError(f"Сеанс КТП {session_id} не найден в проекте {project_id}")
     return session
 
 
 async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[str, Any]:
+    # GET must not persist lazy status/review changes. Stale transitions belong
+    # to start/recovery/watchdog flows.
     session = await get_session_by_id(db, project_id, session_id)
-    await _expire_stale_stage1_session(db, session)
     groups = list(
         await db.scalars(
             select(KtpWbsGroup)
@@ -460,6 +512,7 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
             .order_by(KtpWbsGroup.sort_order, KtpWbsGroup.created_at)
         )
     )
+    groups = _sort_stage_groups(groups)
     await _attach_stage_review_metadata(db, groups)
     group_ids = [g.id for g in groups]
     deps = (
@@ -480,11 +533,11 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
     if session.status in {"prod_pending", "prod_review"}:
         subtypes = await _load_session_subtypes(db, session_id)
         if not subtypes:
-            # Ленивое построение для мигрированных fer_* сессий — фиксируем,
-            # чтобы отданные фронту id существовали при последующем PATCH.
-            await build_session_subtypes(db, session)
-            await db.commit()
-            subtypes = await _load_session_subtypes(db, session_id)
+            logger.warning(
+                "KTP session %s has no persisted productivity subtypes; "
+                "run the explicit rebuild endpoint instead of mutating GET /wbs",
+                session_id,
+            )
 
     return {
         "session": session,
@@ -494,34 +547,69 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
     }
 
 
+@dataclass(frozen=True)
+class ItemReviewState:
+    stage_needs_review: bool
+    stage_review_reason: str | None
+    stage_confidence_percent: int | None
+    work_type_needs_review: bool
+    operator_review_required: bool
+
+
+def compute_item_review_state(
+    item: KtpWbsItem,
+    estimate: Estimate | None,
+) -> ItemReviewState:
+    """Compute review metadata without mutating persisted ORM fields."""
+    if estimate is None:
+        return ItemReviewState(False, None, None, bool(item.work_type_needs_review), bool(item.operator_review_required))
+    raw = estimate.raw_data if isinstance(estimate.raw_data, dict) else {}
+    stage_needs_review, reason, percent = _estimate_stage_review_info(estimate, raw)
+    work_type_needs_review = bool(
+        estimate.classification_needs_review
+        or raw.get("classification_needs_review")
+    )
+    source_operator_review = bool(
+        estimate.operator_review_required
+        or raw.get("operator_review_required")
+    )
+    required = bool(
+        not item.manual_override
+        and (stage_needs_review or work_type_needs_review or source_operator_review)
+    )
+    return ItemReviewState(
+        stage_needs_review,
+        reason,
+        percent,
+        work_type_needs_review,
+        required,
+    )
+
+
 async def _attach_stage_review_metadata(db: AsyncSession, groups: list[KtpWbsGroup]) -> None:
+    """Attach transient response metadata; GET paths must not dirty ORM state."""
     estimate_ids = [
         item.estimate_id
         for group in groups
         for item in group.items
         if item.estimate_id
     ]
-    if not estimate_ids:
-        return
-    estimates = {
-        est.id: est
-        for est in await db.scalars(select(Estimate).where(Estimate.id.in_(estimate_ids)))
-    }
+    estimates = (
+        {
+            est.id: est
+            for est in await db.scalars(select(Estimate).where(Estimate.id.in_(estimate_ids)))
+        }
+        if estimate_ids
+        else {}
+    )
     for group in groups:
         for item in group.items:
-            est = estimates.get(item.estimate_id)
-            if not est:
-                setattr(item, "_stage_needs_review", False)
-                setattr(item, "_stage_review_reason", None)
-                setattr(item, "_stage_confidence_percent", None)
-                continue
-            raw = est.raw_data if isinstance(est.raw_data, dict) else {}
-            needs_review, reason, percent = _estimate_stage_review_info(est, raw)
-            setattr(item, "_stage_needs_review", needs_review)
-            setattr(item, "_stage_review_reason", reason)
-            setattr(item, "_stage_confidence_percent", percent)
-            if needs_review and not item.manual_override:
-                item.operator_review_required = True
+            state = compute_item_review_state(item, estimates.get(item.estimate_id))
+            setattr(item, "_stage_needs_review", state.stage_needs_review)
+            setattr(item, "_stage_review_reason", state.stage_review_reason)
+            setattr(item, "_stage_confidence_percent", state.stage_confidence_percent)
+            # Response DTO reads this transient field; the mapped column is not changed.
+            setattr(item, "_computed_operator_review_required", state.operator_review_required)
 
 
 def _job_reference_time(job: Job) -> datetime | None:
@@ -534,16 +622,23 @@ def _is_stale_stage1_job(job: Job, now: datetime | None = None) -> bool:
     ref_time = _job_reference_time(job)
     if ref_time is None:
         return False
-    if now is None:
-        now = datetime.now(ref_time.tzinfo) if ref_time.tzinfo else datetime.utcnow()
-    elif ref_time.tzinfo and now.tzinfo is None:
-        now = now.replace(tzinfo=ref_time.tzinfo)
+    if ref_time.tzinfo is None:
+        # Historical rows can still contain naive UTC values. Treat them as UTC
+        # during the compatibility window; all new writes are aware.
+        ref_time = ref_time.replace(tzinfo=timezone.utc)
+    current = now or utc_now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
     stale_after = timedelta(seconds=max(60, int(settings.KTP_STAGE1_STALE_AFTER_SECONDS)))
-    return now - ref_time > stale_after
+    return current - ref_time > stale_after
 
 
 async def _expire_stale_stage1_session(
-    db: AsyncSession, session: KtpEstimateSession
+    db: AsyncSession,
+    session: KtpEstimateSession,
+    *,
+    commit: bool = True,
+    superseded: bool = False,
 ) -> bool:
     if session.status not in {"stage1_pending", "stage1_processing"}:
         return False
@@ -564,13 +659,59 @@ async def _expire_stale_stage1_session(
     if last_progress:
         message = f"{message} Последний шаг: {last_progress}"
 
-    job.status = "failed"
-    job.result = {"error": message, "stale": True, "last_progress": last_progress}
-    job.finished_at = datetime.utcnow()
+    job.status = "superseded" if superseded else "failed"
+    job.result = {
+        "error": message,
+        "stale": True,
+        "superseded": superseded,
+        "last_progress": last_progress,
+    }
+    job.finished_at = utc_now()
     session.status = "stage1_failed"
     session.error_message = message
-    await db.commit()
+    if commit:
+        await db.commit()
     return True
+
+
+async def _clear_stage1_materialization(
+    db: AsyncSession, session_id: str
+) -> None:
+    """Remove derived Stage 1 rows while preserving session identity and audit."""
+    await db.execute(
+        delete(KtpSessionSubtype).where(KtpSessionSubtype.session_id == session_id)
+    )
+    await db.execute(delete(KtpWbsGroup).where(KtpWbsGroup.session_id == session_id))
+
+
+async def _stage1_fence_state(
+    db: AsyncSession,
+    *,
+    session_id: str,
+    job_id: str,
+    generation: int,
+    lock: bool = False,
+) -> KtpEstimateSession:
+    stmt = select(KtpEstimateSession).where(KtpEstimateSession.id == session_id)
+    if lock:
+        stmt = stmt.with_for_update()
+    session = await db.scalar(stmt.execution_options(populate_existing=True))
+    current_job_status = await db.scalar(select(Job.status).where(Job.id == job_id))
+    if (
+        session is None
+        or session.stage1_job_id != job_id
+        or int(session.stage1_generation or 0) != int(generation)
+        or current_job_status != "processing"
+    ):
+        raise Stage1RunSuperseded(
+            "Запуск Stage 1 был заменён более новым запуском.",
+            details={
+                "session_id": session_id,
+                "job_id": job_id,
+                "generation": generation,
+            },
+        )
+    return session
 
 
 async def _get_group(
@@ -583,7 +724,7 @@ async def _get_group(
         .options(selectinload(KtpWbsGroup.items))
     )
     if not group:
-        raise ValueError(f"Группа WBS {group_id} не найдена в проекте {project_id}")
+        raise KtpNotFoundError(f"Группа WBS {group_id} не найдена в проекте {project_id}")
     return group
 
 
@@ -597,7 +738,7 @@ async def _get_item(
         .where(KtpWbsGroup.project_id == project_id)
     )
     if not item:
-        raise ValueError(f"Работа WBS {item_id} не найдена в проекте {project_id}")
+        raise KtpNotFoundError(f"Работа WBS {item_id} не найдена в проекте {project_id}")
     return item
 
 
@@ -613,75 +754,99 @@ async def start_stage1_job(
     force: bool = False,
     preserve_estimate_structure: bool = False,
 ) -> tuple[Job | None, KtpEstimateSession]:
-    """Запускает этап 1. Возвращает (job | None, session).
-
-    job=None — сеанс уже существует (без force), новый прогон не нужен.
-    """
+    """Start or reuse Stage 1 with transaction-level session fencing."""
     await _assert_batch_belongs_to_project(db, project_id, estimate_batch_id)
 
-    existing = await _get_session_raw(db, project_id, estimate_batch_id)
+    existing = await _get_session_raw(
+        db, project_id, estimate_batch_id, for_update=True
+    )
     existing_was_stale = False
-    if existing:
-        existing_was_stale = await _expire_stale_stage1_session(db, existing)
+    active_job: Job | None = None
+    if existing and existing.stage1_job_id:
+        active_job = await db.get(Job, existing.stage1_job_id)
+        if active_job and _is_stale_stage1_job(active_job):
+            existing_was_stale = await _expire_stale_stage1_session(
+                db, existing, commit=False, superseded=True
+            )
+
+    if (
+        existing
+        and active_job
+        and active_job.status in {"pending", "processing"}
+        and not existing_was_stale
+    ):
+        if force:
+            raise Stage1JobAlreadyRunning(
+                "Нельзя принудительно перестроить Stage 1, пока текущая задача выполняется.",
+                details={
+                    "session_id": existing.id,
+                    "job_id": active_job.id,
+                    "job_status": active_job.status,
+                },
+            )
+        if active_job.status == "pending":
+            try:
+                from app.tasks.estimate_import_tasks import process_ktp_estimate_stage1_job
+
+                process_ktp_estimate_stage1_job.delay(active_job.id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "failed to re-enqueue KTP estimate stage1 job %s in celery: %s",
+                    active_job.id,
+                    exc,
+                )
+        return active_job, existing
 
     if existing and not force and not existing_was_stale:
-        if existing.status in {"stage1_pending", "stage1_processing"}:
-            existing_job = await db.get(Job, existing.stage1_job_id) if existing.stage1_job_id else None
-            if existing_job and existing_job.status in {"pending", "processing"}:
-                if existing_job.status == "pending":
-                    try:
-                        from app.tasks.estimate_import_tasks import process_ktp_estimate_stage1_job
-
-                        process_ktp_estimate_stage1_job.delay(existing_job.id)
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("failed to re-enqueue KTP estimate stage1 job %s in celery: %s", existing_job.id, exc)
-                return existing_job, existing
-            existing.status = "stage1_pending"
-            existing.error_message = None
-            existing.stage1_job_id = None
-            session = existing
-        else:
+        if existing.status not in {"stage1_pending", "stage1_processing"}:
             return None, existing
-    if existing and (force or existing_was_stale):
-        await db.delete(existing)
-        await db.flush()
-        existing = None
+        # Recovery path: a pending session without a live job is restarted under
+        # the row lock acquired above.
 
-    if not existing:
+    if existing is None:
         session = KtpEstimateSession(
             project_id=project_id,
             estimate_batch_id=estimate_batch_id,
             status="stage1_pending",
-            stage1_raw_json={
-                "grouping_mode": (
-                    GROUPING_MODE_ESTIMATE_STRUCTURE
-                    if preserve_estimate_structure
-                    else GROUPING_MODE_STAGE_AWARE
-                ),
-                "preserve_estimate_structure": bool(preserve_estimate_structure),
-            },
+            stage1_generation=0,
         )
         db.add(session)
         try:
             await db.flush()
         except IntegrityError:
-            # race при double-click — возвращаем уже созданный сеанс
+            # Concurrent first creation: after the winner commits, return its
+            # session/job rather than creating another recovery job.
             await db.rollback()
-            existing = await get_session(db, project_id, estimate_batch_id)
-            if existing:
-                return None, existing
+            winner = await _get_session_raw(
+                db, project_id, estimate_batch_id, for_update=True
+            )
+            if winner:
+                winner_job = (
+                    await db.get(Job, winner.stage1_job_id)
+                    if winner.stage1_job_id
+                    else None
+                )
+                return winner_job, winner
             raise
     else:
-        session.stage1_raw_json = {
-            "grouping_mode": (
-                GROUPING_MODE_ESTIMATE_STRUCTURE
-                if preserve_estimate_structure
-                else GROUPING_MODE_STAGE_AWARE
-            ),
-            "preserve_estimate_structure": bool(preserve_estimate_structure),
-        }
-        flag_modified(session, "stage1_raw_json")
-        await db.flush()
+        session = existing
+        if force or existing_was_stale:
+            await _clear_stage1_materialization(db, session.id)
+
+    generation = int(session.stage1_generation or 0) + 1
+    session.stage1_generation = generation
+    session.status = "stage1_pending"
+    session.error_message = None
+    session.stage1_raw_json = {
+        "grouping_mode": (
+            GROUPING_MODE_ESTIMATE_STRUCTURE
+            if preserve_estimate_structure
+            else GROUPING_MODE_STAGE_AWARE
+        ),
+        "preserve_estimate_structure": bool(preserve_estimate_structure),
+        "stage1_generation": generation,
+    }
+    flag_modified(session, "stage1_raw_json")
 
     job = Job(
         id=_uuid(),
@@ -691,6 +856,7 @@ async def start_stage1_job(
         created_by=user_id,
         input={
             "session_id": session.id,
+            "stage1_generation": generation,
             "preserve_estimate_structure": bool(preserve_estimate_structure),
             "grouping_mode": (
                 GROUPING_MODE_ESTIMATE_STRUCTURE
@@ -700,8 +866,6 @@ async def start_stage1_job(
         },
     )
     db.add(job)
-    # Сначала INSERT Job, чтобы FK ktp_estimate_sessions.stage1_job_id
-    # был валиден при последующем UPDATE сессии.
     await db.flush()
     session.stage1_job_id = job.id
     await db.commit()
@@ -712,12 +876,26 @@ async def start_stage1_job(
 
         process_ktp_estimate_stage1_job.delay(job.id)
     except Exception as exc:  # noqa: BLE001
-        logger.exception("failed to enqueue KTP estimate stage1 job %s in celery: %s", job.id, exc)
+        logger.exception(
+            "failed to enqueue KTP estimate stage1 job %s in celery: %s",
+            job.id,
+            exc,
+        )
         job.status = "failed"
         job.result = {"error": "Не удалось поставить построение КТП в очередь"}
-        job.finished_at = datetime.utcnow()
-        session.status = "stage1_failed"
-        session.error_message = job.result["error"]
+        job.finished_at = utc_now()
+        # Do not overwrite a newer run if enqueue failed after a concurrent
+        # replacement (defensive; start holds the lock until commit above).
+        current = await _get_session_raw(
+            db, project_id, estimate_batch_id, for_update=True
+        )
+        if (
+            current
+            and current.stage1_job_id == job.id
+            and int(current.stage1_generation or 0) == generation
+        ):
+            current.status = "stage1_failed"
+            current.error_message = job.result["error"]
         await db.commit()
     return job, session
 
@@ -728,27 +906,68 @@ async def start_stage1_job(
 
 async def _process_stage1(job_id: str) -> None:
     async with AsyncSessionLocal() as db:
-        job = await db.get(Job, job_id)
-        if not job:
-            return
-        if job.status not in {"pending", "processing"}:
-            return
-        session_id = job.input.get("session_id")
-        session = await db.get(KtpEstimateSession, session_id)
-        if not session:
+        claimed_id = await db.scalar(
+            update(Job)
+            .where(Job.id == job_id)
+            .where(Job.type == "ktp_estimate_stage1")
+            .where(Job.status == "pending")
+            .values(status="processing", started_at=utc_now())
+            .returning(Job.id)
+        )
+        if not claimed_id:
+            await db.rollback()
             return
 
-        job.status = "processing"
-        job.started_at = datetime.utcnow()
+        job = await db.get(Job, job_id)
+        if not job:
+            await db.rollback()
+            return
+        job_input = dict(job.input or {})
+        session_id = str(job_input.get("session_id") or "")
+        try:
+            generation = int(job_input.get("stage1_generation"))
+        except (TypeError, ValueError):
+            generation = -1
+
+        session = await db.scalar(
+            select(KtpEstimateSession)
+            .where(KtpEstimateSession.id == session_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            session is None
+            or session.stage1_job_id != job_id
+            or int(session.stage1_generation or 0) != generation
+        ):
+            job.status = "superseded"
+            job.finished_at = utc_now()
+            job.result = {"superseded": True, "reason": "stage1_fence_mismatch"}
+            await db.commit()
+            return
+
         session.status = "stage1_processing"
         await db.commit()
 
         async def _progress(msg: str) -> None:
-            job.result = {"_progress": msg}
+            await _stage1_fence_state(
+                db,
+                session_id=session_id,
+                job_id=job_id,
+                generation=generation,
+            )
+            current_job = await db.scalar(
+                select(Job)
+                .where(Job.id == job_id)
+                .execution_options(populate_existing=True)
+            )
+            if not current_job:
+                raise Stage1RunSuperseded("Stage 1 job no longer exists")
+            current_job.result = {"_progress": msg}
             await db.commit()
 
         try:
-            preserve_estimate_structure = bool(job.input.get("preserve_estimate_structure"))
+            preserve_estimate_structure = bool(job_input.get("preserve_estimate_structure"))
             grouping_mode = (
                 GROUPING_MODE_ESTIMATE_STRUCTURE
                 if preserve_estimate_structure
@@ -756,34 +975,34 @@ async def _process_stage1(job_id: str) -> None:
             )
             batch = await db.get(EstimateBatch, session.estimate_batch_id)
             if not batch:
-                raise ValueError("Блок сметы не найден")
+                raise KtpNotFoundError("Блок сметы не найден")
             estimates = await _load_work_estimates(
                 db, session.project_id, session.estimate_batch_id
             )
             if not estimates:
                 raise ValueError("В блоке сметы нет строк работ для построения КТП")
+            if batch_uses_legacy_taxonomy(batch, estimates):
+                await _hydrate_legacy_work_type_compatibility(db, estimates)
 
             await _progress(
                 f"Загружено {len(estimates)} позиций сметы, "
                 + (
                     "строим структуру по разделам сметы…"
                     if preserve_estimate_structure
-                    else "строим структуру по этапам JSON v6…"
+                    else "строим структуру по этапам immutable taxonomy snapshot…"
                 )
             )
 
-            # row_key -> estimate
             row_keys: dict[str, Estimate] = {
                 f"R{idx:03d}": est for idx, est in enumerate(estimates, start=1)
             }
-
             work_section_palette = await build_work_section_palette(db, estimates)
             kind_label = ESTIMATE_KIND_LABELS.get(
                 batch.estimate_kind, "Строительные работы"
             )
 
             diagnostics: dict[str, Any] = {}
-            raw_groups = await _run_stage1_ai(
+            raw_groups = await _run_stage1(
                 estimates,
                 row_keys,
                 work_section_palette,
@@ -796,21 +1015,46 @@ async def _process_stage1(job_id: str) -> None:
             )
 
             await _progress("Сохраняем структуру работ…")
-            groups, items, coverage_warnings = _materialize_wbs(
-                session, raw_groups, row_keys, owner_user_id=job.created_by
+            locked_session = await _stage1_fence_state(
+                db,
+                session_id=session_id,
+                job_id=job_id,
+                generation=generation,
+                lock=True,
             )
-            for g in groups:
-                db.add(g)
-            for it in items:
-                db.add(it)
+            current_job = await db.scalar(
+                select(Job)
+                .where(Job.id == job_id)
+                .execution_options(populate_existing=True)
+            )
+            if not current_job:
+                raise Stage1RunSuperseded("Stage 1 job no longer exists")
 
-            # хвостовые предупреждения по битым чанкам ИИ
+            groups, items, coverage_warnings = _materialize_wbs(
+                locked_session,
+                raw_groups,
+                row_keys,
+                owner_user_id=current_job.created_by,
+                diagnostics=diagnostics,
+                grouping_mode=grouping_mode,
+            )
+            for group in groups:
+                db.add(group)
+            for item in items:
+                db.add(item)
+
             chunk_errors = diagnostics.get("chunk_errors") or []
             warnings_out = list(coverage_warnings)
             for err in chunk_errors:
                 warnings_out.append(
                     f"ИИ-сбой на блоке {err['chunk']}: {err['error']} "
                     f"(позиции попали в «{FALLBACK_GROUP_TITLE}»)"
+                )
+            invalid_row_keys = diagnostics.get("invalid_estimate_row_keys") or []
+            if invalid_row_keys:
+                warnings_out.append(
+                    f"{len(invalid_row_keys)} ссылок row_key отклонены; "
+                    "исходные строки сохранены в fallback для ручной проверки"
                 )
             invalid_section_codes = diagnostics.get("invalid_work_section_codes") or []
             if invalid_section_codes:
@@ -824,28 +1068,31 @@ async def _process_stage1(job_id: str) -> None:
             )
             if fallback_rows:
                 warnings_out.append(
-                    f"{len(fallback_rows)} позиций не попали в канонический этап JSON v6 — "
+                    f"{len(fallback_rows)} позиций не попали в канонический этап taxonomy — "
                     f"добавлены в «{STAGE_AWARE_FALLBACK_TITLE}»"
                 )
             review_rows = stage_grouping.get("review_rows") or []
             if review_rows:
                 warnings_out.append(
-                    f"{len(review_rows)} позиций имеют stage/subtype needs_review — проверьте их на шаге структуры"
+                    f"{len(review_rows)} позиций имеют stage/subtype needs_review — "
+                    "проверьте их на шаге структуры"
                 )
 
-            session.stage1_raw_json = {
+            locked_session.stage1_raw_json = {
                 "grouping_mode": grouping_mode,
                 "preserve_estimate_structure": preserve_estimate_structure,
+                "stage1_generation": generation,
                 "estimate_type_id": batch.estimate_type_id,
                 "project_variant_id": batch.project_variant_id,
                 "groups": raw_groups,
                 "stage_grouping": diagnostics.get("stage_grouping") or {},
+                "invalid_estimate_row_keys": invalid_row_keys,
                 "chunk_errors": chunk_errors,
                 "raw_samples": diagnostics.get("raw_samples") or [],
                 "coverage": diagnostics.get("coverage") or [],
                 "wt_code_conflicts": diagnostics.get("wt_code_conflicts") or [],
                 "work_section_code_conflicts": diagnostics.get("work_section_code_conflicts") or [],
-                "invalid_work_section_codes": diagnostics.get("invalid_work_section_codes") or [],
+                "invalid_work_section_codes": invalid_section_codes,
                 "gap_fill_trimmed": diagnostics.get("gap_fill_trimmed") or [],
                 "repeated_sections": diagnostics.get("repeated_sections") or [],
                 "unassigned_ai_items": diagnostics.get("unassigned_ai_items") or [],
@@ -853,32 +1100,91 @@ async def _process_stage1(job_id: str) -> None:
                 "catalog_recommendations": diagnostics.get("catalog_recommendations") or [],
                 "catalog_recommendation_duplicates": diagnostics.get("catalog_recommendation_duplicates") or [],
             }
-            session.llm_model = settings.KTP_GENERATION_MODEL
-            session.prompt_version = PROMPT_VERSION
-            session.status = "stage1_review"
-            session.error_message = None
+            flag_modified(locked_session, "stage1_raw_json")
+            locked_session.llm_model = settings.KTP_GENERATION_MODEL
+            locked_session.prompt_version = PROMPT_VERSION
+            locked_session.status = "stage1_review"
+            locked_session.error_message = None
 
-            ai_added = sum(1 for it in items if it.origin == "ai_added")
-            job.status = "done"
-            job.result = {
-                "session_id": session.id,
+            ai_added = sum(1 for item in items if item.origin == "ai_added")
+            current_job.status = "done"
+            current_job.finished_at = utc_now()
+            current_job.result = {
+                "session_id": locked_session.id,
+                "stage1_generation": generation,
                 "group_count": len(groups),
                 "item_count": len(items),
                 "ai_added_count": ai_added,
                 "coverage_warnings": warnings_out,
             }
+            await db.commit()
+        except Stage1RunSuperseded:
+            await db.rollback()
+            await db.execute(
+                update(Job)
+                .where(Job.id == job_id)
+                .where(Job.status == "processing")
+                .values(
+                    status="superseded",
+                    finished_at=utc_now(),
+                    result={"superseded": True, "reason": "newer_stage1_run"},
+                )
+            )
+            await db.commit()
+            logger.info("KTP Stage 1 job %s was superseded", job_id)
         except Exception as exc:  # noqa: BLE001
+            await db.rollback()
             logger.exception("KTP estimate stage1 failed for job %s", job_id)
-            job.status = "failed"
-            job.result = {"error": str(exc)}
-            session.status = "stage1_failed"
-            session.error_message = str(exc)
-        finally:
-            job.finished_at = datetime.utcnow()
+            locked_session = await db.scalar(
+                select(KtpEstimateSession)
+                .where(KtpEstimateSession.id == session_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            current_job = await db.scalar(
+                select(Job)
+                .where(Job.id == job_id)
+                .execution_options(populate_existing=True)
+            )
+            is_current = bool(
+                locked_session
+                and current_job
+                and locked_session.stage1_job_id == job_id
+                and int(locked_session.stage1_generation or 0) == generation
+                and current_job.status == "processing"
+            )
+            if current_job and current_job.status == "processing":
+                current_job.status = "failed" if is_current else "superseded"
+                current_job.finished_at = utc_now()
+                current_job.result = {"error": str(exc)} if is_current else {
+                    "superseded": True,
+                    "reason": "stage1_fence_mismatch_after_error",
+                }
+            if is_current and locked_session:
+                locked_session.status = "stage1_failed"
+                locked_session.error_message = str(exc)
             await db.commit()
 
 
-async def _run_stage1_ai(
+async def _run_stage1_stage_aware(
+    estimates: list[Estimate],
+    row_keys: dict[str, Estimate],
+    batch: EstimateBatch | None,
+    diagnostics: dict[str, Any],
+    on_progress: Callable[[str], Awaitable[None]] | None = None,
+) -> list[dict[str, Any]]:
+    """Deterministic Stage 1 path: no LLM and no LLM gap-fill."""
+    if batch is None:
+        raise ValueError("Блок сметы не передан для stage-aware группировки")
+    if on_progress:
+        await on_progress(
+            "Группируем работы по каноническим этапам immutable taxonomy snapshot…"
+        )
+    estimate_to_row_key = {est.id: row_key for row_key, est in row_keys.items()}
+    return _build_stage_aware_groups(estimates, estimate_to_row_key, batch, diagnostics)
+
+
+async def _run_stage1(
     estimates: list[Estimate],
     row_keys: dict[str, Estimate],
     work_section_palette: list[dict[str, Any]],
@@ -912,11 +1218,9 @@ async def _run_stage1_ai(
     estimate_to_row_key = {est.id: row_key for row_key, est in row_keys.items()}
 
     if not preserve_estimate_structure:
-        if batch is None:
-            raise ValueError("Блок сметы не передан для stage-aware группировки")
-        if on_progress:
-            await on_progress("Группируем работы по каноническим этапам JSON v6…")
-        return _build_stage_aware_groups(estimates, estimate_to_row_key, batch, diagnostics)
+        return await _run_stage1_stage_aware(
+            estimates, row_keys, batch, diagnostics, on_progress
+        )
 
     python_groups = _build_python_groups(estimates, estimate_to_row_key, diagnostics)
     ungrouped_rows = python_groups.pop("__ungrouped__", None)
@@ -1043,6 +1347,56 @@ def _stage_title(stage_number: str | None, stage_title: str | None) -> str:
     if number and title:
         return f"{number}. {title}"
     return title or number or FALLBACK_DISPLAY_TITLE
+
+
+def _stage_number_sort_parts(value: Any) -> tuple[int, ...]:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return (10**8,)
+    parts = [int(part) for part in re.findall(r"\d+", text_value)]
+    return tuple(parts) if parts else (10**8,)
+
+
+def _group_value(group: Any, key: str) -> Any:
+    if isinstance(group, dict):
+        return group.get(key)
+    return getattr(group, key, None)
+
+
+def _floor_sort_value(value: Any) -> int:
+    if value in (None, ""):
+        return 10**7
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 10**7
+
+
+def _stage_group_sort_key(group: Any) -> tuple[Any, ...]:
+    title = str(_group_value(group, "title") or "")
+    fallback = _is_fallback_group_title(title)
+    stage_number = (
+        _group_value(group, "template_stage_number")
+        or _group_value(group, "work_stage_number")
+        or _group_value(group, "stage_number")
+    )
+    floor_number = _group_value(group, "floor_number")
+    try:
+        sort_order = float(_group_value(group, "sort_order") or 0)
+    except (TypeError, ValueError):
+        sort_order = 0.0
+    return (
+        1 if fallback else 0,
+        _floor_sort_value(floor_number),
+        _stage_number_sort_parts(stage_number),
+        sort_order,
+        title,
+        str(_group_value(group, "id") or _group_value(group, "section_key") or ""),
+    )
+
+
+def _sort_stage_groups(groups: list[Any]) -> list[Any]:
+    return sorted(groups, key=_stage_group_sort_key)
 
 
 def _estimate_stage_number(est: Estimate) -> str | None:
@@ -1175,6 +1529,86 @@ def _estimate_stage_review_reason(est: Estimate, raw: dict[str, Any]) -> str | N
     return reason if needs_review else None
 
 
+async def _hydrate_legacy_work_type_compatibility(
+    db: AsyncSession,
+    estimates: list[Estimate],
+) -> None:
+    """Attach exact legacy-to-canonical subtype pairs without persisting writes."""
+    unresolved: dict[str, list[Estimate]] = {}
+    for estimate in estimates:
+        raw = estimate.raw_data if isinstance(estimate.raw_data, dict) else {}
+        code = str(
+            estimate.work_subtype_code
+            or raw.get("work_subtype_code")
+            or raw.get("subtype_code")
+            or ""
+        ).strip()
+        if not code or code == UNKNOWN_SUBTYPE_CODE:
+            continue
+        section_id = estimate.section_id or raw.get("section_id")
+        subtype_id = estimate.subtype_id or raw.get("subtype_id")
+        if section_id and subtype_id:
+            continue
+        unresolved.setdefault(code, []).append(estimate)
+    if not unresolved:
+        return
+
+    codes = list(unresolved)
+    refs = list(
+        await db.scalars(
+            select(WorkSubtype).where(
+                or_(WorkSubtype.code.in_(codes), WorkSubtype.legacy_code.in_(codes))
+            )
+        )
+    )
+    # Older seeds can keep aliases only in legacy_csv_codes; inspect those rows
+    # in Python because JSONB membership syntax differs between test/prod DBs.
+    missing_codes = set(codes) - {
+        value
+        for ref in refs
+        for value in (str(ref.code or ""), str(ref.legacy_code or ""))
+        if value
+    }
+    if missing_codes:
+        extra_refs = list(
+            await db.scalars(
+                select(WorkSubtype).where(WorkSubtype.legacy_csv_codes.is_not(None))
+            )
+        )
+        refs.extend(
+            ref
+            for ref in extra_refs
+            if any(str(value) in missing_codes for value in (ref.legacy_csv_codes or []))
+        )
+
+    by_alias: dict[str, list[WorkSubtype]] = {}
+    for ref in refs:
+        aliases = {str(ref.code or "").strip(), str(ref.legacy_code or "").strip()}
+        aliases.update(str(value).strip() for value in (ref.legacy_csv_codes or []))
+        for alias in aliases:
+            if alias:
+                by_alias.setdefault(alias, []).append(ref)
+
+    for code, rows in unresolved.items():
+        candidates = {ref.id: ref for ref in by_alias.get(code, [])}
+        if len(candidates) != 1:
+            for estimate in rows:
+                setattr(estimate, "_legacy_work_type_mapping_ambiguous", len(candidates) > 1)
+            continue
+        ref = next(iter(candidates.values()))
+        canonical = str(ref.code or "").strip()
+        if "/" in canonical:
+            section_id, subtype_id = canonical.split("/", 1)
+        else:
+            section_id = str(ref.section_code or "").strip()
+            subtype_id = canonical
+        if not section_id or not subtype_id:
+            continue
+        for estimate in rows:
+            setattr(estimate, "_compat_section_id", section_id)
+            setattr(estimate, "_compat_subtype_id", subtype_id)
+
+
 def _estimate_work_type_review_reason(est: Estimate, raw: dict[str, Any]) -> str | None:
     if bool(getattr(est, "manual_override", False) or raw.get("manual_override")):
         return None
@@ -1183,8 +1617,19 @@ def _estimate_work_type_review_reason(est: Estimate, raw: dict[str, Any]) -> str
         or raw.get("work_subtype_code")
         or raw.get("subtype_code")
     )
-    section_id = getattr(est, "section_id", None) or raw.get("section_id") or getattr(est, "work_section_code", None)
-    subtype_id = getattr(est, "subtype_id", None)
+    section_id = (
+        getattr(est, "section_id", None)
+        or raw.get("section_id")
+        or getattr(est, "_compat_section_id", None)
+        or getattr(est, "work_section_code", None)
+    )
+    subtype_id = (
+        getattr(est, "subtype_id", None)
+        or raw.get("subtype_id")
+        or getattr(est, "_compat_subtype_id", None)
+    )
+    if getattr(est, "_legacy_work_type_mapping_ambiguous", False):
+        return "legacy_work_type_mapping_ambiguous"
     if not subtype_id and isinstance(subtype_code, str) and "/" in subtype_code:
         section_from_code, subtype_id = subtype_code.split("/", 1)
         section_id = section_id or section_from_code
@@ -1477,6 +1922,46 @@ def _append_catalog_recommendations(
         )
 
 
+def _stage_instances_from_batch_snapshot(
+    batch: EstimateBatch,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    payload = batch.taxonomy_snapshot
+    if not isinstance(payload, dict):
+        raise TaxonomySnapshotRequired(
+            "Для нового варианта 2.7 требуется immutable taxonomy snapshot.",
+            details={"estimate_batch_id": batch.id},
+        )
+    try:
+        snapshot = load_immutable_taxonomy_snapshot(payload).to_json()
+    except TaxonomySnapshotIntegrityError as exc:
+        raise TaxonomySnapshotIntegrity(
+            "Immutable taxonomy snapshot не прошёл проверку целостности.",
+            details={"estimate_batch_id": batch.id},
+        ) from exc
+    variant = snapshot.get("variant")
+    if not isinstance(variant, dict):
+        raise TaxonomySnapshotIntegrity(
+            "В taxonomy snapshot отсутствует variant.",
+            details={"estimate_batch_id": batch.id},
+        )
+    snapshot_variant_id = str(
+        snapshot.get("project_variant_id") or variant.get("id") or ""
+    ).strip()
+    if batch.project_variant_id and snapshot_variant_id != str(batch.project_variant_id):
+        raise TaxonomySnapshotIntegrity(
+            "project_variant_id batch не совпадает с taxonomy snapshot.",
+            details={
+                "estimate_batch_id": batch.id,
+                "batch_project_variant_id": batch.project_variant_id,
+                "snapshot_project_variant_id": snapshot_variant_id,
+            },
+        )
+    params = validate_building_params(batch.building_params, variant)
+    stages = build_stage_instances(variant, params)
+    source = "batch_snapshot_dynamic" if params is not None else "batch_snapshot_static"
+    return stages, source, snapshot
+
+
 def _build_stage_aware_groups(
     estimates: list[Estimate],
     estimate_to_row_key: dict[str, str],
@@ -1484,9 +1969,17 @@ def _build_stage_aware_groups(
     diagnostics: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Build WBS groups from JSON v6 work_stage instead of estimate sections."""
-    if isinstance(batch.taxonomy_snapshot, dict):
-        estimate_type_snapshot = batch.taxonomy_snapshot.get("estimate_type") or {}
-        variant_snapshot = batch.taxonomy_snapshot.get("variant") or {}
+    immutable_snapshot = bool(
+        isinstance(batch.taxonomy_snapshot, dict)
+        and batch.taxonomy_snapshot.get("snapshot_content_hash")
+        and batch.taxonomy_snapshot.get("snapshot_schema_version")
+    )
+
+    snapshot: dict[str, Any] | None = None
+    if immutable_snapshot:
+        allowed_stages, taxonomy_source, snapshot = _stage_instances_from_batch_snapshot(batch)
+        estimate_type_snapshot = snapshot.get("estimate_type") or {}
+        variant_snapshot = snapshot.get("variant") or {}
         if not batch.estimate_type_id and estimate_type_snapshot.get("id"):
             batch.estimate_type_id = str(estimate_type_snapshot["id"])
         if not batch.estimate_type_title and estimate_type_snapshot.get("title"):
@@ -1494,7 +1987,7 @@ def _build_stage_aware_groups(
         if not batch.estimate_type_number and estimate_type_snapshot.get("number"):
             batch.estimate_type_number = str(estimate_type_snapshot["number"])
         if not batch.project_variant_id:
-            snapshot_variant_id = batch.taxonomy_snapshot.get("project_variant_id") or variant_snapshot.get("id")
+            snapshot_variant_id = snapshot.get("project_variant_id") or variant_snapshot.get("id")
             if snapshot_variant_id:
                 batch.project_variant_id = str(snapshot_variant_id)
         if not batch.project_variant_title and variant_snapshot.get("title"):
@@ -1506,42 +1999,35 @@ def _build_stage_aware_groups(
         raise ValueError(
             "Некорректная Stage 10 смета: отсутствует зафиксированный тип сметы или вариант объекта."
         )
-    legacy_taxonomy = batch_uses_legacy_taxonomy(batch, estimates)
-    if legacy_taxonomy:
-        allowed_stages = build_persisted_stage_catalog(estimates)
-        if not allowed_stages:
-            raise ValueError(
-                "В старой смете не сохранены названия этапов. "
-                "Автоматически разрешать её через новый справочник запрещено."
-            )
-    elif isinstance(batch.building_params, dict) and batch.building_params.get("floors_count"):
-        try:
-            from app.services.work_taxonomy_service import get_project_variant_stage_instances
 
-            allowed_stages = get_project_variant_stage_instances(
-                str(batch.estimate_type_id),
-                str(batch.project_variant_id),
-                batch.building_params,
-            )
-        except ValueError as exc:
-            raise ValueError(
-                "Выбранный тип сметы/вариант объекта не найден в справочнике JSON v6"
-            ) from exc
-    elif isinstance(batch.taxonomy_snapshot, dict) and isinstance(
-        (batch.taxonomy_snapshot.get("variant") or {}).get("stages"),
-        list,
-    ):
-        allowed_stages = copy.deepcopy(batch.taxonomy_snapshot["variant"]["stages"])
+    if immutable_snapshot:
+        legacy_taxonomy = False
     else:
-        try:
-            allowed_stages = get_project_variant_stages(
-                str(batch.estimate_type_id),
-                str(batch.project_variant_id),
+        legacy_taxonomy = batch_uses_legacy_taxonomy(batch, estimates)
+        if legacy_taxonomy:
+            allowed_stages = build_persisted_stage_catalog(estimates)
+            taxonomy_source = "persisted_legacy_stage_catalog"
+            if not allowed_stages:
+                raise ValueError(
+                    "В старой смете не сохранены названия этапов. "
+                    "Автоматически разрешать её через новый справочник запрещено."
+                )
+        elif str(batch.project_variant_id) == BRICK_HOUSE_VARIANT_ID:
+            raise TaxonomySnapshotRequired(
+                "Для нового варианта 2.7 отсутствует immutable taxonomy snapshot.",
+                details={"estimate_batch_id": batch.id},
             )
-        except ValueError as exc:
-            raise ValueError(
-                "Выбранный тип сметы/вариант объекта не найден в справочнике JSON v6"
-            ) from exc
+        else:
+            try:
+                allowed_stages = get_project_variant_stages(
+                    str(batch.estimate_type_id),
+                    str(batch.project_variant_id),
+                )
+                taxonomy_source = "runtime_legacy_dictionary"
+            except ValueError as exc:
+                raise ValueError(
+                    "Выбранный тип сметы/вариант объекта не найден в legacy runtime taxonomy"
+                ) from exc
 
     stage_by_number = {
         str(stage.get("number") or ""): stage
@@ -1559,11 +2045,7 @@ def _build_stage_aware_groups(
             "mode": GROUPING_MODE_STAGE_AWARE,
             "estimate_type_id": batch.estimate_type_id,
             "project_variant_id": batch.project_variant_id,
-            "taxonomy_source": (
-                "persisted_snapshot"
-                if legacy_taxonomy or isinstance(batch.taxonomy_snapshot, dict)
-                else "runtime_dictionary"
-            ),
+            "taxonomy_source": taxonomy_source,
             "legacy_taxonomy": legacy_taxonomy,
             "fallback_rows": [],
             "invalid_stage_rows": [],
@@ -1683,7 +2165,7 @@ def _build_stage_aware_groups(
     )
     result = sorted(
         groups.values(),
-        key=lambda item: (float(item["sort_order"]), item["section_key"]),
+        key=_stage_group_sort_key,
     )
     return result
 
@@ -2816,6 +3298,8 @@ def _materialize_wbs(
     row_keys: dict[str, Estimate],
     *,
     owner_user_id: str | None = None,
+    diagnostics: dict[str, Any] | None = None,
+    grouping_mode: str = GROUPING_MODE_ESTIMATE_STRUCTURE,
 ) -> tuple[list[KtpWbsGroup], list[KtpWbsItem], list[str]]:
     """Create WBS objects and expand one Estimate into stage-instance KTP items.
 
@@ -2829,6 +3313,9 @@ def _materialize_wbs(
         projection_metadata,
     )
 
+    diagnostics = diagnostics if diagnostics is not None else {}
+    invalid_row_keys = diagnostics.setdefault("invalid_estimate_row_keys", [])
+    duplicate_row_keys = diagnostics.setdefault("duplicate_estimate_row_keys", [])
     groups: list[KtpWbsGroup] = []
     items: list[KtpWbsItem] = []
     warnings: list[str] = []
@@ -2985,6 +3472,9 @@ def _materialize_wbs(
         group = _ensure_group(raw_group, group_index, projection)
         projected_name = str(projection.get("name") or fallback_name).strip() or fallback_name
         work_type_fields = _work_type_fields(projected_name, estimate)
+        if origin == "ai_added" and raw_item.get("recommendation_source") == CATALOG_RECOMMENDATION_SOURCE:
+            work_type_fields["work_type_needs_review"] = False
+            work_type_fields["operator_review_required"] = False
         labor = (
             catalog_labor_for_projection(
                 estimate, projection, owner_user_id=session_owner_user_id
@@ -3051,16 +3541,43 @@ def _materialize_wbs(
             origin = str(raw_it.get("origin") or "ai_added").strip()
             row_key = raw_it.get("row_key")
             estimate: Estimate | None = None
-            if origin == "from_estimate" and isinstance(row_key, str):
-                estimate = row_keys.get(row_key.strip())
-            if origin == "from_estimate" and estimate is None:
-                origin = "ai_added"
+            if origin == "from_estimate":
+                normalized_row_key = row_key.strip() if isinstance(row_key, str) else ""
+                estimate = row_keys.get(normalized_row_key) if normalized_row_key else None
+                if estimate is None:
+                    detail = {
+                        "row_key": row_key,
+                        "name": name,
+                        "group_title": raw_g.get("title"),
+                    }
+                    invalid_row_keys.append(detail)
+                    warnings.append(
+                        f"Некорректная ссылка row_key={row_key!r} для «{name}»; "
+                        "AI-item не создан"
+                    )
+                    if grouping_mode == GROUPING_MODE_STAGE_AWARE:
+                        raise InvalidStageAwareRowReference(
+                            "Детерминированная Stage 1 структура содержит неизвестный row_key.",
+                            details=detail,
+                        )
+                    continue
 
             if estimate is not None:
                 if estimate.id in seen_estimate_ids:
+                    duplicate = {
+                        "row_key": row_key,
+                        "estimate_id": estimate.id,
+                        "name": estimate.work_name,
+                    }
+                    duplicate_row_keys.append(duplicate)
                     warnings.append(
-                        f"Позиция «{estimate.work_name}» продублирована ИИ — оставлена одна копия"
+                        f"Позиция «{estimate.work_name}» продублирована — оставлена одна копия"
                     )
+                    if grouping_mode == GROUPING_MODE_STAGE_AWARE:
+                        raise InvalidStageAwareRowReference(
+                            "Детерминированная Stage 1 структура содержит повторный row_key.",
+                            details=duplicate,
+                        )
                     continue
                 seen_estimate_ids.add(estimate.id)
                 from app.services.quantity_projection_service import (
@@ -3128,19 +3645,25 @@ def _materialize_wbs(
             for projection_index, projection in enumerate(
                 ktp_projection_payloads_for_estimate(est), start=1
             ):
+                fallback_projection = dict(projection)
+                fallback_raw_item: dict[str, Any] = {}
+                if invalid_row_keys:
+                    fallback_projection["needs_review"] = True
+                    fallback_projection["review_reason"] = "invalid_llm_row_reference"
+                    fallback_raw_item["ai_reason"] = "invalid_llm_row_reference"
                 _append_item(
                     raw_group=fallback_raw,
                     group_index=len(raw_groups) + 1,
                     item_index=i_idx,
                     projection_index=projection_index,
-                    projection=projection,
-                    raw_item={},
+                    projection=fallback_projection,
+                    raw_item=fallback_raw_item,
                     estimate=est,
                     origin="from_estimate",
                     fallback_name=est.work_name,
                 )
 
-    groups.sort(key=lambda group: (float(group.sort_order or 0), str(group.title or ""), str(group.id)))
+    groups = _sort_stage_groups(groups)
     return groups, items, warnings
 
 
@@ -3155,7 +3678,7 @@ async def _apply_manual_work_subtype(
 ) -> None:
     ref = await db.scalar(select(WorkSubtype).where(WorkSubtype.code == code))
     if not ref:
-        raise ValueError(f"Подтип работ {code} не найден")
+        raise KtpNotFoundError(f"Подтип работ {code} не найден")
 
     previous_code = item.work_subtype_code
     item.work_section_code = ref.section_code
@@ -3371,6 +3894,48 @@ async def update_item(
     return await get_wbs(db, project_id, item.session_id)
 
 
+async def accept_stage1_items(
+    db: AsyncSession, project_id: str, session_id: str
+) -> dict[str, Any]:
+    await get_session_by_id(db, project_id, session_id)
+    now = _now()
+    await db.execute(
+        update(KtpWbsItem)
+        .where(KtpWbsItem.session_id == session_id)
+        .where(KtpWbsItem.origin == "ai_added")
+        .where(KtpWbsItem.review_status == "pending")
+        .values(
+            review_status="accepted",
+            work_type_needs_review=False,
+            operator_review_required=False,
+            updated_at=now,
+        )
+    )
+    result = await db.execute(
+        select(KtpWbsItem)
+        .where(KtpWbsItem.session_id == session_id)
+        .where(KtpWbsItem.origin != "ai_added")
+        .where(KtpWbsItem.review_status != "rejected")
+        .where(KtpWbsItem.manual_override.is_(False))
+        .where(
+            or_(
+                KtpWbsItem.work_type_needs_review.is_(True),
+                KtpWbsItem.operator_review_required.is_(True),
+            )
+        )
+    )
+    items = list(result.scalars().all())
+    work_type_changed = False
+    for item in items:
+        await _confirm_item_review(db, item)
+        item.updated_at = now
+        work_type_changed = True
+    if work_type_changed:
+        await _rebuild_subtypes_if_needed(db, session_id)
+    await db.commit()
+    return await get_wbs(db, project_id, session_id)
+
+
 async def create_item(
     db: AsyncSession, project_id: str, group_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
@@ -3501,51 +4066,75 @@ async def delete_group(
 async def approve_stage1(
     db: AsyncSession, project_id: str, session_id: str
 ) -> KtpEstimateSession:
-    session = await get_session_by_id(db, project_id, session_id)
-    pending = await db.scalar(
-        select(KtpWbsItem.id)
-        .where(KtpWbsItem.session_id == session_id)
-        .where(KtpWbsItem.origin == "ai_added")
-        .where(KtpWbsItem.review_status == "pending")
-        .limit(1)
+    session = await db.scalar(
+        select(KtpEstimateSession)
+        .where(KtpEstimateSession.id == session_id)
+        .where(KtpEstimateSession.project_id == project_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
-    if pending:
-        raise ValueError(
-            "Не все добавленные ИИ работы проверены — примите или отклоните их"
+    if not session:
+        raise KtpNotFoundError(
+            f"Сеанс КТП {session_id} не найден в проекте {project_id}"
         )
-    review_pending = await db.scalar(
-        select(KtpWbsItem.id)
-        .where(KtpWbsItem.session_id == session_id)
-        .where(KtpWbsItem.review_status != "rejected")
-        .where(KtpWbsItem.manual_override.is_(False))
-        .where(KtpWbsItem.work_type_needs_review.is_(True))
-        .limit(1)
+
+    pending_ai_ids = list(
+        await db.scalars(
+            select(KtpWbsItem.id)
+            .where(KtpWbsItem.session_id == session_id)
+            .where(KtpWbsItem.origin == "ai_added")
+            .where(KtpWbsItem.review_status == "pending")
+        )
     )
-    if review_pending:
-        raise ValueError(
-            "Есть строки структуры, требующие проверки — подтвердите их или исправьте тип работ"
+    if pending_ai_ids:
+        raise Stage1ReviewRequired(
+            "Не все добавленные ИИ работы проверены — примите или отклоните их.",
+            details={"problem_item_ids": pending_ai_ids, "reason": "ai_items_pending"},
         )
-    estimate_review_rows = await db.execute(
-        select(KtpWbsItem, Estimate)
-        .join(Estimate, KtpWbsItem.estimate_id == Estimate.id)
-        .where(KtpWbsItem.session_id == session_id)
-        .where(KtpWbsItem.review_status != "rejected")
-        .where(KtpWbsItem.manual_override.is_(False))
-    )
-    for item, estimate in estimate_review_rows:
-        raw = estimate.raw_data if isinstance(estimate.raw_data, dict) else {}
-        stage_needs_review, _stage_reason, _stage_percent = _estimate_stage_review_info(estimate, raw)
-        work_type_needs_review = bool(
-            estimate.classification_needs_review
-            or raw.get("classification_needs_review")
-        )
-        if stage_needs_review or work_type_needs_review:
-            item.operator_review_required = True
-            raise ValueError(
-                "Есть строки структуры, требующие проверки — подтвердите их или исправьте тип работ"
+
+    rows = list(
+        (
+            await db.execute(
+                select(KtpWbsItem, Estimate)
+                .outerjoin(Estimate, KtpWbsItem.estimate_id == Estimate.id)
+                .where(KtpWbsItem.session_id == session_id)
+                .where(KtpWbsItem.origin != "ai_added")
+                .where(KtpWbsItem.review_status != "rejected")
             )
+        ).all()
+    )
+
+    problem_items: list[dict[str, Any]] = []
+    for item, estimate in rows:
+        state = compute_item_review_state(item, estimate)
+        # Synchronize all persisted flags in one transaction. Manual overrides
+        # explicitly suppress automatic review requirements.
+        item.work_type_needs_review = bool(
+            state.work_type_needs_review and not item.manual_override
+        )
+        item.operator_review_required = bool(
+            state.operator_review_required and not item.manual_override
+        )
+        if item.operator_review_required or item.work_type_needs_review:
+            problem_items.append(
+                {
+                    "item_id": item.id,
+                    "estimate_id": item.estimate_id,
+                    "stage_review_reason": state.stage_review_reason,
+                    "stage_confidence_percent": state.stage_confidence_percent,
+                    "work_type_needs_review": item.work_type_needs_review,
+                }
+            )
+
+    if problem_items:
+        await db.commit()
+        raise Stage1ReviewRequired(
+            "Есть строки структуры, требующие проверки — подтвердите их или исправьте тип работ.",
+            details={"problem_items": problem_items},
+        )
+
     session.status = "stage2_review"
-    session.updated_at = _now()
+    session.updated_at = utc_now()
     await db.commit()
     await db.refresh(session)
     return session
@@ -3716,6 +4305,7 @@ async def _resolve_questions_from_known_context(
     questions: list[dict[str, Any]],
     current_answers: dict[str, str],
 ) -> dict[str, str]:
+    """Resolve questions across every estimate chunk without silent truncation."""
     if not questions:
         return {}
 
@@ -3723,7 +4313,6 @@ async def _resolve_questions_from_known_context(
         clarification_answers,
         current_group_id=group.id,
     ) or "(нет)"
-    estimate_rows_block = _format_estimate_rows_for_prompt(estimates) or "(нет)"
     works_block = "\n".join(f"- {it.name}" for it in items) or "(нет)"
     questions_block = "\n".join(
         f"- key={q.get('key')}: {q.get('label') or q.get('hint') or q.get('key')}"
@@ -3731,14 +4320,28 @@ async def _resolve_questions_from_known_context(
         if isinstance(q, dict)
     )
     current_answers_block = (
-        "\n".join(f"- {k}: {v}" for k, v in current_answers.items())
+        "\n".join(f"- {key}: {value}" for key, value in current_answers.items())
         if current_answers
         else "(нет)"
     )
+    allowed_keys = {
+        str(q.get("key"))
+        for q in questions
+        if isinstance(q, dict) and q.get("key")
+    }
+    chunk_size = max(1, int(getattr(settings, "KTP_ESTIMATE_CHUNK_ROWS", 80) or 80))
+    chunks = [
+        estimates[index : index + chunk_size]
+        for index in range(0, len(estimates), chunk_size)
+    ] or [[]]
 
-    prompt = f"""Ты проверяешь, можно ли ответить на уточняющие вопросы без пользователя.
-Используй ТОЛЬКО известные данные ниже: ответы пользователя, работы WBS и исходные строки сметы.
+    answers_by_key: dict[str, list[str]] = {key: [] for key in allowed_keys}
+    for chunk_index, chunk in enumerate(chunks, start=1):
+        estimate_rows_block = _format_estimate_rows_for_prompt(chunk) or "(нет)"
+        prompt = f"""Ты проверяешь, можно ли ответить на уточняющие вопросы без пользователя.
+Используй ТОЛЬКО известные данные ниже: ответы пользователя, работы WBS и исходные строки текущего чанка сметы.
 Не додумывай проектные решения. Если ответа нет явно или надежно не следует из данных, оставь вопрос unresolved.
+Это чанк {chunk_index} из {len(chunks)}. Ответ из одного чанка не должен противоречить другим чанкам.
 
 ГРУППА: {group.title}
 
@@ -3751,7 +4354,7 @@ async def _resolve_questions_from_known_context(
 РАБОТЫ WBS:
 {works_block}
 
-ИСХОДНЫЕ СТРОКИ СМЕТЫ:
+ИСХОДНЫЕ СТРОКИ СМЕТЫ — ЧАНК {chunk_index}/{len(chunks)}:
 {estimate_rows_block}
 
 ВОПРОСЫ:
@@ -3759,36 +4362,47 @@ async def _resolve_questions_from_known_context(
 
 Верни строго JSON:
 {{"answers": {{"question_key": "ответ, найденный в известных данных"}}, "unresolved": ["question_key"]}}"""
-
-    try:
-        parsed = parse_json_object(
-            await create_chat_completion(
-                model=settings.KTP_GENERATION_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0,
-                max_tokens=min(settings.KTP_MAX_TOKENS, 2500),
-                response_format={"type": "json_object"},
+        try:
+            parsed = parse_json_object(
+                await create_chat_completion(
+                    model=settings.KTP_GENERATION_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=min(settings.KTP_MAX_TOKENS, 2500),
+                    response_format={"type": "json_object"},
+                )
             )
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("Stage2 question resolver failed for group %s", group.id)
-        return {}
-
-    allowed_keys = {
-        str(q.get("key"))
-        for q in questions
-        if isinstance(q, dict) and q.get("key")
-    }
-    answers = parsed.get("answers")
-    if not isinstance(answers, dict):
-        return {}
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Stage2 question resolver failed for group %s chunk %s/%s",
+                group.id,
+                chunk_index,
+                len(chunks),
+            )
+            return {}
+        raw_answers = parsed.get("answers")
+        if not isinstance(raw_answers, dict):
+            continue
+        for key, value in raw_answers.items():
+            key = str(key)
+            answer = str(value or "").strip()
+            if key in allowed_keys and answer:
+                answers_by_key[key].append(answer)
 
     resolved: dict[str, str] = {}
-    for key, value in answers.items():
-        key = str(key)
-        answer = str(value or "").strip()
-        if key in allowed_keys and answer:
-            resolved[key] = answer
+    for key, values in answers_by_key.items():
+        if not values:
+            continue
+        normalized = {re.sub(r"\s+", " ", value).strip().casefold() for value in values}
+        if len(normalized) == 1:
+            resolved[key] = values[0]
+        else:
+            logger.info(
+                "Stage2 known-context answers conflict for group %s key %s: %s",
+                group.id,
+                key,
+                values,
+            )
     return resolved
 
 
@@ -4070,6 +4684,81 @@ async def skip_stage2(
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 _DEFAULT_VOLUME = 100.0
 
+_OPERATION_SUBTYPE_FALLBACKS: dict[str, str] = {
+    "anchor_installation": "foundation/embed_anchor_bolts",
+    "blind_area_installation": "landscape/soft_blind_area",
+    "brick_material_lifting": "load_bearing_walls/brick_masonry",
+    "compaction": "earthworks/soil_compaction_foundation",
+    "concrete_curing": "foundation/foundation_rebar_formwork_concrete",
+    "concrete_finishing": "floor_screed/concrete_floor_on_ground",
+    "concrete_placement": "foundation/foundation_rebar_formwork_concrete",
+    "concrete_surface_ironing": "floor_screed/industrial_concrete_floors",
+    "cutoff_waterproofing_installation": "waterproofing/cutoff_waterproofing",
+    "drainage_installation": "landscape/site_drainage_stormwater",
+    "driven_pile_installation": "foundation/pile_foundation",
+    "excavation": "earthworks/excavation_pit_trench",
+    "excavation_geodetic_control": "mep_external/external_geodesy",
+    "facade_base_coat_application": "interior_finishing/facade_finishing",
+    "facade_joint_sealing": "waterproofing/joint_sealant_waterproofing",
+    "facade_scaffolding_installation": "interior_finishing/facade_finishing",
+    "facade_tie_installation": "insulation/facade_wall_insulation",
+    "formwork_installation": "foundation/foundation_rebar_formwork_concrete",
+    "formwork_stripping": "foundation/foundation_rebar_formwork_concrete",
+    "hardware_adjustment": "windows_doors/repair_adjustment",
+    "insulation_mechanical_fastening": "insulation/foundation_plinth_insulation",
+    "masonry_geodetic_control": "load_bearing_walls/brick_masonry",
+    "masonry_scaffolding_installation": "load_bearing_walls/brick_masonry",
+    "membrane_installation": "waterproofing/membrane_waterproofing",
+    "metal_lintel_installation": "load_bearing_walls/arm_belts_lintels",
+    "opening_measurement": "windows_doors/windows",
+    "partition_axis_layout": "partitions/brick_partitions",
+    "pile_head_preparation": "foundation/grillage_and_pile_caps",
+    "pit_cleaning": "earthworks/site_clearing",
+    "rebar_installation": "foundation/foundation_rebar_formwork_concrete",
+    "reinforcing_mesh_installation": "foundation/foundation_rebar_formwork_concrete",
+    "roof_drainage_installation": "roofing/roof_drainage_and_safety",
+    "site_survey_layout": "mep_external/external_geodesy",
+    "surface_preparation": "waterproofing/underground_structure_waterproofing",
+    "temporary_access_road_installation": "mobilization/site_setup",
+    "thermal_insulation": "insulation/foundation_plinth_insulation",
+    "thermal_panel_installation": "insulation/facade_wall_insulation",
+    "topsoil_removal": "earthworks/site_clearing",
+    "underfloor_heating_collector_installation": "mep_internal/heating",
+    "utility_sleeve_installation": "mep_internal/sewage",
+    "waterproofing": "waterproofing/underground_structure_waterproofing",
+    "wood_protection": "roofing/roof_insulation_vapor_barrier",
+}
+
+_TAXONOMY_OPERATION_FALLBACKS: dict[str, str] = {
+    "earthworks/excavation_pit_trench": "excavation",
+    "earthworks/soil_compaction_foundation": "compaction",
+    "foundation/foundation_rebar_formwork_concrete": "concrete_placement",
+    "foundation/pile_foundation": "driven_pile_installation",
+    "foundation/grillage_and_pile_caps": "pile_head_preparation",
+    "foundation/embed_anchor_bolts": "anchor_installation",
+    "waterproofing/underground_structure_waterproofing": "waterproofing",
+    "waterproofing/coating_waterproofing": "waterproofing",
+    "waterproofing/roll_waterproofing": "waterproofing",
+    "waterproofing/membrane_waterproofing": "membrane_installation",
+    "waterproofing/cutoff_waterproofing": "cutoff_waterproofing_installation",
+    "waterproofing/joint_sealant_waterproofing": "facade_joint_sealing",
+    "insulation/foundation_plinth_insulation": "thermal_insulation",
+    "insulation/facade_wall_insulation": "thermal_insulation",
+    "insulation/floor_slab_insulation": "thermal_insulation",
+    "load_bearing_walls/brick_masonry": "brick_masonry",
+    "load_bearing_walls/arm_belts_lintels": "concrete_placement",
+    "partitions/brick_partitions": "brick_masonry",
+    "floor_screed/concrete_floor_on_ground": "concrete_placement",
+    "floor_screed/industrial_concrete_floors": "concrete_finishing",
+    "windows_doors/windows": "window_installation",
+    "windows_doors/window_slopes_sills": "surface_preparation",
+    "windows_doors/repair_adjustment": "hardware_adjustment",
+    "landscape/site_drainage_stormwater": "drainage_installation",
+    "landscape/soft_blind_area": "blind_area_installation",
+    "mep_external/external_geodesy": "site_survey_layout",
+    "mep_internal/heating": "underfloor_heating_collector_installation",
+}
+
 
 SESSION_SUBTYPE_ITEM_SEP = "::"
 
@@ -4137,6 +4826,23 @@ def _resolve_item_subtype(
             item.operator_review_required = bool(result.needs_review)
 
     if not code or code == UNKNOWN_SUBTYPE_CODE:
+        operation_code = str(item.operation_code or "").strip()
+        fallback_code = _OPERATION_SUBTYPE_FALLBACKS.get(operation_code)
+        ref = subtypes_by_code.get(fallback_code or "")
+        if fallback_code and ref:
+            item.work_section_code = ref.section_code
+            item.work_section_name = ref.section_name
+            item.work_subtype_code = ref.code
+            item.work_subtype_name = ref.name
+            item.work_type_confidence = "operation"
+            item.work_type_needs_review = False
+            item.work_type_candidates = item.work_type_candidates or []
+            item.work_type_source = "operation_fallback"
+            item.operator_review_required = False
+            code = ref.code
+            name = ref.name
+
+    if not code or code == UNKNOWN_SUBTYPE_CODE:
         return UNKNOWN_SUBTYPE_CODE, UNKNOWN_SUBTYPE_NAME, None, unit
 
     ref = subtypes_by_code.get(code)
@@ -4192,7 +4898,7 @@ def _clear_rate_projection(row: KtpSessionSubtype, reason: str | None) -> None:
     row.rate_auto_applicable = False
     row.rate_needs_review = True
     row.rate_review_reason = reason
-    row.rate_trace = {"selection_result": reason} if reason else None
+    _set_rate_trace(row, {"selection_result": reason} if reason else None)
 
 
 def _row_optional_attr(row: Any, name: str) -> Any:
@@ -4204,6 +4910,15 @@ def _set_row_projection_attr(row: Any, name: str, value: Any) -> None:
         setattr(row, name, value)
     except AttributeError:
         return
+
+
+def _rate_trace(row: Any) -> dict[str, Any]:
+    payload = getattr(row, "rate_trace", None)
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _set_rate_trace(row: Any, payload: dict[str, Any] | None) -> None:
+    _set_row_projection_attr(row, "rate_trace", payload)
 
 
 def _stored_operator_rate_selection(row: Any) -> dict[str, Any]:
@@ -4583,6 +5298,12 @@ async def _attach_session_subtype_rate_projection(
             or row.unit
         )
         detected_operations: list[str] = []
+        if not operation_code and taxonomy_code:
+            operation_code = _TAXONOMY_OPERATION_FALLBACKS.get(
+                base_subtype_code(str(taxonomy_code))
+            )
+            if operation_code:
+                detected_operations = [operation_code]
 
         operation_sub_reason: str | None = None
         if not operation_code and item:
@@ -4625,13 +5346,16 @@ async def _attach_session_subtype_rate_projection(
                 )
             _clear_rate_projection(row, reason)
             row.item_unit_code = unit_code
-            row.rate_trace = {
-                "source_row_text": item.name if item else row.subtype_name,
-                "detected_operations": detected_operations,
-                "rate_candidates": [],
-                "selection_result": reason,
-                "selection_sub_reason": sub_reason,
-            }
+            _set_rate_trace(
+                row,
+                {
+                    "source_row_text": item.name if item else row.subtype_name,
+                    "detected_operations": detected_operations,
+                    "rate_candidates": [],
+                    "selection_result": reason,
+                    "selection_sub_reason": sub_reason,
+                },
+            )
             continue
 
         quantity = _float_or_none(item.quantity if item else None) or _float_or_none(row.volume)
@@ -4643,7 +5367,7 @@ async def _attach_session_subtype_rate_projection(
             {
                 (unit_code, confirmed_conversion["target_unit"]): confirmed_conversion["conversion_factor"],
             }
-            if confirmed_conversion and unit_code
+            if confirmed_conversion
             else None
         )
         rate_applicability = {
@@ -4826,7 +5550,7 @@ async def _attach_session_subtype_rate_projection(
             or getattr(catalog, "FORMAT_VERSION", "1.4.0")
         )
         row.rate_catalog_file = catalog_path.name
-        row.rate_trace = {
+        trace = {
             "source_row_text": item.name if item else row.subtype_name,
             "taxonomy_code": str(taxonomy_code),
             "operation_code": selection.operation_code or operation_code,
@@ -4838,11 +5562,12 @@ async def _attach_session_subtype_rate_projection(
             "conversion_required": selection.review_reason == "unit_incompatible",
         }
         if operator_selected_rate_item_id or operator_selected_rate_mapping_id:
-            row.rate_trace["operator_selection"] = {
+            trace["operator_selection"] = {
                 "selected_rate_item_id": operator_selected_rate_item_id,
                 "selected_rate_mapping_id": operator_selected_rate_mapping_id,
                 "output_per_day": stored_operator_selection.get("output_per_day", row.output_per_day),
             }
+        _set_rate_trace(row, trace)
 
         if (
             selection.rate_auto_applicable
@@ -5015,13 +5740,54 @@ async def update_session_subtype(
         .where(KtpEstimateSession.project_id == project_id)
     )
     if not row:
-        raise ValueError("Подтип работ не найден")
+        raise KtpNotFoundError("Подтип работ не найден")
 
+    linked_item: KtpWbsItem | None = None
+
+    async def _linked_item() -> KtpWbsItem | None:
+        nonlocal linked_item
+        if linked_item is None and row.item_id:
+            linked_item = await db.get(KtpWbsItem, row.item_id)
+        return linked_item
+
+    if "unit" in patch:
+        unit = (str(patch["unit"]).strip() or None) if patch["unit"] else None
+        row.unit = unit
+        row.rate_unit_conversion = None
+        row.output_source = "default"
+        for attr in (
+            "rate_unit_code",
+            "item_unit_code",
+            "unit_conversion_factor",
+            "labor_hours_per_unit_min",
+            "labor_hours_per_unit_avg",
+            "labor_hours_per_unit_max",
+            "effective_labor_hours_per_unit_min",
+            "effective_labor_hours_per_unit_avg",
+            "effective_labor_hours_per_unit_max",
+            "session_calculated_labor_hours_min",
+            "session_calculated_labor_hours_avg",
+            "session_calculated_labor_hours_max",
+            "resolved_labor_source",
+            "resolved_labor_hours",
+            "rate_trace",
+        ):
+            _set_row_projection_attr(row, attr, None)
+        item = await _linked_item()
+        if item:
+            item.unit = unit
+            if item.quantity is None and row.volume is not None:
+                item.quantity = float(row.volume)
+                item.quantity_source = "user"
     if "volume" in patch:
         v = patch["volume"]
         if v is not None and float(v) <= 0:
             raise ValueError("Объём должен быть больше нуля")
         row.volume = float(v) if v is not None else None
+        item = await _linked_item()
+        if item:
+            item.quantity = row.volume
+            item.quantity_source = "user" if row.volume is not None else None
     if "output_per_day" in patch:
         v = patch["output_per_day"]
         if v is not None and float(v) <= 0:
@@ -5052,9 +5818,9 @@ async def update_session_subtype(
             }
             row.rate_unit_conversion = stored_conversion
             flag_modified(row, "rate_unit_conversion")
-            trace = row.rate_trace if isinstance(row.rate_trace, dict) else {}
+            trace = _rate_trace(row)
             trace["operator_selection"] = stored_conversion["operator_selection"]
-            row.rate_trace = trace
+            _set_rate_trace(row, trace)
         if row.output_per_day is not None and row.item_id:
             item = await db.get(KtpWbsItem, row.item_id)
             if item and (item.operator_review_required or item.work_type_needs_review):
@@ -5197,7 +5963,7 @@ async def _process_fer_match(job_id: str) -> None:
             return
 
         job.status = "processing"
-        job.started_at = datetime.utcnow()
+        job.started_at = utc_now()
         session.status = "fer_processing"
         await db.commit()
 
@@ -5245,7 +6011,7 @@ async def _process_fer_match(job_id: str) -> None:
             job.status = "failed"
             job.result = {"error": str(exc)}
         finally:
-            job.finished_at = datetime.utcnow()
+            job.finished_at = utc_now()
             await db.commit()
 
 
@@ -5293,7 +6059,7 @@ async def _apply_manual_fer_table(
         )
     ).mappings().first()
     if row is None:
-        raise ValueError("Таблица ФЕР не найдена")
+        raise KtpNotFoundError("Таблица ФЕР не найдена")
     if row.get("effective_ignored"):
         raise ValueError("Таблица ФЕР помечена как игнорируемая")
 
@@ -5336,7 +6102,7 @@ async def update_item_fer(
         .where(KtpWbsGroup.project_id == project_id)
     )
     if not item:
-        raise ValueError("Позиция КТП не найдена")
+        raise KtpNotFoundError("Позиция КТП не найдена")
     await _apply_manual_fer_table(db, item, fer_table_id)
     session = await db.get(KtpEstimateSession, item.session_id)
     if session and session.status in {"fer_pending", "fer_failed"}:
@@ -5357,12 +6123,12 @@ async def auto_match_item_fer(
         .where(KtpWbsGroup.project_id == project_id)
     )
     if not item:
-        raise ValueError("Позиция КТП не найдена")
+        raise KtpNotFoundError("Позиция КТП не найдена")
     group = await db.get(KtpWbsGroup, item.group_id)
     session = await db.get(KtpEstimateSession, item.session_id)
     batch = await db.get(EstimateBatch, session.estimate_batch_id) if session else None
     if not group or not session or not batch:
-        raise ValueError("Контекст позиции КТП не найден")
+        raise KtpNotFoundError("Контекст позиции КТП не найден")
     await match_session_items(db, session, batch.estimate_kind, [group], [item], None)
     if session.status in {"fer_pending", "fer_failed"}:
         session.status = "fer_review"
@@ -5406,13 +6172,14 @@ def _is_fallback_group_title(title: str | None) -> bool:
 async def _load_session_groups(
     db: AsyncSession, session_id: str
 ) -> list[KtpWbsGroup]:
-    return list(
+    groups = list(
         await db.scalars(
             select(KtpWbsGroup)
             .where(KtpWbsGroup.session_id == session_id)
             .order_by(KtpWbsGroup.sort_order, KtpWbsGroup.created_at)
         )
     )
+    return _sort_stage_groups(groups)
 
 
 def _reassign_sequence_sort_order(

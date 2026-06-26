@@ -16,6 +16,13 @@ except ModuleNotFoundError:  # standalone delivery scripts
 BATCH_TAXONOMY_SNAPSHOT_SCHEMA_VERSION = "estimate_batch_taxonomy_snapshot@1.0.0"
 SNAPSHOT_PAYLOAD_VERSION = 1
 TARGET_DICTIONARY_FILENAME = "construction_work_dictionary_v6_5_0.json"
+SNAPSHOT_EXTERNAL_METADATA_KEYS = frozenset(
+    {
+        "building_params",
+        "work_rate_catalog_version",
+        "work_rate_catalog_hash",
+    }
+)
 
 
 def resolve_config_path(path_text: str) -> Path:
@@ -64,6 +71,8 @@ class ImmutableTaxonomySnapshot:
         payload = copy.deepcopy(dict(candidate) if candidate is not None else self.to_json())
         expected = str(payload.pop("snapshot_content_hash", "") or "")
         algorithm = str(payload.pop("snapshot_content_hash_algorithm", "") or "")
+        for key in SNAPSHOT_EXTERNAL_METADATA_KEYS:
+            payload.pop(key, None)
         if algorithm != "sha256" or expected != self.content_hash:
             raise TaxonomySnapshotIntegrityError("snapshot integrity metadata does not match")
         actual_json = CanonicalJsonServiceV2.dumps(payload)
@@ -163,6 +172,8 @@ def load_immutable_taxonomy_snapshot(payload: Mapping[str, Any]) -> ImmutableTax
     copy_payload = copy.deepcopy(dict(payload))
     expected = str(copy_payload.pop("snapshot_content_hash", "") or "")
     algorithm = str(copy_payload.pop("snapshot_content_hash_algorithm", "") or "")
+    for key in SNAPSHOT_EXTERNAL_METADATA_KEYS:
+        copy_payload.pop(key, None)
     if algorithm != "sha256" or len(expected) != 64:
         raise TaxonomySnapshotIntegrityError("invalid taxonomy snapshot integrity metadata")
     canonical = CanonicalJsonServiceV2.dumps(copy_payload)

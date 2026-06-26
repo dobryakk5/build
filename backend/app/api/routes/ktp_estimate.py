@@ -12,6 +12,7 @@ from app.models import KtpEstimateSession, KtpWbsGroup, KtpWbsItem
 from app.models.project import ProjectMember
 from app.services import ktp_estimate_service as svc
 from app.services import work_taxonomy_service
+from app.services.ktp_errors import KtpDomainError
 from app.services.estimate_batch_revalidation_service import BlockedBatchGuard, RevalidationDomainError
 
 router = APIRouter(prefix="/projects/{project_id}/ktp-estimate", tags=["ktp-estimate"])
@@ -28,6 +29,7 @@ class SessionOut(BaseModel):
     status: str
     error_message: str | None = None
     stage1_job_id: str | None = None
+    stage1_generation: int = 0
     gpr_job_id: str | None = None
     stage1_grouping_mode: str | None = None
     preserve_estimate_structure: bool = False
@@ -42,6 +44,7 @@ class SessionOut(BaseModel):
             status=s.status,
             error_message=s.error_message if str(s.status).endswith("_failed") else None,
             stage1_job_id=s.stage1_job_id,
+            stage1_generation=int(s.stage1_generation or 0),
             gpr_job_id=s.gpr_job_id,
             stage1_grouping_mode=raw.get("grouping_mode"),
             preserve_estimate_structure=bool(raw.get("preserve_estimate_structure")),
@@ -161,7 +164,9 @@ class ItemOut(BaseModel):
             stage_needs_review=bool(getattr(it, "_stage_needs_review", False)),
             stage_review_reason=getattr(it, "_stage_review_reason", None),
             stage_confidence_percent=getattr(it, "_stage_confidence_percent", None),
-            operator_review_required=bool(it.operator_review_required),
+            operator_review_required=bool(
+                getattr(it, "_computed_operator_review_required", it.operator_review_required)
+            ),
             manual_override=bool(it.manual_override),
             gpr_confirmed=bool(it.gpr_confirmed),
             gpr_blocker=svc.gpr_blocker(it),
@@ -420,6 +425,7 @@ class ItemFerPatch(BaseModel):
 
 
 class SessionSubtypePatch(BaseModel):
+    unit: str | None = None
     volume: float | None = None
     output_per_day: float | None = None
     crew_size: int | None = None
@@ -430,9 +436,8 @@ class SessionSubtypePatch(BaseModel):
 
 
 def _value_error(exc: ValueError) -> HTTPException:
-    detail = str(exc)
-    code = 404 if "не найден" in detail or "не найдена" in detail else 422
-    return HTTPException(status_code=code, detail=detail)
+    # Compatibility fallback only. New KTP code must raise typed KtpDomainError.
+    return HTTPException(status_code=422, detail=str(exc))
 
 
 def _raise_batch_guard(exc: RevalidationDomainError) -> None:
@@ -440,6 +445,13 @@ def _raise_batch_guard(exc: RevalidationDomainError) -> None:
     if exc.details:
         detail["details"] = exc.details
     raise HTTPException(exc.http_status, detail=detail) from exc
+
+
+def _raise_ktp_domain(exc: KtpDomainError) -> None:
+    detail: dict[str, object] = {"code": exc.code, "message": exc.message}
+    if exc.details:
+        detail["details"] = exc.details
+    raise HTTPException(status_code=exc.http_status, detail=detail) from exc
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -463,6 +475,8 @@ async def start_session(
             force=body.force,
             preserve_estimate_structure=body.preserve_estimate_structure,
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     except RevalidationDomainError as exc:
@@ -499,6 +513,8 @@ async def get_wbs(
 ):
     try:
         payload = await svc.get_wbs(db, str(project_id), str(session_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -513,6 +529,8 @@ async def reset_session(
 ):
     try:
         await svc.reset_session(db, str(project_id), str(session_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return None
@@ -530,6 +548,24 @@ async def patch_item(
         payload = await svc.update_item(
             db, str(project_id), str(item_id), body.model_dump(exclude_unset=True)
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
+    except ValueError as exc:
+        raise _value_error(exc)
+    return WbsOut.of(payload)
+
+
+@router.post("/sessions/{session_id}/accept-stage1-items", response_model=WbsOut)
+async def accept_stage1_items(
+    project_id: UUID,
+    session_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _member=Depends(require_action(Action.EDIT)),
+):
+    try:
+        payload = await svc.accept_stage1_items(db, str(project_id), str(session_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -547,6 +583,8 @@ async def add_item(
         payload = await svc.create_item(
             db, str(project_id), str(group_id), body.model_dump()
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -561,6 +599,8 @@ async def remove_item(
 ):
     try:
         payload = await svc.delete_item(db, str(project_id), str(item_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -578,6 +618,8 @@ async def add_group(
         payload = await svc.create_group(
             db, str(project_id), str(session_id), body.model_dump()
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -595,6 +637,8 @@ async def patch_group(
         payload = await svc.update_group(
             db, str(project_id), str(group_id), body.model_dump(exclude_unset=True)
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -609,6 +653,8 @@ async def remove_group(
 ):
     try:
         payload = await svc.delete_group(db, str(project_id), str(group_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     except PermissionError as exc:
@@ -625,6 +671,8 @@ async def approve_stage1(
 ):
     try:
         session = await svc.approve_stage1(db, str(project_id), str(session_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return SessionOut.of(session)
@@ -646,6 +694,8 @@ async def generate_card(
         result = await svc.generate_card_for_wbs_group(
             db, str(project_id), str(group_id), body.answers or None
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     except Exception as exc:  # noqa: BLE001
@@ -669,6 +719,8 @@ async def get_card(
 ):
     try:
         card = await svc.get_card(db, str(project_id), str(group_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return CardOut(**card)
@@ -686,6 +738,8 @@ async def patch_card(
         card = await svc.update_card(
             db, str(project_id), str(group_id), body.model_dump(exclude_unset=True)
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return CardOut(**card)
@@ -700,6 +754,8 @@ async def approve_stage2(
 ):
     try:
         session = await svc.approve_stage2(db, str(project_id), str(session_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return SessionOut.of(session)
@@ -714,6 +770,8 @@ async def skip_stage2(
 ):
     try:
         session = await svc.skip_stage2(db, str(project_id), str(session_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return SessionOut.of(session)
@@ -734,6 +792,8 @@ async def build_subtypes(
         payload = await svc.rebuild_session_subtypes(
             db, str(project_id), str(session_id)
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -755,6 +815,8 @@ async def patch_session_subtype(
             body.model_dump(exclude_unset=True),
             user_id=member.user_id,
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -769,6 +831,8 @@ async def approve_prod(
 ):
     try:
         session = await svc.approve_prod(db, str(project_id), str(session_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return SessionOut.of(session)
@@ -792,6 +856,8 @@ async def match_fer(
             str(session_id),
             member.user_id,
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return FerJobResponse(job_id=job.id)
@@ -806,6 +872,8 @@ async def approve_fer(
 ):
     try:
         session = await svc.approve_fer_matches(db, str(project_id), str(session_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return SessionOut.of(session)
@@ -826,6 +894,8 @@ async def patch_item_fer(
             str(item_id),
             body.fer_table_id,
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -840,6 +910,8 @@ async def match_item_fer(
 ):
     try:
         payload = await svc.auto_match_item_fer(db, str(project_id), str(item_id))
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return WbsOut.of(payload)
@@ -860,6 +932,8 @@ async def propose_sequence(
         payload = await svc.propose_group_sequence(
             db, str(project_id), str(session_id)
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     except Exception as exc:  # noqa: BLE001
@@ -878,6 +952,8 @@ async def approve_sequence(
         session = await svc.approve_group_sequence(
             db, str(project_id), str(session_id)
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     return SessionOut.of(session)
@@ -903,6 +979,8 @@ async def build_gpr(
             session_id=str(session_id),
             user_id=member.user_id,
         )
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
     except RevalidationDomainError as exc:

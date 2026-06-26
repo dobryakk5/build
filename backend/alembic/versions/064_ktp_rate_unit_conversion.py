@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 
 revision = "064_ktp_rate_unit_conversion"
@@ -14,11 +12,18 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "ktp_session_subtypes",
-        sa.Column("rate_unit_conversion", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    op.execute(
+        """
+        ALTER TABLE ktp_session_subtypes
+        ADD COLUMN IF NOT EXISTS rate_unit_conversion JSONB
+        """
     )
 
 
 def downgrade() -> None:
-    op.drop_column("ktp_session_subtypes", "rate_unit_conversion")
+    op.execute(
+        """
+        ALTER TABLE ktp_session_subtypes
+        DROP COLUMN IF EXISTS rate_unit_conversion
+        """
+    )

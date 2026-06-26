@@ -53,6 +53,9 @@ class KtpEstimateSession(Base, TimestampMixin):
     stage1_job_id: Mapped[str | None] = mapped_column(
         ForeignKey("jobs.id", ondelete="SET NULL")
     )
+    stage1_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     gpr_job_id: Mapped[str | None] = mapped_column(
         ForeignKey("jobs.id", ondelete="SET NULL")
     )

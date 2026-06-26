@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowUp, Check, Download } from "lucide-react";
+import { ArrowUp, Check, Download, Trash2 } from "lucide-react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
 import { ktpEstimate, workTaxonomy } from "@/lib/api";
@@ -19,11 +19,11 @@ import type {
 } from "@/lib/types";
 
 const ORIGIN_BADGE: Partial<Record<KtpWbsItem["origin"], { label: string; color: string }>> = {
-  ai_added: { label: "ИИ добавил", color: "#b45309" },
   manual: { label: "вручную", color: "#2563eb" },
 };
 
 function itemSourceBadge(item: KtpWbsItem): { label: string; color: string } | null {
+  if (item.origin === "ai_added") return null;
   if (item.work_type_source === "manual") return ORIGIN_BADGE.manual ?? null;
   if (item.manual_override) return { label: "Утверждено", color: "#15803d" };
   if (item.origin === "from_estimate") return null;
@@ -173,6 +173,63 @@ function groupIdentifierTitle(group: KtpWbsGroup) {
   ].filter(Boolean).join("\n");
 }
 
+function stageNumberParts(value: string | null | undefined) {
+  const matches = String(value || "").match(/\d+/g);
+  return matches?.map((part) => Number(part)) ?? [Number.MAX_SAFE_INTEGER];
+}
+
+function compareStageNumbers(a: string | null | undefined, b: string | null | undefined) {
+  const left = stageNumberParts(a);
+  const right = stageNumberParts(b);
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const delta = (left[index] ?? 0) - (right[index] ?? 0);
+    if (delta !== 0) return delta;
+  }
+  return 0;
+}
+
+function floorSortValue(group: KtpWbsGroup) {
+  if (typeof group.floor_number === "number") return group.floor_number;
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function floorSectionTitle(group: KtpWbsGroup) {
+  if (group.floor_number === 0) return "Цоколь";
+  if (typeof group.floor_number === "number") return `${group.floor_number} этаж`;
+  return group.floor_label || "Без этажа";
+}
+
+function compareStageGroups(a: KtpWbsGroup, b: KtpWbsGroup) {
+  const floorDelta = floorSortValue(a) - floorSortValue(b);
+  if (floorDelta !== 0) return floorDelta;
+  const stageDelta = compareStageNumbers(
+    a.template_stage_number || a.stage_number,
+    b.template_stage_number || b.stage_number,
+  );
+  if (stageDelta !== 0) return stageDelta;
+  return a.sort_order - b.sort_order || a.title.localeCompare(b.title, "ru");
+}
+
+function floorSections(groups: KtpWbsGroup[]) {
+  const sorted = [...groups].sort(compareStageGroups);
+  const hasFloors = sorted.some((group) => group.floor_number != null || group.floor_label);
+  if (!hasFloors) {
+    return [{ key: "__all__", title: "", showTitle: false, groups: sorted }];
+  }
+  const sections = new Map<string, { key: string; title: string; showTitle: true; groups: KtpWbsGroup[] }>();
+  for (const group of sorted) {
+    const key = group.floor_number != null ? `floor:${group.floor_number}` : "floor:none";
+    const existing = sections.get(key);
+    if (existing) {
+      existing.groups.push(group);
+    } else {
+      sections.set(key, { key, title: floorSectionTitle(group), showTitle: true, groups: [group] });
+    }
+  }
+  return Array.from(sections.values());
+}
+
 function sourceParentLines(item: KtpWbsItem) {
   const title = (item.source_parent?.title ?? item.section_title ?? "").trim();
   const description = (item.source_parent?.description ?? item.section_description ?? "").trim();
@@ -215,6 +272,62 @@ function ensureItemVisible(wbs: KtpWbs, groupId: string, item: KtpWbsItem, previ
     groups: wbs.groups.map((group) =>
       group.id === groupId ? { ...group, items: [...group.items, item] } : group,
     ),
+  };
+}
+
+function stage1ItemNeedsReview(item: KtpWbsItem) {
+  return (
+    item.origin !== "ai_added" &&
+    item.review_status !== "rejected" &&
+    !item.manual_override &&
+    (item.stage_needs_review || item.work_type_needs_review || item.operator_review_required)
+  );
+}
+
+function acceptStage1ItemLocal(item: KtpWbsItem): KtpWbsItem {
+  if (item.origin === "ai_added" && item.review_status === "pending") {
+    return {
+      ...item,
+      review_status: "accepted",
+      work_type_needs_review: false,
+      operator_review_required: false,
+    };
+  }
+  if (stage1ItemNeedsReview(item)) {
+    return {
+      ...item,
+      manual_override: true,
+      work_type_needs_review: false,
+      operator_review_required: false,
+      stage_needs_review: false,
+      stage_review_reason: null,
+      gpr_confirmed: false,
+    };
+  }
+  return item;
+}
+
+function updateWbsItemLocal(
+  wbs: KtpWbs,
+  itemId: string,
+  updater: (item: KtpWbsItem) => KtpWbsItem,
+) {
+  return {
+    ...wbs,
+    groups: wbs.groups.map((group) => ({
+      ...group,
+      items: group.items.map((item) => (item.id === itemId ? updater(item) : item)),
+    })),
+  };
+}
+
+function acceptAllStage1ItemsLocal(wbs: KtpWbs) {
+  return {
+    ...wbs,
+    groups: wbs.groups.map((group) => ({
+      ...group,
+      items: group.items.map(acceptStage1ItemLocal),
+    })),
   };
 }
 
@@ -407,6 +520,57 @@ export default function KtpEstimateWizardPage() {
     [projectId, sessionId, wbs],
   );
 
+  const acceptRecommendedItemOptimistic = useCallback(
+    async (itemId: string) => {
+      const previousWbs = wbs;
+      setWbs((prev) => (prev ? updateWbsItemLocal(prev, itemId, acceptStage1ItemLocal) : prev));
+      setBusy(true);
+      try {
+        setWbs(await ktpEstimate.updateItem(projectId, itemId, { review_status: "accepted" }));
+        setError(null);
+      } catch (e: any) {
+        setWbs(previousWbs);
+        setError(e.message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [projectId, wbs],
+  );
+
+  const approveReviewItemOptimistic = useCallback(
+    async (itemId: string) => {
+      const previousWbs = wbs;
+      setWbs((prev) => (prev ? updateWbsItemLocal(prev, itemId, acceptStage1ItemLocal) : prev));
+      setBusy(true);
+      try {
+        setWbs(await ktpEstimate.updateItem(projectId, itemId, { manual_override: true }));
+        setError(null);
+      } catch (e: any) {
+        setWbs(previousWbs);
+        setError(e.message);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [projectId, wbs],
+  );
+
+  const acceptAllStage1ItemsOptimistic = useCallback(async () => {
+    const previousWbs = wbs;
+    setWbs((prev) => (prev ? acceptAllStage1ItemsLocal(prev) : prev));
+    setBusy(true);
+    try {
+      setWbs(await ktpEstimate.acceptStage1Items(projectId, sessionId));
+      setError(null);
+    } catch (e: any) {
+      setWbs(previousWbs);
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }, [projectId, sessionId, wbs]);
+
   const stage1Processing = status === "stage1_processing" || status === "stage1_pending";
   const gprProcessing = status === "gpr_processing";
   const actualStepIndex =
@@ -563,6 +727,9 @@ export default function KtpEstimateWizardPage() {
           projectId={projectId}
           sessionId={sessionId}
           addItemOptimistic={addItemOptimistic}
+          acceptRecommendedItemOptimistic={acceptRecommendedItemOptimistic}
+          approveReviewItemOptimistic={approveReviewItemOptimistic}
+          acceptAllStage1ItemsOptimistic={acceptAllStage1ItemsOptimistic}
           revisiting={revisitingCompletedStep}
           onReturn={() => setViewStep(null)}
           onApprove={async () => {
@@ -881,6 +1048,9 @@ function Stage1({
   projectId,
   sessionId,
   addItemOptimistic,
+  acceptRecommendedItemOptimistic,
+  approveReviewItemOptimistic,
+  acceptAllStage1ItemsOptimistic,
   revisiting,
   onReturn,
   onApprove,
@@ -891,31 +1061,40 @@ function Stage1({
   projectId: string;
   sessionId: string;
   addItemOptimistic: (groupId: string, name: string) => Promise<void>;
+  acceptRecommendedItemOptimistic: (itemId: string) => Promise<void>;
+  approveReviewItemOptimistic: (itemId: string) => Promise<void>;
+  acceptAllStage1ItemsOptimistic: () => Promise<void>;
   revisiting?: boolean;
   onReturn?: () => void;
   onApprove: () => void;
 }) {
   const [newGroup, setNewGroup] = useState("");
-  const pendingAiItems = wbs.groups.flatMap((g) =>
-    g.items
-      .filter((it) => it.origin === "ai_added" && it.review_status === "pending")
-      .map((item) => ({ group: g, item })),
+  const pendingAi = wbs.groups.reduce(
+    (sum, group) =>
+      sum +
+      group.items.filter((item) => item.origin === "ai_added" && item.review_status === "pending").length,
+    0,
   );
-  const pendingAi = pendingAiItems.length;
   const pendingReview = wbs.groups.reduce(
     (sum, group) =>
       sum +
       group.items.filter(
         (item) =>
+          item.origin !== "ai_added" &&
           item.review_status !== "rejected" &&
           !item.manual_override &&
-          (item.stage_needs_review || item.work_type_needs_review),
+          (item.stage_needs_review || item.work_type_needs_review || item.operator_review_required),
       ).length,
     0,
   );
   const unresolvedDisputes = pendingAi + pendingReview;
   const approveDisabled = busy || unresolvedDisputes > 0;
-  const groupOptions = wbs.groups.map((g) => ({ id: g.id, title: displayStageGroupTitle(g.title) || g.title }));
+  const stageFloorSections = useMemo(() => floorSections(wbs.groups), [wbs.groups]);
+  const orderedGroups = useMemo(
+    () => stageFloorSections.flatMap((section) => section.groups),
+    [stageFloorSections],
+  );
+  const groupOptions = orderedGroups.map((g) => ({ id: g.id, title: displayStageGroupTitle(g.title) || g.title }));
 
   return (
     <div>
@@ -964,14 +1143,6 @@ function Stage1({
           )
         }
       />
-      {pendingAi > 0 && (
-        <PendingAiReview
-          items={pendingAiItems}
-          busy={busy}
-          run={run}
-          projectId={projectId}
-        />
-      )}
       {unresolvedDisputes > 0 && (
         <div style={{ ...feedbackStyle, marginBottom: 14 }}>
           До утверждения структуры закройте все спорные строки: {unresolvedDisputes}.
@@ -980,16 +1151,36 @@ function Stage1({
         </div>
       )}
 
-      {wbs.groups.map((g) => (
-        <Stage1Group
-          key={g.id}
-          group={g}
-          groupOptions={groupOptions}
-          busy={busy}
-          run={run}
-          projectId={projectId}
-          addItemOptimistic={addItemOptimistic}
-        />
+      {stageFloorSections.map((section) => (
+        <div key={section.key} style={{ marginBottom: section.showTitle ? 16 : 0 }}>
+          {section.showTitle && (
+            <div
+              style={{
+                margin: "18px 0 8px",
+                paddingBottom: 6,
+                borderBottom: "1px solid var(--border)",
+                color: "var(--text)",
+                fontSize: 14,
+                fontWeight: 700,
+              }}
+            >
+              {section.title}
+            </div>
+          )}
+          {section.groups.map((g) => (
+            <Stage1Group
+              key={g.id}
+              group={g}
+              groupOptions={groupOptions}
+              busy={busy}
+              run={run}
+              projectId={projectId}
+              addItemOptimistic={addItemOptimistic}
+              acceptRecommendedItemOptimistic={acceptRecommendedItemOptimistic}
+              approveReviewItemOptimistic={approveReviewItemOptimistic}
+            />
+          ))}
+        </div>
       ))}
 
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
@@ -1013,6 +1204,17 @@ function Stage1({
           + Группа
         </button>
       </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
+        <button
+          type="button"
+          style={buttonStyle("primary", busy || unresolvedDisputes === 0)}
+          disabled={busy || unresolvedDisputes === 0}
+          onClick={() => void acceptAllStage1ItemsOptimistic()}
+          title="Принять все рекомендованные работы и утвердить строки, требующие проверки"
+        >
+          <ButtonContent loading={busy}>Принять все работы</ButtonContent>
+        </button>
+      </div>
     </div>
   );
 }
@@ -1024,6 +1226,8 @@ function Stage1Group({
   run,
   projectId,
   addItemOptimistic,
+  acceptRecommendedItemOptimistic,
+  approveReviewItemOptimistic,
 }: {
   group: KtpWbsGroup;
   groupOptions: { id: string; title: string }[];
@@ -1031,6 +1235,8 @@ function Stage1Group({
   run: (fn: () => Promise<KtpWbs>) => Promise<void>;
   projectId: string;
   addItemOptimistic: (groupId: string, name: string) => Promise<void>;
+  acceptRecommendedItemOptimistic: (itemId: string) => Promise<void>;
+  approveReviewItemOptimistic: (itemId: string) => Promise<void>;
 }) {
   const [title, setTitle] = useState(() => displayStageGroupTitle(group.title) || group.title);
   const [newItem, setNewItem] = useState("");
@@ -1104,15 +1310,20 @@ function Stage1Group({
       {group.items.map((it) => {
         const badge = itemSourceBadge(it);
         const rejected = it.review_status === "rejected";
-        const pendingAi = it.origin === "ai_added" && it.review_status === "pending";
-        const needsReview = it.stage_needs_review || it.work_type_needs_review;
-        const reviewReason = it.stage_review_reason || (it.work_type_needs_review ? "Нужно проверить тип работ" : null);
+        const isAiAdded = it.origin === "ai_added";
+        const pendingAi = isAiAdded && it.review_status === "pending";
+        const needsReview =
+          !isAiAdded && (it.stage_needs_review || it.work_type_needs_review || it.operator_review_required);
+        const reviewReason =
+          it.stage_review_reason ||
+          (it.work_type_needs_review || it.operator_review_required ? "Нужно проверить тип работ" : null);
         const sectionLines = sourceParentLines(it);
         return (
           <div
             key={it.id}
             style={{
-              display: "flex",
+              display: "grid",
+              gridTemplateColumns: "minmax(220px, 1.2fr) minmax(150px, .8fr) minmax(96px, auto) minmax(170px, 260px) 38px",
               alignItems: "center",
               gap: 8,
               padding: pendingAi ? "7px 8px" : "7px 0",
@@ -1122,18 +1333,19 @@ function Stage1Group({
               opacity: rejected ? 0.5 : 1,
             }}
           >
-            <span style={{ flex: "1 1 260px", minWidth: 220, fontSize: 13 }}>{it.name}</span>
+            <span style={{ minWidth: 0, fontSize: 13 }}>{it.name}</span>
             <div
-              title={sectionLines.join("\n")}
+              title={isAiAdded ? it.ai_reason || "Рекомендовано" : sectionLines.join("\n")}
               style={{
-                flex: "0 1 340px",
-                minWidth: 190,
+                minWidth: 0,
                 color: "var(--muted)",
                 fontSize: 11,
                 lineHeight: 1.35,
               }}
             >
-              {sectionLines.length ? (
+              {isAiAdded ? (
+                <span style={{ fontWeight: 600, color: "#92400e" }}>Рекомендовано</span>
+              ) : sectionLines.length ? (
                 sectionLines.map((line, index) => (
                   <div key={line}>
                     {index === 0 ? "Раздел: " : "Подраздел: "}
@@ -1144,75 +1356,43 @@ function Stage1Group({
                 <span>Раздел: —</span>
               )}
             </div>
-            {needsReview && (
-              <span
-                title={reviewReason || "Требуется проверка"}
-                style={{
-                  minWidth: 34,
-                  textAlign: "center",
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: "#92400e",
-                  background: "rgba(245,158,11,.14)",
-                  border: "1px solid rgba(245,158,11,.28)",
-                  borderRadius: 999,
-                  padding: "2px 6px",
-                  whiteSpace: "nowrap",
-                }}
-              >
-                Проверить
-              </span>
-            )}
-            {badge && (
-              <span style={{ fontSize: 10, fontWeight: 600, color: badge.color, whiteSpace: "nowrap" }}>
-                {badge.label}
-              </span>
-            )}
-            {it.origin === "ai_added" && it.ai_reason && (
-              <span style={{ fontSize: 10, color: "var(--muted)", maxWidth: 220 }} title={it.ai_reason}>
-                {it.ai_reason}
-              </span>
-            )}
-            {it.origin === "ai_added" && (
-              <>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
+              {badge && (
+                <span style={{ fontSize: 10, fontWeight: 600, color: badge.color, whiteSpace: "nowrap" }}>
+                  {badge.label}
+                </span>
+              )}
+              {isAiAdded && (
                 <button
                   style={{
                     ...btn(),
-                    padding: "4px 9px",
+                    width: 32,
+                    height: 30,
+                    padding: 0,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
                     color: it.review_status === "accepted" ? "#15803d" : "var(--text)",
                   }}
                   disabled={busy}
-                  onClick={() =>
-                    run(() =>
-                      ktpEstimate.updateItem(projectId, it.id, { review_status: "accepted" }),
-                    )
-                  }
+                  onClick={() => void acceptRecommendedItemOptimistic(it.id)}
+                  title="Принять рекомендованную работу"
+                  aria-label="Принять рекомендованную работу"
                 >
-                  ✓
+                  <Check size={14} strokeWidth={3} aria-hidden="true" />
                 </button>
+              )}
+              {needsReview && !it.manual_override && (
                 <button
-                  style={{ ...btn(), padding: "4px 9px", color: rejected ? "var(--red)" : "var(--text)" }}
+                  style={{ ...btn(), padding: "4px 9px", color: "#92400e" }}
                   disabled={busy}
-                  onClick={() =>
-                    run(() =>
-                      ktpEstimate.updateItem(projectId, it.id, { review_status: "rejected" }),
-                    )
-                  }
+                  onClick={() => void approveReviewItemOptimistic(it.id)}
+                  title="Подтвердить выбранный этап и тип"
                 >
-                  ✕
+                  Утвердить
                 </button>
-              </>
-            )}
-            {needsReview && !it.manual_override && (
-              <button
-                style={{ ...btn(), padding: "4px 9px", color: "#92400e" }}
-                disabled={busy}
-                onClick={() => run(() => ktpEstimate.updateItem(projectId, it.id, { manual_override: true }))}
-                title="Подтвердить выбранный этап и тип"
-              >
-                Утвердить
-              </button>
-            )}
+              )}
+            </div>
             <select
               value={group.id}
               disabled={busy}
@@ -1221,9 +1401,8 @@ function Stage1Group({
               }
               style={{
                 ...inputStyle,
-                flex: "0 1 260px",
-                minWidth: 180,
-                maxWidth: 320,
+                width: "100%",
+                minWidth: 0,
                 boxSizing: "border-box",
                 padding: "4px 28px 4px 8px",
                 overflow: "hidden",
@@ -1238,11 +1417,21 @@ function Stage1Group({
               ))}
             </select>
             <button
-              style={{ ...btn("danger"), padding: "4px 9px" }}
+              style={{
+                ...btn("danger"),
+                width: 32,
+                height: 30,
+                padding: 0,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
               disabled={busy}
               onClick={() => run(() => ktpEstimate.deleteItem(projectId, it.id))}
+              title="Удалить строку из структуры"
+              aria-label="Удалить строку из структуры"
             >
-              🗑
+              <Trash2 size={14} strokeWidth={2.2} aria-hidden="true" />
             </button>
           </div>
         );
@@ -1269,70 +1458,6 @@ function Stage1Group({
           Добавить работу
         </button>
       </div>
-    </div>
-  );
-}
-
-function PendingAiReview({
-  items,
-  busy,
-  run,
-  projectId,
-}: {
-  items: Array<{ group: KtpWbsGroup; item: KtpWbsItem }>;
-  busy: boolean;
-  run: (fn: () => Promise<KtpWbs>) => Promise<void>;
-  projectId: string;
-}) {
-  return (
-    <div
-      style={{
-        ...feedbackStyle,
-        marginBottom: 14,
-        display: "grid",
-        gap: 10,
-      }}
-    >
-      <div style={{ fontWeight: 700 }}>Не проверено добавленных ИИ работ: {items.length}</div>
-      {items.map(({ group, item }) => (
-        <div
-          key={item.id}
-          style={{
-            display: "grid",
-            gridTemplateColumns: "minmax(0, 1fr) auto",
-            gap: 10,
-            alignItems: "center",
-          }}
-        >
-          <div style={{ minWidth: 0 }}>
-            <div style={{ color: "var(--text)", fontWeight: 600 }}>{item.name}</div>
-            <div style={{ color: "var(--muted)", marginTop: 2 }}>
-              Группа: {group.title}
-              {item.ai_reason ? ` · ${item.ai_reason}` : ""}
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button
-              style={{ ...buttonStyle("ghost", busy), padding: "5px 9px", color: "#15803d" }}
-              disabled={busy}
-              onClick={() =>
-                run(() => ktpEstimate.updateItem(projectId, item.id, { review_status: "accepted" }))
-              }
-            >
-              Принять
-            </button>
-            <button
-              style={{ ...buttonStyle("ghost", busy), padding: "5px 9px", color: "var(--red)" }}
-              disabled={busy}
-              onClick={() =>
-                run(() => ktpEstimate.updateItem(projectId, item.id, { review_status: "rejected" }))
-              }
-            >
-              Отклонить
-            </button>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
@@ -1961,6 +2086,10 @@ function firstNumericRateCandidate(row: KtpSessionSubtype) {
   return row.rate_trace?.rate_candidates?.find((candidate) => typeof candidate.normalized_value === "number") || null;
 }
 
+function sourceUnitCodeForConversion(row: KtpSessionSubtype): string | null {
+  return row.item_unit_code || row.unit || null;
+}
+
 function equivalentRateCandidates(row: KtpSessionSubtype): RateTraceCandidate[] {
   if (row.rate_review_reason !== "multiple_equivalent_rate_candidates") return [];
   const sourceUnit = row.item_unit_code || null;
@@ -2098,8 +2227,9 @@ function StageProductivity({
   const [selectingSubtypeId, setSelectingSubtypeId] = useState<string | null>(null);
   const [selectedTaxonomySection, setSelectedTaxonomySection] = useState<string>("");
   const [conversionDrafts, setConversionDrafts] = useState<Record<string, { thickness?: string; exact?: string; coefficient?: string }>>({});
+  const [hoveredRateCandidateKey, setHoveredRateCandidateKey] = useState<string | null>(null);
   const filled = subtypes.filter(
-    (s) => s.output_per_day != null && s.output_per_day > 0 && s.volume != null && s.volume > 0,
+    (s) => s.output_per_day != null && s.output_per_day > 0 && s.volume != null && s.volume > 0 && Boolean(s.unit?.trim()),
   ).length;
   const canContinue = subtypes.length > 0 && filled === subtypes.length;
 
@@ -2132,6 +2262,7 @@ function StageProductivity({
   async function saveField(
     subtypeId: string,
     patch: Partial<{
+      unit: string | null;
       volume: number | null;
       output_per_day: number | null;
       crew_size: number | null;
@@ -2173,9 +2304,9 @@ function StageProductivity({
     method: "volume_to_area_by_thickness" | "area_to_volume_by_thickness" | "exact_target_quantity" | "manual_coefficient",
   ) {
     const sourceQuantity = row.volume;
-    const sourceUnit = row.item_unit_code || row.unit || null;
+    const sourceUnit = sourceUnitCodeForConversion(row) || "unknown";
     const targetUnit = candidateUnitCode(candidate);
-    if (!sourceQuantity || sourceQuantity <= 0 || !sourceUnit || !targetUnit) return;
+    if (!sourceQuantity || sourceQuantity <= 0 || !targetUnit) return;
 
     const draft = conversionDrafts[row.id] || {};
     let factor: number | null = null;
@@ -2338,7 +2469,7 @@ function StageProductivity({
           <span style={{ width: 11, height: 11, borderRadius: 3, background: "#22c55e22", border: "1px solid #16a34a55", display: "inline-block" }} /> задано оператором
         </span>
         {!canContinue && subtypes.length > 0 && (
-          <span style={{ color: "var(--muted)" }}>Заполните объём и производительность у всех строк, чтобы продолжить</span>
+          <span style={{ color: "var(--muted)" }}>Заполните объём, единицу и производительность у всех строк, чтобы продолжить</span>
         )}
       </div>
 
@@ -2417,14 +2548,15 @@ function StageProductivity({
                 const componentCandidates = packageComponentRateCandidates(s);
                 const numericCandidate = firstNumericRateCandidate(s);
                 const targetUnitCode = candidateUnitCode(numericCandidate);
-                const sourceUnitCode = s.item_unit_code || null;
+                const sourceUnitCode = sourceUnitCodeForConversion(s);
+                const sourceUnitKnown = Boolean(sourceUnitCode);
+                const sourceUnitDisplay = sourceUnitCode ? unitLabel(sourceUnitCode) : "ед. сметы";
                 const needsUnitConversion =
                   s.rate_review_reason === "unit_incompatible" &&
                   Boolean(numericCandidate?.normalized_value) &&
                   Boolean(s.volume) &&
-                  Boolean(sourceUnitCode) &&
                   Boolean(targetUnitCode) &&
-                  sourceUnitCode !== targetUnitCode;
+                  (!sourceUnitCode || sourceUnitCode !== targetUnitCode);
                 const conversionDraft = conversionDrafts[s.id] || {};
                 const suggestedConversion = s.rate_trace?.rate_unit_conversion as any;
                 const suggestedThickness = Number(suggestedConversion?.parameters?.thickness_m);
@@ -2624,7 +2756,7 @@ function StageProductivity({
                               <div style={{ fontWeight: 700 }}>
                                 Выберите ставку: найдено {equivalentCandidates.length} равнозначных варианта
                               </div>
-                              {equivalentCandidates.map((candidate) => {
+                              {equivalentCandidates.map((candidate, candidateIndex) => {
                                 const candidateOutput = outputFromCandidate(s, candidate);
                                 const candidateUnit = candidateUnitCode(candidate);
                                 const title = [
@@ -2634,52 +2766,51 @@ function StageProductivity({
                                   candidate.normalized_value != null ? `Ставка: ${fmtNumber(candidate.normalized_value)} чел-ч/${unitLabel(candidateUnit)}` : null,
                                   candidateOutput != null ? `Производительность: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : null,
                                 ].filter(Boolean).join("\n");
+                                const disabled = busy || candidateOutput == null;
+                                const candidateKey = [
+                                  "equivalent",
+                                  s.id,
+                                  candidate.rate_item_id,
+                                  candidate.source_rate_id,
+                                  candidate.name,
+                                  candidateIndex,
+                                ].filter(Boolean).join(":");
+                                const hovered = hoveredRateCandidateKey === candidateKey;
                                 return (
-                                  <div
-                                    key={candidate.rate_item_id || candidate.name || candidate.source_rate_id || title}
+                                  <button
+                                    type="button"
+                                    key={candidateKey}
+                                    disabled={disabled}
+                                    onMouseEnter={() => !disabled && setHoveredRateCandidateKey(candidateKey)}
+                                    onMouseLeave={() => setHoveredRateCandidateKey((current) => current === candidateKey ? null : current)}
+                                    onClick={() => candidateOutput != null && void saveField(s.id, {
+                                      output_per_day: candidateOutput,
+                                      selected_rate_item_id: candidate.rate_item_id || null,
+                                      selected_rate_mapping_id: candidate.rate_mapping_id || null,
+                                    })}
+                                    title={candidateOutput == null ? "Нужен размер бригады для расчёта производительности" : title}
                                     style={{
-                                      display: "grid",
-                                      gridTemplateColumns: "minmax(0, 1fr) auto",
-                                      gap: 8,
-                                      alignItems: "center",
+                                      display: "block",
+                                      width: "100%",
+                                      padding: "6px 8px",
+                                      borderRadius: 6,
+                                      border: hovered ? "1px solid #f59e0b88" : "1px solid transparent",
+                                      background: disabled ? "transparent" : hovered ? "#ffedd5" : "#fff7ed",
+                                      color: "inherit",
+                                      textAlign: "left",
+                                      cursor: disabled ? "not-allowed" : "pointer",
+                                      opacity: disabled ? 0.65 : 1,
                                     }}
                                   >
-                                    <div title={title} style={{ minWidth: 0 }}>
-                                      <div style={{ fontWeight: 650, color: "var(--text)" }}>
-                                        {candidate.name || "Кандидат нормы"}
-                                      </div>
-                                      <div style={{ color: "#92400e" }}>
-                                        {fmtNumber(candidate.normalized_value)} чел-ч/{unitLabel(candidateUnit)}
-                                        {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : ""}
-                                        {candidate.source_file ? ` · ${candidate.source_file}` : ""}
-                                      </div>
+                                    <div style={{ fontWeight: 650, color: "var(--text)" }}>
+                                      {candidate.name || "Кандидат нормы"}
                                     </div>
-                                    <button
-                                      type="button"
-                                      disabled={busy || candidateOutput == null}
-                                      onClick={() => candidateOutput != null && void saveField(s.id, {
-                                        output_per_day: candidateOutput,
-                                        selected_rate_item_id: candidate.rate_item_id || null,
-                                        selected_rate_mapping_id: candidate.rate_mapping_id || null,
-                                      })}
-                                      title={candidateOutput == null ? "Нужен размер бригады для расчёта производительности" : `Применить: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см`}
-                                      style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        width: 24,
-                                        height: 24,
-                                        padding: 0,
-                                        borderRadius: 5,
-                                        border: "1px solid #16a34a55",
-                                        background: busy || candidateOutput == null ? "#e5e7eb" : "#22c55e22",
-                                        color: busy || candidateOutput == null ? "#64748b" : "#15803d",
-                                        cursor: busy || candidateOutput == null ? "not-allowed" : "pointer",
-                                      }}
-                                    >
-                                      <Check size={14} strokeWidth={3} />
-                                    </button>
-                                  </div>
+                                    <div style={{ color: "#92400e" }}>
+                                      {fmtNumber(candidate.normalized_value)} чел-ч/{unitLabel(candidateUnit)}
+                                      {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : ""}
+                                      {candidate.source_file ? ` · ${candidate.source_file}` : ""}
+                                    </div>
+                                  </button>
                                 );
                               })}
                             </div>
@@ -2703,7 +2834,7 @@ function StageProductivity({
                               <div>
                                 Можно применить предварительно только к указанному компоненту; полный цикл нужно разложить или проверить вручную.
                               </div>
-                              {componentCandidates.map((candidate) => {
+                              {componentCandidates.map((candidate, candidateIndex) => {
                                 const candidateOutput = outputFromCandidate(s, candidate);
                                 const candidateUnit = candidateUnitCode(candidate);
                                 const componentCode = String((candidate as any).component_operation_code || "компонент");
@@ -2717,57 +2848,57 @@ function StageProductivity({
                                   candidate.normalized_value != null ? `Ставка: ${fmtNumber(candidate.normalized_value)} чел-ч/${unitLabel(candidateUnit)}` : null,
                                   candidateOutput != null ? `Производительность: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : null,
                                 ].filter(Boolean).join("\n");
+                                const disabled = busy || candidateOutput == null;
+                                const candidateKey = [
+                                  "component",
+                                  s.id,
+                                  componentCode,
+                                  candidate.rate_item_id,
+                                  candidate.source_rate_id,
+                                  candidate.name,
+                                  candidateIndex,
+                                ].filter(Boolean).join(":");
+                                const hovered = hoveredRateCandidateKey === candidateKey;
                                 return (
-                                  <div
-                                    key={`${componentCode}:${candidate.rate_item_id || candidate.source_rate_id || candidate.name}`}
+                                  <button
+                                    type="button"
+                                    key={candidateKey}
+                                    disabled={disabled}
+                                    onMouseEnter={() => !disabled && setHoveredRateCandidateKey(candidateKey)}
+                                    onMouseLeave={() => setHoveredRateCandidateKey((current) => current === candidateKey ? null : current)}
+                                    onClick={() => candidateOutput != null && void saveField(s.id, {
+                                      output_per_day: candidateOutput,
+                                      selected_rate_item_id: candidate.rate_item_id || null,
+                                      selected_rate_mapping_id: candidate.rate_mapping_id || null,
+                                    })}
+                                    title={candidateOutput == null ? "Нужен размер бригады для расчёта производительности" : title}
                                     style={{
-                                      display: "grid",
-                                      gridTemplateColumns: "minmax(0, 1fr) auto",
-                                      gap: 8,
-                                      alignItems: "center",
+                                      display: "block",
+                                      width: "100%",
+                                      padding: "6px 8px",
+                                      borderRadius: 6,
+                                      border: hovered ? "1px solid #f59e0b88" : "1px solid transparent",
+                                      background: disabled ? "transparent" : hovered ? "#ffedd5" : "#fff7ed",
+                                      color: "inherit",
+                                      textAlign: "left",
+                                      cursor: disabled ? "not-allowed" : "pointer",
+                                      opacity: disabled ? 0.65 : 1,
                                     }}
                                   >
-                                    <div title={title} style={{ minWidth: 0 }}>
-                                      <div style={{ fontWeight: 650, color: "var(--text)" }}>
-                                        {candidate.name || "Кандидат нормы"}
-                                      </div>
-                                      <div style={{ color: "#92400e" }}>
-                                        {componentCode}: {fmtNumber(candidate.normalized_value)} чел-ч/{unitLabel(candidateUnit)}
-                                        {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : ""}
-                                        {candidate.source_file ? ` · ${candidate.source_file}` : ""}
-                                      </div>
+                                    <div style={{ fontWeight: 650, color: "var(--text)" }}>
+                                      {candidate.name || "Кандидат нормы"}
                                     </div>
-                                    <button
-                                      type="button"
-                                      disabled={busy || candidateOutput == null}
-                                      onClick={() => candidateOutput != null && void saveField(s.id, {
-                                        output_per_day: candidateOutput,
-                                        selected_rate_item_id: candidate.rate_item_id || null,
-                                        selected_rate_mapping_id: candidate.rate_mapping_id || null,
-                                      })}
-                                      title={candidateOutput == null ? "Нужен размер бригады для расчёта производительности" : `Применить предварительно: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см`}
-                                      style={{
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        width: 24,
-                                        height: 24,
-                                        padding: 0,
-                                        borderRadius: 5,
-                                        border: "1px solid #16a34a55",
-                                        background: busy || candidateOutput == null ? "#e5e7eb" : "#22c55e22",
-                                        color: busy || candidateOutput == null ? "#64748b" : "#15803d",
-                                        cursor: busy || candidateOutput == null ? "not-allowed" : "pointer",
-                                      }}
-                                    >
-                                      <Check size={14} strokeWidth={3} />
-                                    </button>
-                                  </div>
+                                    <div style={{ color: "#92400e" }}>
+                                      {componentCode}: {fmtNumber(candidate.normalized_value)} чел-ч/{unitLabel(candidateUnit)}
+                                      {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : ""}
+                                      {candidate.source_file ? ` · ${candidate.source_file}` : ""}
+                                    </div>
+                                  </button>
                                 );
                               })}
                             </div>
                           ) : null}
-                          {needsUnitConversion && numericCandidate && sourceUnitCode && targetUnitCode ? (
+                          {needsUnitConversion && numericCandidate && targetUnitCode ? (
                             <div
                               style={{
                                 marginTop: 6,
@@ -2785,7 +2916,9 @@ function StageProductivity({
                                 {numericCandidate.source_file ? ` · ${numericCandidate.source_file}` : ""}
                               </div>
                               <div>
-                                Норма в {unitLabel(targetUnitCode)}, объём сметы указан в {unitLabel(sourceUnitCode)}. Без параметра конструкции автоматически не конвертирую.
+                                Норма в {unitLabel(targetUnitCode)}
+                                {sourceUnitKnown ? `, объём сметы указан в ${sourceUnitDisplay}` : ", единица сметы не определена"}.
+                                Без параметра конструкции, точного количества или коэффициента автоматически не конвертирую.
                               </div>
                               {((sourceUnitCode === "m3" && targetUnitCode === "m2") || (sourceUnitCode === "m2" && targetUnitCode === "m3")) ? (
                                 <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -2860,7 +2993,7 @@ function StageProductivity({
                                 />
                                 {coefficientDerived ? (
                                   <span>
-                                    {fmtNumber(s.volume)} × {fmtNumber(manualCoefficient)} = {fmtNumber(coefficientDerived)} {unitLabel(targetUnitCode)}
+                                    {fmtNumber(s.volume)} {sourceUnitDisplay} × {fmtNumber(manualCoefficient)} = {fmtNumber(coefficientDerived)} {unitLabel(targetUnitCode)}
                                   </span>
                                 ) : null}
                                 <button
@@ -2940,12 +3073,18 @@ function StageProductivity({
                         </div>
                       )}
                     </div>
-                    <NumCell
-                      value={s.volume}
-                      suffix={s.unit || ""}
-                      disabled={busy}
-                      onSave={(v) => void saveField(s.id, { volume: v })}
-                    />
+                    <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+                      <NumCell
+                        value={s.volume}
+                        disabled={busy}
+                        onSave={(v) => void saveField(s.id, { volume: v })}
+                      />
+                      <UnitCell
+                        value={s.unit}
+                        disabled={busy}
+                        onSave={(unit) => void saveField(s.id, { unit })}
+                      />
+                    </div>
                     <NumCell
                       value={s.output_per_day}
                       suffix={s.unit ? `${s.unit}/см` : "/см"}
@@ -3100,6 +3239,60 @@ function NumCell({
   );
 }
 
+function UnitCell({
+  value,
+  disabled,
+  onSave,
+}: {
+  value: string | null | undefined;
+  disabled?: boolean;
+  onSave: (v: string | null) => void;
+}) {
+  const initial = value ?? "";
+  const [text, setText] = useState(initial);
+  const lastSaved = useRef(initial);
+
+  useEffect(() => {
+    const next = value ?? "";
+    setText(next);
+    lastSaved.current = next;
+  }, [value]);
+
+  function commit() {
+    const next = text.trim();
+    if (next === lastSaved.current) return;
+    lastSaved.current = next;
+    onSave(next || null);
+  }
+
+  const missing = !text.trim();
+
+  return (
+    <input
+      value={text}
+      disabled={disabled}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+      }}
+      placeholder="ед."
+      title={missing ? "Укажите единицу измерения" : "Единица измерения"}
+      style={{
+        width: 54,
+        padding: "5px 7px",
+        boxSizing: "border-box",
+        border: `1px solid ${missing ? "#ef444466" : "var(--border2)"}`,
+        background: missing ? "#ef44440a" : "var(--bg)",
+        color: "var(--text)",
+        borderRadius: 6,
+        fontSize: 12,
+        outline: "none",
+      }}
+    />
+  );
+}
+
 // ── ЭТАП 3 ───────────────────────────────────────────────────────────────────
 
 const HOURS_PER_DAY = 8;
@@ -3169,7 +3362,7 @@ function Stage3({
     () =>
       wbs.groups
         .flatMap((g) => g.items)
-        .filter((it) => it.origin !== "from_estimate" && it.quantity == null),
+        .filter((it) => it.origin !== "from_estimate" && (it.quantity == null || !it.unit)),
     [wbs],
   );
   const [building, setBuilding] = useState(false);
@@ -3229,7 +3422,7 @@ function Stage3({
       {missingQty.length > 0 && !done && (
         <div style={{ ...card, padding: 14, marginBottom: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
-            Объёмы для добавленных работ ({missingQty.length})
+            Объёмы и единицы для добавленных работ ({missingQty.length})
           </div>
           {missingQty.map((it, idx) => (
             <QtyRow

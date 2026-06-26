@@ -44,6 +44,12 @@ def make_est(
     e.manual_override = False
     e.work_stage_number = None
     e.work_stage_title = None
+    e.stage_title = None
+    e.dictionary_version = None
+    e.taxonomy_dictionary_version = None
+    e.project_variant_id = None
+    e.project_variant_number = None
+    e.stage_instance_id = None
     e.canonical_stage_id = None
     e.needs_review = False
     e.review_reason = None
@@ -51,6 +57,25 @@ def make_est(
     e.section_id = None
     e.subtype_id = None
     return e
+
+
+def make_batch(
+    *,
+    estimate_type_id: str = "residential_construction",
+    project_variant_id: str = "residential_construction_doma_iz_peno_ili_gazoblokov",
+):
+    return SimpleNamespace(
+        id="batch-1",
+        estimate_type_id=estimate_type_id,
+        estimate_type_title=None,
+        estimate_type_number=None,
+        project_variant_id=project_variant_id,
+        project_variant_title=None,
+        project_variant_number=None,
+        taxonomy_snapshot=None,
+        building_params=None,
+        raw_data={},
+    )
 
 
 def _make_diag() -> dict:
@@ -131,11 +156,12 @@ def test_materialize_wbs_duplicate_estimate_kept_once_with_warning():
     assert any("продублирована" in w for w in warnings)
 
 
-def test_materialize_wbs_unknown_row_key_becomes_ai_added():
+def test_materialize_wbs_unknown_row_key_is_rejected_not_ai_added():
     from app.services.ktp_estimate_service import _materialize_wbs
 
     e1 = make_est("e1", "Кладка стен")
     row_keys = {"R001": e1}
+    diagnostics = {}
     raw_groups = [
         {
             "title": "Каменные работы",
@@ -146,12 +172,13 @@ def test_materialize_wbs_unknown_row_key_becomes_ai_added():
         }
     ]
 
-    groups, items, warnings = _materialize_wbs(make_session(), raw_groups, row_keys)
+    groups, items, warnings = _materialize_wbs(
+        make_session(), raw_groups, row_keys, diagnostics=diagnostics
+    )
 
-    ghost = [it for it in items if it.name == "Призрак"][0]
-    assert ghost.origin == "ai_added"
-    assert ghost.estimate_id is None
-    assert ghost.review_status == "pending"
+    assert not [it for it in items if it.name == "Призрак"]
+    assert diagnostics["invalid_estimate_row_keys"][0]["row_key"] == "R999"
+    assert any("AI-item не создан" in w for w in warnings)
 
 
 def test_materialize_wbs_ai_added_is_pending():
@@ -191,15 +218,15 @@ def test_stage_aware_groups_use_json_work_stage_order():
     e1.section_id = "roofing"
     e1.subtype_id = "pitched_roof_covering"
     e1.work_subtype_code = "roofing/pitched_roof_covering"
+    e1.raw_data["taxonomy_legacy"] = False
     e2 = make_est("e2", "Кладка стен", row_order=10)
     e2.work_stage_number = "2.6.6"
     e2.work_stage_title = "Кладка стен 1 этажа"
     e2.section_id = "load_bearing_walls"
     e2.subtype_id = "block_walls"
     e2.work_subtype_code = "load_bearing_walls/block_walls"
-    batch = MagicMock()
-    batch.estimate_type_id = "residential_construction"
-    batch.project_variant_id = "residential_construction_doma_iz_peno_ili_gazoblokov"
+    e2.raw_data["taxonomy_legacy"] = False
+    batch = make_batch()
     diagnostics = _make_diag()
 
     groups = _build_stage_aware_groups(
@@ -225,9 +252,8 @@ def test_stage_aware_groups_put_rows_without_stage_to_fallback():
     from app.services.ktp_estimate_service import STAGE_AWARE_FALLBACK_TITLE, _build_stage_aware_groups
 
     e1 = make_est("e1", "Нераспознанная работа")
-    batch = MagicMock()
-    batch.estimate_type_id = "residential_construction"
-    batch.project_variant_id = "residential_construction_doma_iz_peno_ili_gazoblokov"
+    e1.raw_data["taxonomy_legacy"] = False
+    batch = make_batch()
     diagnostics = _make_diag()
 
     groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
@@ -287,9 +313,9 @@ def test_stage_aware_groups_add_catalog_recommendations_by_template_stage(monkey
     e1.work_subtype_code = "load_bearing_walls/brick_walls"
     e1.section_id = "load_bearing_walls"
     e1.subtype_id = "brick_walls"
-    batch = MagicMock()
-    batch.estimate_type_id = "residential_construction"
-    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    e1.project_variant_id = "residential_construction_kirpichnye_doma"
+    e1.raw_data["taxonomy_legacy"] = True
+    batch = make_batch(project_variant_id="residential_construction_kirpichnye_doma")
     batch.work_rate_catalog_version = "1.2"
     batch.building_params = {"floors_count": 1}
     diagnostics = _make_diag()
@@ -414,7 +440,7 @@ def test_stage_aware_groups_keep_unresolved_work_type_rows_in_valid_stage():
     assert by_stage["2.7.4"]["items"] == [{"name": "Гидроизоляция фундамента", "origin": "from_estimate", "row_key": "R002"}]
     assert not diagnostics["stage_grouping"]["fallback_rows"]
     assert diagnostics["stage_grouping"]["review_rows"][0]["row_key"] == "R001"
-    assert diagnostics["stage_grouping"]["review_rows"][0]["work_type_review_reason"] == "work_type_unresolved"
+    assert diagnostics["stage_grouping"]["review_rows"][0]["work_type_review_reason"] == "legacy_work_type_mapping_ambiguous"
 
 
 def test_stage_aware_groups_put_invalid_stage_to_fallback():
@@ -423,9 +449,8 @@ def test_stage_aware_groups_put_invalid_stage_to_fallback():
     e1 = make_est("e1", "Работа с чужим этапом", row_order=1)
     e1.work_stage_number = "9.9.9"
     e1.work_subtype_code = "foundation/foundation_works"
-    batch = MagicMock()
-    batch.estimate_type_id = "residential_construction"
-    batch.project_variant_id = "residential_construction_kirpichnye_doma"
+    e1.raw_data["taxonomy_legacy"] = False
+    batch = make_batch()
     diagnostics = _make_diag()
 
     groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
@@ -569,7 +594,7 @@ async def test_run_stage1_preserve_estimate_structure_uses_estimate_sections():
         patch.object(svc, "_run_per_group_gap_fill", AsyncMock()),
         patch.object(svc, "_run_project_gap_fill", AsyncMock()),
     ):
-        groups = await svc._run_stage1_ai(
+        groups = await svc._run_stage1(
             [e1],
             {"R001": e1},
             [],
@@ -1173,12 +1198,15 @@ async def test_approve_group_sequence_repins_fallback_and_sets_ready():
 
 
 @pytest.mark.asyncio
-async def test_approve_stage1_ignores_downstream_operator_review_flag():
+async def test_approve_stage1_requires_downstream_operator_review_flag():
     import app.services.ktp_estimate_service as svc
+    from app.services.ktp_errors import Stage1ReviewRequired
 
     session = make_session("s1", "p1")
     session.status = "stage1_review"
     item = MagicMock()
+    item.id = "item-1"
+    item.estimate_id = "e1"
     item.operator_review_required = True
     item.work_type_needs_review = False
     item.manual_override = False
@@ -1189,12 +1217,94 @@ async def test_approve_stage1_ignores_downstream_operator_review_flag():
     estimate.raw_data = {"operator_review_required": True}
     estimate.stage_match_score_json = {"needs_review": False, "winner": {"score": 20}, "delta_top_1_top_2": 9}
     db = AsyncMock()
-    db.scalar = AsyncMock(side_effect=[None, None])
-    db.execute = AsyncMock(return_value=[(item, estimate)])
+    db.scalar = AsyncMock(return_value=session)
+    db.scalars = AsyncMock(return_value=[])
+    result_rows = MagicMock()
+    result_rows.all.return_value = [(item, estimate)]
+    db.execute = AsyncMock(return_value=result_rows)
 
-    with patch.object(svc, "get_session_by_id", AsyncMock(return_value=session)):
-        result = await svc.approve_stage1(db, "p1", "s1")
+    with pytest.raises(Stage1ReviewRequired) as exc:
+        await svc.approve_stage1(db, "p1", "s1")
 
-    assert result is session
-    assert session.status == "stage2_review"
+    assert exc.value.code == "stage1_review_required"
+    assert exc.value.details["problem_items"][0]["item_id"] == "item-1"
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_session_subtype_does_not_require_rate_trace_attribute():
+    import app.services.ktp_estimate_service as svc
+
+    row = svc.KtpSessionSubtype(
+        id="subtype-1",
+        session_id="session-1",
+        subtype_code="foundation/foundation_rebar_formwork_concrete",
+        subtype_name="Фундаментные работы",
+        output_per_day=None,
+        output_source="default",
+        item_id=None,
+        rate_unit_conversion=None,
+    )
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=row)
+    db.commit = AsyncMock()
+    expected = {"session": object(), "groups": [], "group_dependencies": [], "session_subtypes": []}
+
+    with patch.object(svc, "get_wbs", AsyncMock(return_value=expected)):
+        result = await svc.update_session_subtype(
+            db,
+            "project-1",
+            "subtype-1",
+            {
+                "output_per_day": 12.5,
+                "selected_rate_item_id": "rate-1",
+                "selected_rate_mapping_id": "mapping-1",
+            },
+            user_id="user-1",
+        )
+
+    assert result is expected
+    assert row.output_per_day == 12.5
+    assert row.rate_trace["operator_selection"]["selected_rate_item_id"] == "rate-1"
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_update_session_subtype_unit_updates_linked_item():
+    import app.services.ktp_estimate_service as svc
+
+    row = svc.KtpSessionSubtype(
+        id="subtype-1",
+        session_id="session-1",
+        subtype_code="load_bearing_walls/brick_masonry::item-1",
+        subtype_name="Кирпичные стены",
+        item_id="item-1",
+        unit=None,
+        volume=100.0,
+        output_source="catalog",
+        rate_unit_conversion={"conversion_status": "suggested"},
+    )
+    item = SimpleNamespace(unit=None, quantity=None, quantity_source=None)
+    db = AsyncMock()
+    db.scalar = AsyncMock(return_value=row)
+    db.get = AsyncMock(return_value=item)
+    db.commit = AsyncMock()
+    expected = {"session": object(), "groups": [], "group_dependencies": [], "session_subtypes": []}
+
+    with patch.object(svc, "get_wbs", AsyncMock(return_value=expected)):
+        result = await svc.update_session_subtype(
+            db,
+            "project-1",
+            "subtype-1",
+            {"unit": "м2"},
+            user_id="user-1",
+        )
+
+    assert result is expected
+    assert row.unit == "м2"
+    assert item.unit == "м2"
+    assert item.quantity == 100.0
+    assert item.quantity_source == "user"
+    assert row.output_source == "default"
+    assert row.rate_unit_conversion is None
     db.commit.assert_awaited()

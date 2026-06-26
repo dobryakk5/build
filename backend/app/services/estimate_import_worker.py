@@ -281,8 +281,6 @@ def _ensure_stage10_building_params(batch: EstimateBatch, rows: list[SimpleNames
         return
     inferred = _infer_stage10_building_params(rows)
     batch.building_params = inferred
-    if isinstance(batch.taxonomy_snapshot, dict):
-        batch.taxonomy_snapshot["building_params"] = dict(inferred)
 
 
 def _stage10_floor_number(text: str, building_params: dict[str, Any]) -> int | None:

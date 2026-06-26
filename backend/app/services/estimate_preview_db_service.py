@@ -226,12 +226,8 @@ def _validate_stage10_preview_metadata(
     return normalized_building_params, normalized_options
 
 
-def _batch_taxonomy_snapshot(project_variant_id: str, building_params: dict | None = None) -> dict[str, Any]:
-    snapshot = build_immutable_taxonomy_snapshot(project_variant_id=project_variant_id).to_json()
-    snapshot["building_params"] = dict(building_params or {})
-    snapshot["work_rate_catalog_version"] = "1.2"
-    snapshot["work_rate_catalog_hash"] = work_rate_catalog_hash()
-    return snapshot
+def _batch_taxonomy_snapshot(project_variant_id: str) -> dict[str, Any]:
+    return build_immutable_taxonomy_snapshot(project_variant_id=project_variant_id).to_json()
 
 
 def _row_from_any(item: Any, index: int) -> dict[str, Any]:
@@ -505,8 +501,8 @@ class EstimatePreviewService:
                 building_params=session.building_params,
                 project_structure_options=session.project_structure_options,
                 taxonomy_snapshot=taxonomy_snapshot,
-                work_rate_catalog_version=taxonomy_snapshot.get("work_rate_catalog_version"),
-                work_rate_catalog_hash=taxonomy_snapshot.get("work_rate_catalog_hash"),
+                work_rate_catalog_version=snapshot_payload.get("work_rate_catalog_version"),
+                work_rate_catalog_hash=snapshot_payload.get("work_rate_catalog_hash"),
                 applicability_hash_version=2,
                 applicability_schema_version="applicability@2.0.0",
                 source_row_scope_version=2,
@@ -632,7 +628,8 @@ class EstimatePreviewService:
         session.confirming_started_at = None
 
     def _snapshot_payload(self, session: EstimatePreviewSession, rows: list[EstimatePreviewRow]) -> dict[str, Any]:
-        taxonomy_snapshot = _batch_taxonomy_snapshot(session.project_variant_id, session.building_params)
+        taxonomy_snapshot = _batch_taxonomy_snapshot(session.project_variant_id)
+        catalog_hash = work_rate_catalog_hash()
         return {
             "snapshot_payload_version": SNAPSHOT_PAYLOAD_VERSION,
             "preview_session_id": session.id,
@@ -641,8 +638,8 @@ class EstimatePreviewService:
             "project_variant_id": session.project_variant_id,
             "taxonomy_dictionary_version": session.taxonomy_dictionary_version,
             "taxonomy_snapshot": taxonomy_snapshot,
-            "work_rate_catalog_version": taxonomy_snapshot.get("work_rate_catalog_version"),
-            "work_rate_catalog_hash": taxonomy_snapshot.get("work_rate_catalog_hash"),
+            "work_rate_catalog_version": "1.2",
+            "work_rate_catalog_hash": catalog_hash,
             "building_params": session.building_params,
             "project_structure_options": session.project_structure_options,
             "source_file_fingerprint_algorithm": session.source_file_fingerprint_algorithm,

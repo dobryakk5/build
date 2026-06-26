@@ -2,6 +2,7 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import TIMESTAMP
+from app.core.time import utc_now
 TIMESTAMPTZ = TIMESTAMP(timezone=True)
 
 
@@ -15,7 +16,7 @@ class TimestampMixin:
         TIMESTAMPTZ, server_default=text("NOW()"), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMPTZ, server_default=text("NOW()"), onupdate=datetime.utcnow, nullable=False
+        TIMESTAMPTZ, server_default=text("NOW()"), onupdate=utc_now, nullable=False
     )
 
 
