@@ -26,6 +26,7 @@ import type {
   KtpEstimateSession,
   KtpEstimateCard,
   KtpEstimateCardResponse,
+  KtpSessionSubtype,
   KtpWbs,
   NwDictionaries,
   NwFerMapping,
@@ -948,6 +949,7 @@ export const ktpEstimate = {
       output_per_day: number | null;
       crew_size: number | null;
       lag_after_days: number;
+      rate_unit_conversion: KtpSessionSubtype["rate_unit_conversion"] | null;
     }>,
   ) =>
     request<KtpWbs>(

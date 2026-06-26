@@ -3931,6 +3931,7 @@ def _rate_candidate_trace(
         "rate_item_id": getattr(rate_item, "id", None) or candidate.get("rate_item_id"),
         "rate_mapping_id": rate_mapping_id or candidate.get("rate_mapping_id"),
         "name": candidate.get("name") or getattr(rate_item, "name", None),
+        "unit_code": getattr(rate_item, "unit_code", None) or candidate.get("unit_code"),
         "source_file": getattr(source, "source_file", None),
         "source_kind": getattr(source, "source_kind", None),
         "source_rate_id": getattr(rate_item, "source_rate_id", None) or candidate.get("source_rate_id"),
@@ -3940,6 +3941,7 @@ def _rate_candidate_trace(
         "normalized_value": normalized_value,
         "normalized_unit": normalized_unit,
         "norm_base_quantity": getattr(rate_item, "norm_base_quantity", None) or candidate.get("norm_base_quantity"),
+        "conversion_factor": candidate.get("conversion_factor"),
         "rate_context_code": candidate.get("rate_context_code"),
         "approval_status": approval_status,
         "rate_value_mode": getattr(rate_item, "rate_value_mode", None),
@@ -3955,6 +3957,30 @@ def _rate_candidate_trace(
             "requires_verification": bool(payload.get("requires_verification")),
         },
     }
+
+
+def _confirmed_rate_unit_conversion(
+    payload: Any,
+    *,
+    source_unit: str | None,
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("conversion_status") != "user_confirmed":
+        return None
+    target_unit = str(payload.get("target_unit") or "").strip() or None
+    input_unit = str(payload.get("input_unit") or payload.get("source_unit") or "").strip() or None
+    factor = _float_or_none(payload.get("conversion_factor"))
+    if not target_unit or not input_unit or factor is None:
+        return None
+    if source_unit and input_unit != source_unit:
+        return None
+    result = dict(payload)
+    result["input_unit"] = input_unit
+    result["source_unit"] = input_unit
+    result["target_unit"] = target_unit
+    result["conversion_factor"] = factor
+    return result
 
 
 @lru_cache(maxsize=4)
@@ -4084,6 +4110,17 @@ async def _attach_session_subtype_rate_projection(
             continue
 
         quantity = _float_or_none(item.quantity if item else None) or _float_or_none(row.volume)
+        confirmed_conversion = _confirmed_rate_unit_conversion(
+            getattr(row, "rate_unit_conversion", None),
+            source_unit=unit_code,
+        )
+        unit_conversion_overrides = (
+            {
+                (unit_code, confirmed_conversion["target_unit"]): confirmed_conversion["conversion_factor"],
+            }
+            if confirmed_conversion and unit_code
+            else None
+        )
         selection = selector.select_rate(
             taxonomy_code=str(taxonomy_code),
             operation_code=str(operation_code),
@@ -4107,21 +4144,25 @@ async def _attach_session_subtype_rate_projection(
                 "floor_kind": raw.get("floor_kind"),
                 "rate_context_code": raw.get("rate_context_code"),
             },
+            unit_conversion_overrides=unit_conversion_overrides,
         )
         rate_item = item_by_rate_id.get(selection.rate_item_id) if selection.rate_item_id else None
+        conversion_factor = (
+            WorkRateSelectionService.unit_conversion_factor(unit_code, selection.unit_code)
+            if selection.unit_code
+            else None
+        )
+        if conversion_factor is None and confirmed_conversion and selection.unit_code == confirmed_conversion["target_unit"]:
+            conversion_factor = confirmed_conversion["conversion_factor"]
         calculation = (
             WorkRateSelectionService.calculate_labor(
                 quantity=quantity,
                 quantity_unit=unit_code,
                 rate_item=rate_item,
+                unit_conversion_factor_override=conversion_factor,
             )
             if rate_item is not None
             else {}
-        )
-        conversion_factor = (
-            WorkRateSelectionService.unit_conversion_factor(unit_code, selection.unit_code)
-            if selection.unit_code
-            else None
         )
         effective_min = _per_item_labor(
             selection.labor_min,
@@ -4161,6 +4202,11 @@ async def _attach_session_subtype_rate_projection(
             candidate_conversion = candidate.get("conversion_factor")
             if candidate_conversion is None and candidate_item is not None:
                 candidate_conversion = WorkRateSelectionService.unit_conversion_factor(unit_code, candidate_item.unit_code)
+            display_conversion = (
+                candidate_conversion
+                if candidate_conversion is not None
+                else (1.0 if candidate_item is not None else None)
+            )
             normalized_candidate_value = _per_item_labor(
                 getattr(candidate_item, "labor_avg", None) if candidate_item is not None else candidate.get("labor_avg"),
                 norm_base_quantity=(
@@ -4168,7 +4214,7 @@ async def _attach_session_subtype_rate_projection(
                     if candidate_item is not None
                     else candidate.get("norm_base_quantity")
                 ),
-                unit_conversion_factor=candidate_conversion,
+                unit_conversion_factor=display_conversion,
             )
             source = source_by_id.get(candidate_item.source_id) if candidate_item is not None else None
             trace_candidate = _rate_candidate_trace(
@@ -4219,6 +4265,8 @@ async def _attach_session_subtype_rate_projection(
             "detected_operations": detected_operations,
             "rate_candidates": trace_candidates,
             "selection_result": selection.review_reason or ("auto_applicable" if selection.rate_auto_applicable else None),
+            "rate_unit_conversion": confirmed_conversion or getattr(row, "rate_unit_conversion", None),
+            "conversion_required": selection.review_reason == "unit_incompatible",
         }
 
         if (
@@ -4383,6 +4431,7 @@ async def update_session_subtype(
     project_id: str,
     subtype_id: str,
     patch: dict[str, Any],
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     row = await db.scalar(
         select(KtpSessionSubtype)
@@ -4420,6 +4469,38 @@ async def update_session_subtype(
             raise ValueError("Лаг не может быть отрицательным")
         row.lag_after_days = int(v)
         row.lag_source = "manual"
+    if "rate_unit_conversion" in patch:
+        payload = patch["rate_unit_conversion"]
+        if payload is None:
+            row.rate_unit_conversion = None
+        elif not isinstance(payload, dict):
+            raise ValueError("Параметры конвертации должны быть объектом")
+        else:
+            status = payload.get("conversion_status")
+            if status != "user_confirmed":
+                raise ValueError("Конвертация должна быть подтверждена пользователем")
+            factor = _float_or_none(payload.get("conversion_factor"))
+            derived_quantity = _float_or_none(payload.get("derived_quantity"))
+            target_unit = str(payload.get("target_unit") or "").strip()
+            input_unit = str(payload.get("input_unit") or payload.get("source_unit") or "").strip()
+            if factor is None:
+                raise ValueError("Коэффициент конвертации должен быть больше нуля")
+            if derived_quantity is None:
+                raise ValueError("Расчётное количество должно быть больше нуля")
+            if not input_unit or not target_unit:
+                raise ValueError("Укажите исходную и целевую единицу конвертации")
+            clean_payload = dict(payload)
+            clean_payload["conversion_status"] = "user_confirmed"
+            clean_payload["input_unit"] = input_unit
+            clean_payload["source_unit"] = input_unit
+            clean_payload["target_unit"] = target_unit
+            clean_payload["conversion_factor"] = factor
+            clean_payload["derived_quantity"] = derived_quantity
+            clean_payload["confirmed_by_user_id"] = user_id
+            clean_payload["confirmed_at"] = _now().isoformat()
+            row.rate_unit_conversion = clean_payload
+        row.output_per_day = None
+        row.output_source = "default"
 
     row.updated_at = _now()
     await db.commit()

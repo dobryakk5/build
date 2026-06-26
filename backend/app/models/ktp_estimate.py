@@ -313,3 +313,4 @@ class KtpSessionSubtype(Base, TimestampMixin):
     lag_source: Mapped[str] = mapped_column(
         String(8), nullable=False, server_default="default"
     )
+    rate_unit_conversion: Mapped[dict | None] = mapped_column(JSONB)

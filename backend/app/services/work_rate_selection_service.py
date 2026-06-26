@@ -168,6 +168,7 @@ class WorkRateSelectionService:
         user_id: str | None = None,
         user_overrides: Iterable[UserWorkRateOverride] | None = None,
         applicability: dict[str, Any] | None = None,
+        unit_conversion_overrides: dict[tuple[str, str], float] | None = None,
     ) -> RateSelectionResult:
         work_text, section_context_text, source_context_text = build_rate_context_text(
             work_name=work_name,
@@ -263,6 +264,8 @@ class WorkRateSelectionService:
         compatible: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource, float]] = []
         for item, mapping, source in operation_candidates:
             factor = self.unit_conversion_factor(unit_code, item.unit_code)
+            if factor is None and unit_code and item.unit_code and unit_conversion_overrides:
+                factor = unit_conversion_overrides.get((unit_code, item.unit_code))
             if factor is not None:
                 compatible.append((item, mapping, source, factor))
 
@@ -282,6 +285,8 @@ class WorkRateSelectionService:
                         "rate_mapping_id": mapping.id,
                         "name": item.name,
                         "unit_code": item.unit_code,
+                        "norm_base_quantity": item.norm_base_quantity,
+                        "labor_avg": item.labor_avg,
                         "rate_context_code": mapping.rate_context_code,
                     }
                     for item, mapping, _source in operation_candidates[:10]
@@ -588,6 +593,7 @@ class WorkRateSelectionService:
         quantity: float | None,
         quantity_unit: str | None,
         rate_item: WorkRateItem,
+        unit_conversion_factor_override: float | None = None,
     ) -> dict[str, float | None | str]:
         if quantity is None or quantity <= 0:
             return {
@@ -596,7 +602,9 @@ class WorkRateSelectionService:
                 "labor_max_total": None,
                 "needs_review": "quantity_missing",
             }
-        factor = WorkRateSelectionService.unit_conversion_factor(quantity_unit, rate_item.unit_code)
+        factor = unit_conversion_factor_override
+        if factor is None:
+            factor = WorkRateSelectionService.unit_conversion_factor(quantity_unit, rate_item.unit_code)
         if factor is None:
             return {
                 "labor_min_total": None,

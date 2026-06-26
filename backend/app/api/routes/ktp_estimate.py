@@ -239,6 +239,7 @@ class SessionSubtypeOut(BaseModel):
     output_source: str = "none"
     crew_source: str = "none"
     lag_source: str = "default"
+    rate_unit_conversion: dict | None = None
     selected_rate_item_id: str | None = None
     selected_rate_mapping_id: str | None = None
     rate_unit_code: str | None = None
@@ -289,6 +290,7 @@ class SessionSubtypeOut(BaseModel):
             output_source=s.output_source or "none",
             crew_source=s.crew_source or "none",
             lag_source=s.lag_source,
+            rate_unit_conversion=getattr(s, "rate_unit_conversion", None),
             selected_rate_item_id=getattr(s, "selected_rate_item_id", None),
             selected_rate_mapping_id=getattr(s, "selected_rate_mapping_id", None),
             rate_unit_code=getattr(s, "rate_unit_code", None),
@@ -422,6 +424,7 @@ class SessionSubtypePatch(BaseModel):
     output_per_day: float | None = None
     crew_size: int | None = None
     lag_after_days: int | None = None
+    rate_unit_conversion: dict | None = None
 
 
 def _value_error(exc: ValueError) -> HTTPException:
@@ -740,11 +743,15 @@ async def patch_session_subtype(
     subtype_id: UUID,
     body: SessionSubtypePatch,
     db: AsyncSession = Depends(get_db),
-    _member=Depends(require_action(Action.EDIT)),
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
 ):
     try:
         payload = await svc.update_session_subtype(
-            db, str(project_id), str(subtype_id), body.model_dump(exclude_unset=True)
+            db,
+            str(project_id),
+            str(subtype_id),
+            body.model_dump(exclude_unset=True),
+            user_id=member.user_id,
         )
     except ValueError as exc:
         raise _value_error(exc)

@@ -944,6 +944,22 @@ export interface KtpSessionSubtype {
   // "estimate" — размер бригады взят из загрузки сметы (workers_count)
   crew_source: "default" | "manual" | "estimate" | "none";
   lag_source: "default" | "manual";
+  rate_unit_conversion?: {
+    conversion_status?: string;
+    conversion_method?: string;
+    input_quantity?: number;
+    source_quantity?: number;
+    input_unit?: string;
+    source_unit?: string;
+    target_unit?: string;
+    parameters?: Record<string, unknown>;
+    formula_version?: string;
+    conversion_factor?: number;
+    derived_quantity?: number;
+    confirmed_by_user_id?: string | null;
+    confirmed_at?: string;
+    [key: string]: unknown;
+  } | null;
   selected_rate_item_id?: string | null;
   selected_rate_mapping_id?: string | null;
   rate_unit_code?: string | null;
@@ -972,6 +988,7 @@ export interface KtpSessionSubtype {
       rate_item_id?: string | null;
       rate_mapping_id?: string | null;
       name?: string | null;
+      unit_code?: string | null;
       source_file?: string | null;
       source_kind?: string | null;
       source_rate_id?: string | null;
@@ -981,6 +998,7 @@ export interface KtpSessionSubtype {
       normalized_value?: number | null;
       normalized_unit?: string | null;
       norm_base_quantity?: number | null;
+      conversion_factor?: number | null;
       rate_context_code?: string | null;
       approval_status?: string | null;
       rate_value_mode?: string | null;

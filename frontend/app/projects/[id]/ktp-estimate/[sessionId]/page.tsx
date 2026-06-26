@@ -1903,6 +1903,39 @@ function rateTraceTitle(row: KtpSessionSubtype): string {
   return lines.join("\n");
 }
 
+function unitLabel(code: string | null | undefined): string {
+  const map: Record<string, string> = {
+    m2: "м²",
+    m3: "м³",
+    m: "м",
+    t: "т",
+    kg: "кг",
+    pcs: "шт.",
+    slab: "плита",
+    set: "компл.",
+  };
+  return code ? map[code] || code : "ед.";
+}
+
+type RateTraceCandidate = NonNullable<NonNullable<KtpSessionSubtype["rate_trace"]>["rate_candidates"]>[number];
+
+function candidateUnitCode(candidate: RateTraceCandidate | undefined | null): string | null {
+  if (!candidate) return null;
+  if (candidate.unit_code) return candidate.unit_code;
+  const normalizedUnit = candidate.normalized_unit || "";
+  const slash = normalizedUnit.lastIndexOf("/");
+  return slash >= 0 ? normalizedUnit.slice(slash + 1) : null;
+}
+
+function firstNumericRateCandidate(row: KtpSessionSubtype) {
+  return row.rate_trace?.rate_candidates?.find((candidate) => typeof candidate.normalized_value === "number") || null;
+}
+
+function fmtNumber(value: number | null | undefined, digits = 4): string {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return String(Math.round(value * 10 ** digits) / 10 ** digits).replace(".", ",");
+}
+
 function StageProductivity({
   wbs,
   projectId,
@@ -1972,6 +2005,7 @@ function StageProductivity({
   const [taxonomySubtypes, setTaxonomySubtypes] = useState<WorkTaxonomySubtype[]>([]);
   const [selectingSubtypeId, setSelectingSubtypeId] = useState<string | null>(null);
   const [selectedTaxonomySection, setSelectedTaxonomySection] = useState<string>("");
+  const [conversionDrafts, setConversionDrafts] = useState<Record<string, { thickness?: string; exact?: string; coefficient?: string }>>({});
   const filled = subtypes.filter(
     (s) => s.output_per_day != null && s.output_per_day > 0 && s.volume != null && s.volume > 0,
   ).length;
@@ -2005,7 +2039,13 @@ function StageProductivity({
 
   async function saveField(
     subtypeId: string,
-    patch: Partial<{ volume: number | null; output_per_day: number | null; crew_size: number | null; lag_after_days: number }>,
+    patch: Partial<{
+      volume: number | null;
+      output_per_day: number | null;
+      crew_size: number | null;
+      lag_after_days: number;
+      rate_unit_conversion: KtpSessionSubtype["rate_unit_conversion"] | null;
+    }>,
   ) {
     setBusy(true);
     try {
@@ -2016,6 +2056,73 @@ function StageProductivity({
     } finally {
       setBusy(false);
     }
+  }
+
+  function setConversionDraft(rowId: string, key: "thickness" | "exact" | "coefficient", value: string) {
+    setConversionDrafts((current) => ({
+      ...current,
+      [rowId]: {
+        ...(current[rowId] || {}),
+        [key]: value,
+      },
+    }));
+  }
+
+  function parseDraftNumber(value: string | undefined): number | null {
+    const parsed = Number(String(value || "").trim().replace(",", "."));
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  async function applyRateUnitConversion(
+    row: KtpSessionSubtype,
+    candidate: RateTraceCandidate,
+    method: "volume_to_area_by_thickness" | "exact_target_quantity" | "manual_coefficient",
+  ) {
+    const sourceQuantity = row.volume;
+    const sourceUnit = row.item_unit_code || row.unit || null;
+    const targetUnit = candidateUnitCode(candidate);
+    if (!sourceQuantity || sourceQuantity <= 0 || !sourceUnit || !targetUnit) return;
+
+    const draft = conversionDrafts[row.id] || {};
+    let factor: number | null = null;
+    let derivedQuantity: number | null = null;
+    let parameters: Record<string, number> = {};
+
+    if (method === "volume_to_area_by_thickness") {
+      const thickness = parseDraftNumber(draft.thickness);
+      if (!thickness) return;
+      factor = 1 / thickness;
+      derivedQuantity = sourceQuantity * factor;
+      parameters = { thickness_m: thickness };
+    } else if (method === "exact_target_quantity") {
+      const exact = parseDraftNumber(draft.exact);
+      if (!exact) return;
+      derivedQuantity = exact;
+      factor = exact / sourceQuantity;
+      parameters = { exact_quantity: exact };
+    } else {
+      const coefficient = parseDraftNumber(draft.coefficient);
+      if (!coefficient) return;
+      factor = coefficient;
+      derivedQuantity = sourceQuantity * coefficient;
+      parameters = { manual_coefficient: coefficient };
+    }
+
+    await saveField(row.id, {
+      rate_unit_conversion: {
+        conversion_status: "user_confirmed",
+        conversion_method: method,
+        input_quantity: sourceQuantity,
+        source_quantity: sourceQuantity,
+        input_unit: sourceUnit,
+        source_unit: sourceUnit,
+        target_unit: targetUnit,
+        parameters,
+        formula_version: "1",
+        conversion_factor: Math.round(factor * 1000000) / 1000000,
+        derived_quantity: Math.round(derivedQuantity * 1000000) / 1000000,
+      },
+    });
   }
 
   async function rebuild() {
@@ -2193,7 +2300,7 @@ function StageProductivity({
                   Boolean(sourceItem?.manual_override) &&
                   sourceItem?.work_type_source === "manual";
                 const selectorOpen = selectingSubtypeId === s.id;
-                const unitLabel = s.item_unit_code || s.unit || "ед.";
+                const rowUnitLabel = s.item_unit_code || s.unit || "ед.";
                 const laborPerUnit = fmtMetricRange(
                   s.effective_labor_hours_per_unit_min ?? s.labor_hours_per_unit_min,
                   s.effective_labor_hours_per_unit_avg ?? s.labor_hours_per_unit_avg,
@@ -2209,6 +2316,24 @@ function StageProductivity({
                 const provisionalConfirmed = isProvisionalRate && s.output_source === "manual" && s.output_per_day != null;
                 const provisionalOutput = isProvisionalRate ? acceptedCatalogOutput(s) : null;
                 const traceTitle = s.rate_trace ? rateTraceTitle(s) : undefined;
+                const numericCandidate = firstNumericRateCandidate(s);
+                const targetUnitCode = candidateUnitCode(numericCandidate);
+                const sourceUnitCode = s.item_unit_code || null;
+                const needsUnitConversion =
+                  s.rate_review_reason === "unit_incompatible" &&
+                  Boolean(numericCandidate?.normalized_value) &&
+                  Boolean(s.volume) &&
+                  Boolean(sourceUnitCode) &&
+                  Boolean(targetUnitCode) &&
+                  sourceUnitCode !== targetUnitCode;
+                const conversionDraft = conversionDrafts[s.id] || {};
+                const thickness = parseDraftNumber(conversionDraft.thickness);
+                const exactTargetQuantity = parseDraftNumber(conversionDraft.exact);
+                const manualCoefficient = parseDraftNumber(conversionDraft.coefficient);
+                const thicknessFactor = thickness ? 1 / thickness : null;
+                const thicknessDerived = thicknessFactor && s.volume ? s.volume * thicknessFactor : null;
+                const exactFactor = exactTargetQuantity && s.volume ? exactTargetQuantity / s.volume : null;
+                const coefficientDerived = manualCoefficient && s.volume ? s.volume * manualCoefficient : null;
                 return (
                   <div
                     key={s.id}
@@ -2298,8 +2423,8 @@ function StageProductivity({
                         <div style={{ marginTop: 5, color: "var(--muted)", fontSize: 11, lineHeight: 1.35 }}>
                           {laborPerUnit ? (
                             <div>
-                              Трудоёмкость: {laborPerUnit} чел-ч/{unitLabel}
-                              {s.rate_unit_code && s.rate_unit_code !== unitLabel ? ` (расценка: ${s.rate_unit_code}, коэф. ${fmtMetric(s.unit_conversion_factor) ?? "—"})` : ""}
+                              Трудоёмкость: {laborPerUnit} чел-ч/{rowUnitLabel}
+                              {s.rate_unit_code && s.rate_unit_code !== rowUnitLabel ? ` (расценка: ${s.rate_unit_code}, коэф. ${fmtMetric(s.unit_conversion_factor) ?? "—"})` : ""}
                             </div>
                           ) : null}
                           {sessionLabor ? <div>По объёму: {sessionLabor} чел-ч</div> : null}
@@ -2345,6 +2470,113 @@ function StageProductivity({
                                   <Check size={14} strokeWidth={3} />
                                 </button>
                               ) : null}
+                            </div>
+                          ) : null}
+                          {needsUnitConversion && numericCandidate && sourceUnitCode && targetUnitCode ? (
+                            <div
+                              style={{
+                                marginTop: 6,
+                                display: "grid",
+                                gap: 6,
+                                padding: "8px 9px",
+                                border: "1px solid #f59e0b55",
+                                borderRadius: 6,
+                                background: "#fffbeb",
+                                color: "#78350f",
+                              }}
+                            >
+                              <div style={{ fontWeight: 700 }}>
+                                Норма найдена: {fmtNumber(numericCandidate.normalized_value)} чел-ч/{unitLabel(targetUnitCode)}
+                                {numericCandidate.source_file ? ` · ${numericCandidate.source_file}` : ""}
+                              </div>
+                              <div>
+                                Норма в {unitLabel(targetUnitCode)}, объём сметы указан в {unitLabel(sourceUnitCode)}. Без параметра конструкции автоматически не конвертирую.
+                              </div>
+                              {sourceUnitCode === "m3" && targetUnitCode === "m2" ? (
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                  <span>Толщина</span>
+                                  <input
+                                    value={conversionDraft.thickness || ""}
+                                    disabled={busy}
+                                    onChange={(e) => setConversionDraft(s.id, "thickness", e.target.value)}
+                                    placeholder="0,20"
+                                    inputMode="decimal"
+                                    style={{ ...inputLike, width: 72, height: 28, padding: "4px 7px" }}
+                                  />
+                                  <span>м</span>
+                                  {thicknessDerived && thicknessFactor ? (
+                                    <span>
+                                      {fmtNumber(s.volume)} {unitLabel(sourceUnitCode)} × {fmtNumber(thicknessFactor)} {unitLabel(targetUnitCode)}/{unitLabel(sourceUnitCode)} = {fmtNumber(thicknessDerived)} {unitLabel(targetUnitCode)};
+                                      трудоёмкость ≈ {fmtNumber(thicknessDerived * (numericCandidate.normalized_value || 0))} чел-ч
+                                    </span>
+                                  ) : null}
+                                  <button
+                                    type="button"
+                                    disabled={busy || !thickness}
+                                    onClick={() => void applyRateUnitConversion(s, numericCandidate, "volume_to_area_by_thickness")}
+                                    title="Применить предварительный расчёт по толщине"
+                                    style={buttonStyle("ghost", busy || !thickness)}
+                                  >
+                                    <Check size={14} strokeWidth={3} />
+                                  </button>
+                                </div>
+                              ) : null}
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                <span>Точное количество в {unitLabel(targetUnitCode)}</span>
+                                <input
+                                  value={conversionDraft.exact || ""}
+                                  disabled={busy}
+                                  onChange={(e) => setConversionDraft(s.id, "exact", e.target.value)}
+                                  inputMode="decimal"
+                                  style={{ ...inputLike, width: 84, height: 28, padding: "4px 7px" }}
+                                />
+                                {exactTargetQuantity && exactFactor ? (
+                                  <span>
+                                    коэффициент {fmtNumber(exactFactor)}; трудоёмкость ≈ {fmtNumber(exactTargetQuantity * (numericCandidate.normalized_value || 0))} чел-ч
+                                  </span>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  disabled={busy || !exactTargetQuantity}
+                                  onClick={() => void applyRateUnitConversion(s, numericCandidate, "exact_target_quantity")}
+                                  title="Применить точный объём в единице нормы"
+                                  style={buttonStyle("ghost", busy || !exactTargetQuantity)}
+                                >
+                                  <Check size={14} strokeWidth={3} />
+                                </button>
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                <span>Коэффициент</span>
+                                <input
+                                  value={conversionDraft.coefficient || ""}
+                                  disabled={busy}
+                                  onChange={(e) => setConversionDraft(s.id, "coefficient", e.target.value)}
+                                  inputMode="decimal"
+                                  style={{ ...inputLike, width: 84, height: 28, padding: "4px 7px" }}
+                                />
+                                {coefficientDerived ? (
+                                  <span>
+                                    {fmtNumber(s.volume)} × {fmtNumber(manualCoefficient)} = {fmtNumber(coefficientDerived)} {unitLabel(targetUnitCode)}
+                                  </span>
+                                ) : null}
+                                <button
+                                  type="button"
+                                  disabled={busy || !manualCoefficient}
+                                  onClick={() => void applyRateUnitConversion(s, numericCandidate, "manual_coefficient")}
+                                  title="Применить пользовательский коэффициент"
+                                  style={buttonStyle("ghost", busy || !manualCoefficient)}
+                                >
+                                  <Check size={14} strokeWidth={3} />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  onClick={() => void saveField(s.id, { rate_unit_conversion: null })}
+                                  style={buttonStyle("ghost", busy)}
+                                >
+                                  Не применять
+                                </button>
+                              </div>
                             </div>
                           ) : null}
                         </div>

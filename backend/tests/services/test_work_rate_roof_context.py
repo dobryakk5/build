@@ -73,3 +73,63 @@ def test_roof_covering_material_context_filters_equivalent_candidates():
     assert result.rate_context_code == "metal_tile"
     assert result.labor_avg == pytest.approx(0.75)
     assert result.rate_auto_applicable is True
+
+
+def test_confirmed_volume_to_area_conversion_enables_rate_selection_and_labor():
+    selector = WorkRateSelectionService()
+    source = WorkRateSource(source_file="catalog.xlsx")
+    item = WorkRateItem(
+        source_id=source.id,
+        name="Монтаж опалубки",
+        normalized_name="монтаж опалубки",
+        unit_code="m2",
+        labor_avg=20.0,
+        norm_base_quantity=100.0,
+        has_active_mapping=True,
+        auto_applicable=True,
+        row_content_hash="formwork",
+    )
+    mapping = WorkRateMapping(
+        rate_item_id=item.id,
+        operation_code="formwork_installation",
+        taxonomy_code="foundation/foundation_rebar_formwork_concrete",
+        object_scope_code="foundation",
+        mapping_mode=MAPPING_DIRECT,
+        confidence=0.99,
+    )
+
+    blocked = selector.select_rate(
+        taxonomy_code="foundation/foundation_rebar_formwork_concrete",
+        operation_code="formwork_installation",
+        object_scope_code="foundation",
+        quantity=12,
+        unit_code="m3",
+        work_name="Монолитная плита",
+        items=[item],
+        mappings=[mapping],
+        sources=[source],
+    )
+    assert blocked.review_reason == "unit_incompatible"
+
+    selected = selector.select_rate(
+        taxonomy_code="foundation/foundation_rebar_formwork_concrete",
+        operation_code="formwork_installation",
+        object_scope_code="foundation",
+        quantity=12,
+        unit_code="m3",
+        work_name="Монолитная плита",
+        items=[item],
+        mappings=[mapping],
+        sources=[source],
+        unit_conversion_overrides={("m3", "m2"): 5.0},
+    )
+    assert selected.rate_item_id == item.id
+    assert selected.rate_auto_applicable is True
+
+    totals = WorkRateSelectionService.calculate_labor(
+        quantity=12,
+        quantity_unit="m3",
+        rate_item=item,
+        unit_conversion_factor_override=5.0,
+    )
+    assert totals["labor_avg_total"] == pytest.approx(12.0)
