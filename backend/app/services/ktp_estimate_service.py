@@ -3875,6 +3875,38 @@ def _clear_rate_projection(row: KtpSessionSubtype, reason: str | None) -> None:
     row.rate_trace = {"selection_result": reason} if reason else None
 
 
+def _row_optional_attr(row: Any, name: str) -> Any:
+    return getattr(row, name, None)
+
+
+def _set_row_projection_attr(row: Any, name: str, value: Any) -> None:
+    try:
+        setattr(row, name, value)
+    except AttributeError:
+        return
+
+
+def _stored_operator_rate_selection(row: Any) -> dict[str, Any]:
+    for payload in (
+        getattr(row, "rate_unit_conversion", None),
+        getattr(row, "rate_trace", None),
+    ):
+        if not isinstance(payload, dict):
+            continue
+        selection = payload.get("operator_selection")
+        if isinstance(selection, dict):
+            return dict(selection)
+    selected_rate_item_id = _row_optional_attr(row, "selected_rate_item_id")
+    selected_rate_mapping_id = _row_optional_attr(row, "selected_rate_mapping_id")
+    if selected_rate_item_id or selected_rate_mapping_id:
+        return {
+            "selected_rate_item_id": selected_rate_item_id,
+            "selected_rate_mapping_id": selected_rate_mapping_id,
+            "output_per_day": _row_optional_attr(row, "output_per_day"),
+        }
+    return {}
+
+
 def _float_or_none(value: Any) -> float | None:
     if value is None:
         return None
@@ -4090,8 +4122,9 @@ async def _attach_session_subtype_rate_projection(
     source_by_id = {source.id: source for source in catalog.sources if source.is_active}
 
     for row in rows:
-        operator_selected_rate_item_id = row.selected_rate_item_id if row.output_source == "manual" else None
-        operator_selected_rate_mapping_id = row.selected_rate_mapping_id if row.output_source == "manual" else None
+        stored_operator_selection = _stored_operator_rate_selection(row) if row.output_source == "manual" else {}
+        operator_selected_rate_item_id = stored_operator_selection.get("selected_rate_item_id")
+        operator_selected_rate_mapping_id = stored_operator_selection.get("selected_rate_mapping_id")
         if row.crew_size is None and batch_crew is not None:
             row.crew_size = batch_crew
             row.crew_source = "estimate"
@@ -4310,8 +4343,8 @@ async def _attach_session_subtype_rate_projection(
         resolved_labor_hours = catalog_total if selection.rate_auto_applicable else None
         resolved_labor_source = "catalog_independent" if resolved_labor_hours else None
 
-        row.selected_rate_item_id = operator_selected_rate_item_id or selection.rate_item_id
-        row.selected_rate_mapping_id = operator_selected_rate_mapping_id or selection.rate_mapping_id
+        _set_row_projection_attr(row, "selected_rate_item_id", operator_selected_rate_item_id or selection.rate_item_id)
+        _set_row_projection_attr(row, "selected_rate_mapping_id", operator_selected_rate_mapping_id or selection.rate_mapping_id)
         row.rate_unit_code = selection.unit_code
         row.item_unit_code = unit_code
         row.unit_conversion_factor = conversion_factor
@@ -4350,7 +4383,7 @@ async def _attach_session_subtype_rate_projection(
             row.rate_trace["operator_selection"] = {
                 "selected_rate_item_id": operator_selected_rate_item_id,
                 "selected_rate_mapping_id": operator_selected_rate_mapping_id,
-                "output_per_day": row.output_per_day,
+                "output_per_day": stored_operator_selection.get("output_per_day", row.output_per_day),
             }
 
         if (
@@ -4537,19 +4570,32 @@ async def update_session_subtype(
             raise ValueError("Производительность должна быть больше нуля")
         row.output_per_day = float(v) if v is not None else None
         row.output_source = "manual"
-        if "selected_rate_item_id" in patch:
-            row.selected_rate_item_id = str(patch["selected_rate_item_id"] or "").strip() or None
-        if "selected_rate_mapping_id" in patch:
-            row.selected_rate_mapping_id = str(patch["selected_rate_mapping_id"] or "").strip() or None
-        if row.selected_rate_item_id or row.selected_rate_mapping_id:
-            trace = row.rate_trace if isinstance(row.rate_trace, dict) else {}
-            trace["operator_selection"] = {
-                "selected_rate_item_id": row.selected_rate_item_id,
-                "selected_rate_mapping_id": row.selected_rate_mapping_id,
+        selected_rate_item_id = (
+            str(patch["selected_rate_item_id"] or "").strip()
+            if "selected_rate_item_id" in patch
+            else str(_stored_operator_rate_selection(row).get("selected_rate_item_id") or "").strip()
+        ) or None
+        selected_rate_mapping_id = (
+            str(patch["selected_rate_mapping_id"] or "").strip()
+            if "selected_rate_mapping_id" in patch
+            else str(_stored_operator_rate_selection(row).get("selected_rate_mapping_id") or "").strip()
+        ) or None
+        _set_row_projection_attr(row, "selected_rate_item_id", selected_rate_item_id)
+        _set_row_projection_attr(row, "selected_rate_mapping_id", selected_rate_mapping_id)
+        if selected_rate_item_id or selected_rate_mapping_id:
+            stored_conversion = row.rate_unit_conversion if isinstance(row.rate_unit_conversion, dict) else {}
+            stored_conversion = dict(stored_conversion)
+            stored_conversion["operator_selection"] = {
+                "selected_rate_item_id": selected_rate_item_id,
+                "selected_rate_mapping_id": selected_rate_mapping_id,
                 "output_per_day": row.output_per_day,
                 "confirmed_by_user_id": user_id,
                 "confirmed_at": _now().isoformat(),
             }
+            row.rate_unit_conversion = stored_conversion
+            flag_modified(row, "rate_unit_conversion")
+            trace = row.rate_trace if isinstance(row.rate_trace, dict) else {}
+            trace["operator_selection"] = stored_conversion["operator_selection"]
             row.rate_trace = trace
         if row.output_per_day is not None and row.item_id:
             item = await db.get(KtpWbsItem, row.item_id)
