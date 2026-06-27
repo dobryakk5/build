@@ -86,9 +86,9 @@ def test_runtime_dictionary_version_and_electrical_branch() -> None:
     taxonomy, _, stages = _classifier_context()
 
     taxonomy.assert_project_hierarchy_compatible()
-    assert taxonomy.dictionary_version() == "construction_work_dictionary_v6_4_11@1.8.0"
-    assert taxonomy.DICTIONARY_SOURCE == "construction_work_dictionary_v6_4_11"
-    assert taxonomy.PROMPT_VERSION == "estimate-v6.4.11"
+    assert taxonomy.dictionary_version() == "construction_work_dictionary_v6_5_0@1.9.0"
+    assert taxonomy.DICTIONARY_SOURCE == "construction_work_dictionary_v6_5_0"
+    assert taxonomy.PROMPT_VERSION == "estimate-v6.5.0"
     assert {stage["number"] for stage in stages} >= {
         "7.5.18",
         "7.5.19",

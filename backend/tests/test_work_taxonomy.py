@@ -276,7 +276,7 @@ def test_upload_row_role_uses_explicit_item_type_before_heuristics():
 
 
 @pytest.mark.asyncio
-async def test_work_taxonomy_helpers_fallback_to_json_v6_4():
+async def test_work_taxonomy_helpers_fallback_to_json_v6_5():
     db = MagicMock()
     db.scalars = AsyncMock(return_value=[])
 
@@ -284,8 +284,8 @@ async def test_work_taxonomy_helpers_fallback_to_json_v6_4():
     subtypes = await get_work_taxonomy_subtypes(db)
 
     assert len(sections) == 19
-    assert len(subtypes) == 218
-    assert dictionary_version() == "construction_work_dictionary_v6_4_2_type2_7_patch@1.7.2"
+    assert len(subtypes) == 219
+    assert dictionary_version() == "construction_work_dictionary_v6_5_0@1.9.0"
     taxonomy_codes = [s["taxonomy_code"] for s in subtypes]
     assert len(set(taxonomy_codes)) == len(subtypes)
     assert all(code and "." in code for code in taxonomy_codes)
@@ -296,14 +296,14 @@ async def test_work_taxonomy_helpers_fallback_to_json_v6_4():
 
 def test_project_hierarchy_exposes_types_and_variants():
     hierarchy = get_project_hierarchy()
-    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_4_2_type2_7_patch@1.7.2"
+    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_5_0@1.9.0"
     assert len(hierarchy["estimate_types"]) == 9
     assert sum(len(t["project_variants"]) for t in hierarchy["estimate_types"]) == 65
     assert sum(
         variant["stages_count"]
         for t in hierarchy["estimate_types"]
         for variant in t["project_variants"]
-    ) == 1043
+    ) == 1042
     residential = next(t for t in hierarchy["estimate_types"] if t["id"] == "residential_construction")
     assert residential["estimate_kind"] == 2
     assert any(

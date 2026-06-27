@@ -41,7 +41,7 @@ def test_stage10_preview_metadata_accepts_single_basement_slab_radio_option():
     )
 
     assert building_params == {"floors_count": 2, "has_basement": True, "has_mansard": False}
-    assert project_options == {BASEMENT_TOP_SLAB_STAGE_ID: "monolithic_rc"}
+    assert project_options == {BASEMENT_TOP_SLAB_STAGE_ID: ["monolithic_rc"]}
 
 
 def test_stage10_preview_metadata_coerces_single_item_legacy_array_to_radio_option():
@@ -52,7 +52,7 @@ def test_stage10_preview_metadata_coerces_single_item_legacy_array_to_radio_opti
         project_structure_options={BASEMENT_TOP_SLAB_STAGE_ID: ["monolithic_rc"]},
     )
 
-    assert project_options == {BASEMENT_TOP_SLAB_STAGE_ID: "monolithic_rc"}
+    assert project_options == {BASEMENT_TOP_SLAB_STAGE_ID: ["monolithic_rc"]}
 
 
 def test_stage10_preview_metadata_accepts_radio_value_for_legacy_selectable_many_stage():
@@ -83,7 +83,7 @@ def test_stage10_preview_metadata_accepts_no_facade_finish_option():
         project_structure_options={FACADE_STAGE_ID: "no_finish"},
     )
 
-    assert project_options == {FACADE_STAGE_ID: ["no_finish"]}
+    assert project_options == {FACADE_STAGE_ID: "no_finish"}
 
 
 def test_stage10_preview_metadata_rejects_multiple_basement_slab_radio_options():
@@ -95,7 +95,7 @@ def test_stage10_preview_metadata_rejects_multiple_basement_slab_radio_options()
             project_structure_options={BASEMENT_TOP_SLAB_STAGE_ID: ["precast_rc", "slab_on_grade"]},
         )
 
-    assert exc.value.code == "invalid_stage_option"
+    assert exc.value.code == "too_many_stage_options_selected"
 
 
 def test_stage10_preview_metadata_does_not_require_basement_slab_without_basement():

@@ -1,6 +1,6 @@
 """Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v6_4_14.json`` is the canonical work
+``construction_work_dictionary_v6_5_0.json`` is the canonical work
 classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
@@ -22,15 +22,22 @@ from app.services.work_context_rules import (
     resolve_special_masonry_operation,
 )
 from app.models import WorkPrecedence, WorkSubtype
+try:
+    from app.core.config import settings
+    from app.services.taxonomy_snapshot_service import resolve_config_path
+except ModuleNotFoundError:  # standalone delivery/test imports
+    from services.taxonomy_snapshot_service import resolve_config_path
+
+    settings = None
 
 
-DICTIONARY_FILE = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "construction_work_dictionary_v6_4_14.json"
+DICTIONARY_FILE = resolve_config_path(
+    settings.WORK_TAXONOMY_PATH
+    if settings is not None
+    else "backend/app/data/construction_work_dictionary_v6_5_0.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v6_4_14"
-PROMPT_VERSION = "estimate-v6.4.14"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_5_0"
+PROMPT_VERSION = "estimate-v6.5.0"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
@@ -311,7 +318,7 @@ def _load_dictionary() -> dict[str, Any]:
 def _effective_project_variant(variant: dict[str, Any]) -> dict[str, Any]:
     """Return the project variant embedded in the canonical dictionary.
 
-    Since v6.4.14 source-variant files are audit/build inputs only. Runtime
+    Historical source-variant files are audit/build inputs only. Runtime
     must not overlay the canonical dictionary with a second JSON source.
     """
     return variant

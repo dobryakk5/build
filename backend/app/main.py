@@ -43,7 +43,7 @@ from app.services.work_taxonomy_service import assert_project_hierarchy_compatib
 _APP_DIR = Path(__file__).resolve().parent
 work_rates_router = create_work_rate_router(
     catalog_path=resolve_config_path(settings.WORK_RATE_CATALOG_PATH),
-    taxonomy_path=resolve_config_path(settings.LEGACY_WORK_TAXONOMY_PATH),
+    taxonomy_path=resolve_config_path(settings.WORK_TAXONOMY_PATH),
     authenticated_user_dependency=get_current_user,
 )
 

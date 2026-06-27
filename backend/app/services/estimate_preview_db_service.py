@@ -214,9 +214,14 @@ def _validate_stage10_preview_metadata(
         for stage_id in BASEMENT_BRANCH_STAGE_IDS:
             normalized_options.pop(stage_id, None)
     if normalized_building_params["has_basement"]:
-        selected = normalized_options.get(BASEMENT_TOP_SLAB_STAGE_ID)
-        if not selected:
+        selected_value = normalized_options.get(BASEMENT_TOP_SLAB_STAGE_ID)
+        if not selected_value:
             raise PreviewDomainError("basement_top_slab_option_required", 422)
+        selected = (
+            selected_value[0]
+            if isinstance(selected_value, list) and len(selected_value) == 1
+            else selected_value
+        )
         if selected not in BASEMENT_TOP_SLAB_OPTION_IDS:
             raise PreviewDomainError(
                 "invalid_stage_option",

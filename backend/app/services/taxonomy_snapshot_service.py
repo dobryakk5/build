@@ -89,8 +89,15 @@ def _dictionary_sha256(dictionary: Mapping[str, Any]) -> str:
 
 
 def load_target_dictionary(root: str | Path | None = None) -> tuple[dict[str, Any], str]:
-    base = Path(root) if root is not None else Path(__file__).resolve().parents[1]
-    path = base / "data" / TARGET_DICTIONARY_FILENAME
+    if root is not None:
+        path = Path(root) / "data" / TARGET_DICTIONARY_FILENAME
+    else:
+        try:
+            from app.core.config import settings
+        except ModuleNotFoundError:  # standalone delivery scripts
+            path = Path(__file__).resolve().parents[1] / "data" / TARGET_DICTIONARY_FILENAME
+        else:
+            path = resolve_config_path(settings.WORK_TAXONOMY_PATH)
     raw_bytes = path.read_bytes()
     return json.loads(raw_bytes.decode("utf-8")), hashlib.sha256(raw_bytes).hexdigest()
 

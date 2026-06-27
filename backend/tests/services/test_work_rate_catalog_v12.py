@@ -37,7 +37,7 @@ from app.services.work_taxonomy_service import (
 )
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
-TAXONOMY = BACKEND_ROOT / "app" / "data" / "construction_work_dictionary_v6_4_11.json"
+TAXONOMY = BACKEND_ROOT / "app" / "data" / "construction_work_dictionary_v6_5_0.json"
 SOURCE_DIR = Path(os.environ.get("WORK_RATE_SOURCE_DIR", "/mnt/data/ref_18_06_unicode"))
 NORMALIZED_FILES = [
     "Жилое остальные дома.xlsx",
@@ -56,11 +56,11 @@ requires_source_files = pytest.mark.skipif(
 )
 
 
-def test_taxonomy_v6411_registry_and_legacy_adapter():
+def test_taxonomy_v650_registry_and_legacy_adapter():
     payload = json.loads(TAXONOMY.read_text(encoding="utf-8"))
-    assert payload["dictionary_version"].startswith("construction_work_dictionary_v6_4_11")
+    assert payload["dictionary_version"].startswith("construction_work_dictionary_v6_5_0")
     policy = payload["operation_object_resolution_policy"]
-    assert policy["version"] == "1.2.0"
+    assert policy["version"] == "1.4.0"
     assert isinstance(policy["operations"], dict)
     assert policy["operation_metadata"]["formwork_installation"]["kind"] == "atomic"
     assert policy["operation_metadata"]["formwork_rebar_concrete"]["kind"] == "package"
@@ -74,7 +74,7 @@ def test_taxonomy_v6411_registry_and_legacy_adapter():
     assert validate_taxonomy_code("foundation/foundation_rebar_formwork_concrete")
     assert get_operation_object_candidates("formwork_installation", "foundation")
     registry = get_operation_registry()
-    assert registry["version"] == "1.2.0"
+    assert registry["version"] == "1.4.0"
 
 
 @requires_source_files
