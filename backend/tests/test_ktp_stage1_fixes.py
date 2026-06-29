@@ -69,15 +69,10 @@ def test_dynamic_stage_aware_uses_batch_snapshot() -> None:
     batch = make_batch()
     stages, source, _snapshot = _stage_instances_from_batch_snapshot(batch)
     assert source == "batch_snapshot_dynamic"
-    assert len(stages) == 25
-    assert any(
+    assert len(stages) == 21
+    assert not any(
         stage.get("floor_number") == 0
-        and stage.get("template_stage_number") == "2.7.9"
-        for stage in stages
-    )
-    assert any(
-        stage.get("floor_number") == 0
-        and stage.get("template_stage_number") == "2.7.11"
+        and stage.get("template_stage_number") in {"2.7.9", "2.7.11"}
         for stage in stages
     )
     assert not any(

@@ -166,6 +166,8 @@ def _stage_instances_by_template(stage_instances: Iterable[dict[str, Any]]) -> d
     for stage in stage_instances:
         if not isinstance(stage, dict):
             continue
+        if stage.get("projection_target") is False:
+            continue
         template = str(stage.get("template_stage_number") or stage.get("number") or "")
         if template:
             result.setdefault(template, []).append(stage)
@@ -300,6 +302,14 @@ def _projection_payload(
         "floor_label": target_stage.get("floor_label"),
         "floor_component": target_stage.get("floor_component"),
         "component_role": target_stage.get("component_role"),
+        "target_aggregation_mode": target_stage.get("aggregation_mode"),
+        "target_aggregate_floor_numbers": list(
+            target_stage.get("aggregate_floor_numbers") or []
+        ),
+        "floor_assignment_source": target_stage.get("floor_assignment_source"),
+        "classification_anchor_stage_instance_id": target_stage.get(
+            "classification_anchor_stage_instance_id"
+        ),
         "operation_code": binding.operation_code or None,
         "operation_package_code": binding.operation_package_code,
         "calculation_code": binding.calculation_code,

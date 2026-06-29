@@ -783,6 +783,32 @@ def _filter_stages_by_floor_reference(
     return stages, None
 
 
+def _uses_building_params_floor_assignment(stages: list[dict[str, Any]]) -> bool:
+    marked = [
+        stage
+        for stage in stages
+        if isinstance(stage, dict)
+        and stage.get("floor_assignment_source") == "building_params"
+    ]
+    if not marked:
+        return False
+    return all(
+        stage.get("use_estimate_text_floor_reference") is False
+        and stage.get("classification_mode") == "template_anchor"
+        for stage in marked
+    )
+
+
+def _classification_anchor_stages(
+    stages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        stage
+        for stage in stages
+        if stage.get("classification_candidate") is True
+    ]
+
+
 class StageMatchType(StrEnum):
     EXACT_STAGE_TITLE_MATCH = "exact_stage_title_match"
     NEAR_STAGE_TITLE_MATCH = "near_stage_title_match"
@@ -898,6 +924,15 @@ class StageMatch:
             "floor_component": stage.get("floor_component"),
             "component_role": stage.get("component_role"),
             "stage_sort_order": stage.get("sort_order"),
+            "floor_assignment_source": stage.get("floor_assignment_source"),
+            "use_estimate_text_floor_reference": stage.get(
+                "use_estimate_text_floor_reference"
+            ),
+            "classification_mode": stage.get("classification_mode"),
+            "classification_candidate": stage.get("classification_candidate"),
+            "classification_anchor_stage_instance_id": stage.get(
+                "classification_anchor_stage_instance_id"
+            ),
             "work_stage_number": stage_number,
             "work_stage_title": stage.get("title"),
             "stage_occurrence_index": stage.get("occurrence_index"),
@@ -1631,11 +1666,26 @@ class StageClassifier:
         if normalized_role in SERVICE_ROLES:
             return self._unmatched(f"row_role_{normalized_role}_skipped", normalized_role, needs_review=False)
 
-        allowed_stages, floor_constraint_error = _filter_stages_by_floor_reference(allowed_stages, text)
-        if floor_constraint_error:
-            return self._unmatched(floor_constraint_error, normalized_role, needs_review=True)
-        if not allowed_stages:
-            return self._unmatched("floor_projection_conflict", normalized_role, needs_review=True)
+        if _uses_building_params_floor_assignment(allowed_stages):
+            allowed_stages = _classification_anchor_stages(allowed_stages)
+            if not allowed_stages:
+                return self._unmatched(
+                    "locked_stage_anchor_contract_invalid",
+                    normalized_role,
+                    needs_review=True,
+                )
+        else:
+            allowed_stages, floor_constraint_error = _filter_stages_by_floor_reference(
+                allowed_stages, text
+            )
+            if floor_constraint_error:
+                return self._unmatched(
+                    floor_constraint_error, normalized_role, needs_review=True
+                )
+            if not allowed_stages:
+                return self._unmatched(
+                    "floor_projection_conflict", normalized_role, needs_review=True
+                )
 
         # A grout-only tile row does not identify floor vs wall by itself.
         # In catalogue estimates it immediately follows the corresponding tile

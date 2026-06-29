@@ -15,7 +15,7 @@ except ModuleNotFoundError:  # standalone delivery scripts
 
 BATCH_TAXONOMY_SNAPSHOT_SCHEMA_VERSION = "estimate_batch_taxonomy_snapshot@1.0.0"
 SNAPSHOT_PAYLOAD_VERSION = 1
-TARGET_DICTIONARY_FILENAME = "construction_work_dictionary_v6_5_0.json"
+TARGET_DICTIONARY_FILENAME = "construction_work_dictionary_v6_5_1.json"
 SNAPSHOT_EXTERNAL_METADATA_KEYS = frozenset(
     {
         "building_params",

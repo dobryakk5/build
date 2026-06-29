@@ -80,7 +80,7 @@ class Settings(BaseSettings):
 
     # Stage 10 / post-release variant 2.7 contour.
     WORK_RATE_CATALOG_PATH: str = "backend/app/data/work_rate_catalog_v1_2.json"
-    WORK_TAXONOMY_PATH: str = "backend/app/data/construction_work_dictionary_v6_5_0.json"
+    WORK_TAXONOMY_PATH: str = "backend/app/data/construction_work_dictionary_v6_5_1.json"
     DYNAMIC_FLOOR_STRUCTURE_2_7_MODE: str = "off"
     DYNAMIC_FLOOR_STRUCTURE_2_7_ALLOWLIST: str = ""
     ESTIMATE_PREVIEW_PROCESSING_TIMEOUT_MINUTES: int = 60

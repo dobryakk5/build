@@ -187,6 +187,7 @@ class GroupOut(BaseModel):
     template_stage_number: str | None = None
     stage_number: str | None = None
     floor_number: int | None = None
+    floor_kind: str | None = None
     floor_label: str | None = None
     floor_component: str | None = None
     component_role: str | None = None
@@ -211,6 +212,7 @@ class GroupOut(BaseModel):
             template_stage_number=g.template_stage_number,
             stage_number=g.stage_number,
             floor_number=g.floor_number,
+            floor_kind=g.floor_kind,
             floor_label=g.floor_label,
             floor_component=g.floor_component,
             component_role=g.component_role,
@@ -326,6 +328,9 @@ class WbsOut(BaseModel):
     groups: list[GroupOut]
     group_dependencies: list[GroupDependencyOut]
     session_subtypes: list[SessionSubtypeOut] = Field(default_factory=list)
+    sequence_mode: str = "editable"
+    sequence_locked: bool = False
+    sequence_source: str | None = None
 
     @classmethod
     def of(cls, payload: dict) -> "WbsOut":
@@ -341,6 +346,9 @@ class WbsOut(BaseModel):
             session_subtypes=[
                 SessionSubtypeOut.of(s) for s in payload.get("session_subtypes", [])
             ],
+            sequence_mode=str(payload.get("sequence_mode") or "editable"),
+            sequence_locked=bool(payload.get("sequence_locked", False)),
+            sequence_source=payload.get("sequence_source"),
         )
 
 

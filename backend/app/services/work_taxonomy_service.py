@@ -1,6 +1,6 @@
 """Work taxonomy classification, hierarchy and precedence helpers.
 
-``construction_work_dictionary_v6_5_0.json`` is the canonical work
+``construction_work_dictionary_v6_5_1.json`` is the canonical work
 classifier. The CSV helper remains only for legacy callers.
 """
 from __future__ import annotations
@@ -34,10 +34,10 @@ except ModuleNotFoundError:  # standalone delivery/test imports
 DICTIONARY_FILE = resolve_config_path(
     settings.WORK_TAXONOMY_PATH
     if settings is not None
-    else "backend/app/data/construction_work_dictionary_v6_5_0.json"
+    else "backend/app/data/construction_work_dictionary_v6_5_1.json"
 )
-DICTIONARY_SOURCE = "construction_work_dictionary_v6_5_0"
-PROMPT_VERSION = "estimate-v6.5.0"
+DICTIONARY_SOURCE = "construction_work_dictionary_v6_5_1"
+PROMPT_VERSION = "estimate-v6.5.1"
 UNKNOWN_SUBTYPE_CODE = "unknown/needs_review"
 UNKNOWN_SUBTYPE_NAME = "Требует ручной классификации"
 SERVICE_ROW_SUBTYPE_NAME = "Служебная строка сметы"
@@ -562,6 +562,21 @@ def _public_work_stage(stage: dict[str, Any]) -> dict[str, Any]:
         "autofill_enabled": bool(stage.get("autofill_enabled", stage.get("autofill_enabled_default", False))),
         "primary_work_type": stage.get("primary_work_type") or None,
         "related_work_types": stage.get("related_work_types") or [],
+        "floor_assignment_source": stage.get("floor_assignment_source"),
+        "use_estimate_text_floor_reference": stage.get("use_estimate_text_floor_reference"),
+        "classification_mode": stage.get("classification_mode"),
+        "classification_candidate": stage.get("classification_candidate"),
+        "classification_anchor_stage_instance_id": stage.get(
+            "classification_anchor_stage_instance_id"
+        ),
+        "projection_target": stage.get("projection_target"),
+        "aggregation_mode": stage.get("aggregation_mode"),
+        "aggregate_floor_numbers": stage.get("aggregate_floor_numbers") or [],
+        "sequence_index": stage.get("sequence_index"),
+        "sequence_step_index": stage.get("sequence_step_index"),
+        "sequence_step_key": stage.get("sequence_step_key"),
+        "sequence_mode": stage.get("sequence_mode"),
+        "sequence_source": stage.get("sequence_source"),
     }
 
 
@@ -575,6 +590,7 @@ def _public_project_variant(variant: dict[str, Any], include_stages: bool) -> di
         "stages_count": len(stages),
         "building_params_schema": deepcopy(variant.get("building_params_schema") or {}),
         "floor_structure_schema": deepcopy(variant.get("floor_structure_schema") or {}),
+        "wbs_sequence_schema": deepcopy(variant.get("wbs_sequence_schema") or {}),
     }
     if include_stages:
         item["stages"] = [_public_work_stage(stage) for stage in stages]

@@ -134,11 +134,15 @@ def projection_group_descriptor(
 ) -> ProjectionGroupDescriptor:
     """Return stable WBS-group identity for one projected KTP item."""
     projection = projection or {}
-    stage_instance_id = _text(projection.get("target_stage_instance_id"))
+    stage_instance_id = _text(projection.get("target_stage_instance_id")) or _text(
+        raw_group.get("stage_instance_id")
+    )
     base_key = _text(raw_group.get("section_key")) or f"group-{fallback_index}"
     key = f"stage-instance:{stage_instance_id}" if stage_instance_id else f"base:{base_key}"
 
-    stage_number = _text(projection.get("target_stage_number"))
+    stage_number = _text(projection.get("target_stage_number")) or _text(
+        raw_group.get("stage_number") or raw_group.get("work_stage_number")
+    )
     stage_title = _text(projection.get("target_stage_title"))
     base_title = _text(raw_group.get("title")) or f"Группа {fallback_index}"
     title = base_title
@@ -157,14 +161,20 @@ def projection_group_descriptor(
         template_stage_number=_text(projection.get("target_template_stage_number"))
         or _text(raw_group.get("template_stage_number"))
         or _text(raw_group.get("work_stage_number")),
-        stage_number=stage_number or _text(raw_group.get("work_stage_number")),
+        stage_number=stage_number,
         canonical_stage_id=_text(projection.get("canonical_stage_id"))
         or _text(raw_group.get("canonical_stage_id")),
-        floor_number=_int(projection.get("floor_number")),
-        floor_kind=_text(projection.get("floor_kind")),
-        floor_label=_text(projection.get("floor_label")),
-        floor_component=_text(projection.get("floor_component")),
-        component_role=_text(projection.get("component_role")),
+        floor_number=_int(
+            projection.get("floor_number")
+            if "floor_number" in projection
+            else raw_group.get("floor_number")
+        ),
+        floor_kind=_text(projection.get("floor_kind")) or _text(raw_group.get("floor_kind")),
+        floor_label=_text(projection.get("floor_label")) or _text(raw_group.get("floor_label")),
+        floor_component=_text(projection.get("floor_component"))
+        or _text(raw_group.get("floor_component")),
+        component_role=_text(projection.get("component_role"))
+        or _text(raw_group.get("component_role")),
     )
 
 
@@ -318,6 +328,46 @@ def _dedupe_edges(edges: Iterable[tuple[str, str]]) -> tuple[tuple[str, str], ..
         seen.add(edge)
         result.append(edge)
     return tuple(result)
+
+
+def _is_fallback_group_title(title: str) -> bool:
+    return title.strip() in {"Прочие позиции сметы", "Прочие работы сметы"}
+
+
+def _is_active_gpr_group(group: Any) -> bool:
+    items = _get(group, "accepted_items")
+    if items is None:
+        items = _get(group, "items", [])
+    for item in items or []:
+        if _get(item, "review_status") != "accepted":
+            continue
+        if _get(item, "gpr_included", True) is False:
+            continue
+        return True
+    return False
+
+
+def build_locked_sequence_dependencies(
+    groups: Iterable[Any],
+) -> FloorDependencyReport:
+    active_groups = [
+        group
+        for group in groups
+        if not _is_fallback_group_title(str(_get(group, "title") or ""))
+        and _is_active_gpr_group(group)
+    ]
+    ordered = sorted(
+        active_groups,
+        key=lambda group: (
+            _float(_get(group, "sort_order")) or 0.0,
+            str(_get(group, "id") or ""),
+        ),
+    )
+    edges = tuple(
+        (str(_get(current, "id")), str(_get(previous, "id")))
+        for previous, current in zip(ordered, ordered[1:])
+    )
+    return FloorDependencyReport(applicable=True, edges=edges)
 
 
 def build_brick_house_floor_dependencies(groups: Iterable[Any]) -> FloorDependencyReport:

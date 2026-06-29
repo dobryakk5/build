@@ -71,16 +71,21 @@ from app.services.floor_structure_service import build_stage_instances, validate
 from app.services.ktp_errors import (
     InvalidStageAwareRowReference,
     KtpNotFoundError,
+    SequenceLockedByTaxonomy,
     Stage1JobAlreadyRunning,
     Stage1ReviewRequired,
     Stage1RunSuperseded,
     TaxonomySnapshotIntegrity,
     TaxonomySnapshotRequired,
 )
+from app.services.ktp_sequence_policy_service import (
+    load_sequence_policy_for_session,
+    sequence_policy_from_batch,
+)
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "estimate-v6.5-stage1-snapshot"
+PROMPT_VERSION = "estimate-v6.5.1"
 GROUPING_MODE_STAGE_AWARE = "stage_aware"
 GROUPING_MODE_ESTIMATE_STRUCTURE = "estimate_structure"
 
@@ -504,6 +509,7 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
     # GET must not persist lazy status/review changes. Stale transitions belong
     # to start/recovery/watchdog flows.
     session = await get_session_by_id(db, project_id, session_id)
+    sequence_policy = await load_sequence_policy_for_session(db, session)
     groups = list(
         await db.scalars(
             select(KtpWbsGroup)
@@ -512,7 +518,7 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
             .order_by(KtpWbsGroup.sort_order, KtpWbsGroup.created_at)
         )
     )
-    groups = _sort_stage_groups(groups)
+    groups = _sort_stage_groups(groups, sequence_locked=sequence_policy.locked)
     await _attach_stage_review_metadata(db, groups)
     group_ids = [g.id for g in groups]
     deps = (
@@ -543,6 +549,9 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
         "session": session,
         "groups": groups,
         "group_dependencies": deps,
+        "sequence_mode": sequence_policy.mode,
+        "sequence_locked": sequence_policy.locked,
+        "sequence_source": sequence_policy.source,
         "session_subtypes": subtypes,
     }
 
@@ -756,6 +765,11 @@ async def start_stage1_job(
 ) -> tuple[Job | None, KtpEstimateSession]:
     """Start or reuse Stage 1 with transaction-level session fencing."""
     await _assert_batch_belongs_to_project(db, project_id, estimate_batch_id)
+    batch = await db.get(EstimateBatch, estimate_batch_id)
+    sequence_policy = sequence_policy_from_batch(batch)
+    requested_preserve_estimate_structure = bool(preserve_estimate_structure)
+    if sequence_policy.locked:
+        preserve_estimate_structure = False
 
     existing = await _get_session_raw(
         db, project_id, estimate_batch_id, for_update=True
@@ -844,6 +858,9 @@ async def start_stage1_job(
             else GROUPING_MODE_STAGE_AWARE
         ),
         "preserve_estimate_structure": bool(preserve_estimate_structure),
+        "requested_preserve_estimate_structure": requested_preserve_estimate_structure,
+        "sequence_mode": sequence_policy.mode,
+        "sequence_source": sequence_policy.source,
         "stage1_generation": generation,
     }
     flag_modified(session, "stage1_raw_json")
@@ -858,6 +875,8 @@ async def start_stage1_job(
             "session_id": session.id,
             "stage1_generation": generation,
             "preserve_estimate_structure": bool(preserve_estimate_structure),
+            "requested_preserve_estimate_structure": requested_preserve_estimate_structure,
+            "sequence_mode": sequence_policy.mode,
             "grouping_mode": (
                 GROUPING_MODE_ESTIMATE_STRUCTURE
                 if preserve_estimate_structure
@@ -1372,7 +1391,7 @@ def _floor_sort_value(value: Any) -> int:
         return 10**7
 
 
-def _stage_group_sort_key(group: Any) -> tuple[Any, ...]:
+def _legacy_stage_group_sort_key(group: Any) -> tuple[Any, ...]:
     title = str(_group_value(group, "title") or "")
     fallback = _is_fallback_group_title(title)
     stage_number = (
@@ -1395,8 +1414,27 @@ def _stage_group_sort_key(group: Any) -> tuple[Any, ...]:
     )
 
 
-def _sort_stage_groups(groups: list[Any]) -> list[Any]:
-    return sorted(groups, key=_stage_group_sort_key)
+def _locked_stage_group_sort_key(group: Any) -> tuple[Any, ...]:
+    title = str(_group_value(group, "title") or "")
+    try:
+        sort_order = float(_group_value(group, "sort_order") or 0)
+    except (TypeError, ValueError):
+        sort_order = 0.0
+    return (
+        1 if _is_fallback_group_title(title) else 0,
+        sort_order,
+        title,
+        str(_group_value(group, "id") or ""),
+    )
+
+
+def _sort_stage_groups(
+    groups: list[Any],
+    *,
+    sequence_locked: bool = False,
+) -> list[Any]:
+    key = _locked_stage_group_sort_key if sequence_locked else _legacy_stage_group_sort_key
+    return sorted(groups, key=key)
 
 
 def _estimate_stage_number(est: Estimate) -> str | None:
@@ -2034,8 +2072,11 @@ def _build_stage_aware_groups(
         for stage in allowed_stages
         if stage.get("number")
     }
+    sequence_locked = any(stage.get("sequence_mode") == "locked" for stage in allowed_stages)
     stage_order = {
-        str(stage.get("number") or ""): (index + 1) * 1000.0
+        str(stage.get("number") or ""): float(
+            stage.get("sort_order") if stage.get("sort_order") is not None else (index + 1) * 1000.0
+        )
         for index, stage in enumerate(allowed_stages)
         if stage.get("number")
     }
@@ -2061,7 +2102,11 @@ def _build_stage_aware_groups(
             continue
         section_key = _stage_section_key(stage_number)
         groups[section_key] = {
-            "title": _stage_title(stage_number, stage.get("title")),
+            "title": (
+                str(stage.get("title") or stage_number)
+                if sequence_locked
+                else _stage_title(stage_number, stage.get("title"))
+            ),
             "sort_order": stage_order.get(stage_number, float(10**8)),
             "wt_code": None,
             "work_section_code": None,
@@ -2078,6 +2123,8 @@ def _build_stage_aware_groups(
             "floor_label": stage.get("floor_label"),
             "floor_component": stage.get("floor_component"),
             "component_role": stage.get("component_role"),
+            "sequence_mode": stage.get("sequence_mode"),
+            "sequence_source": stage.get("sequence_source"),
             "stage_options_mode": stage.get("stage_options_mode") or "none",
             "items": [],
         }
@@ -2163,9 +2210,9 @@ def _build_stage_aware_groups(
         stage_by_number=stage_by_number,
         diagnostics=diagnostics,
     )
-    result = sorted(
-        groups.values(),
-        key=_stage_group_sort_key,
+    result = _sort_stage_groups(
+        list(groups.values()),
+        sequence_locked=sequence_locked,
     )
     return result
 
@@ -3321,6 +3368,11 @@ def _materialize_wbs(
     warnings: list[str] = []
     seen_estimate_ids: set[str] = set()
     groups_by_key: dict[str, KtpWbsGroup] = {}
+    sequence_locked = any(
+        raw_group.get("sequence_mode") == "locked"
+        for raw_group in raw_groups
+        if isinstance(raw_group, dict)
+    )
     session_owner_user_id = (
         owner_user_id
         or getattr(session, "owner_user_id", None)
@@ -3348,6 +3400,23 @@ def _materialize_wbs(
         )
         existing = groups_by_key.get(descriptor.key)
         if existing is not None:
+            if sequence_locked and descriptor.stage_instance_id:
+                existing.title = descriptor.title
+                existing.sort_order = descriptor.sort_order
+                _set_metadata(
+                    existing,
+                    {
+                        "stage_instance_id": descriptor.stage_instance_id,
+                        "template_stage_number": descriptor.template_stage_number,
+                        "stage_number": descriptor.stage_number,
+                        "canonical_stage_id": descriptor.canonical_stage_id,
+                        "floor_number": descriptor.floor_number,
+                        "floor_kind": descriptor.floor_kind,
+                        "floor_label": descriptor.floor_label,
+                        "floor_component": descriptor.floor_component,
+                        "component_role": descriptor.component_role,
+                    },
+                )
             return existing
 
         wt_code = raw_group.get("wt_code")
@@ -3529,6 +3598,11 @@ def _materialize_wbs(
             )
         items.append(item)
 
+    if sequence_locked:
+        for g_idx, raw_g in enumerate(raw_groups, start=1):
+            if raw_g.get("stage_instance_id"):
+                _ensure_group(raw_g, g_idx, None)
+
     for g_idx, raw_g in enumerate(raw_groups, start=1):
         raw_items = raw_g.get("items") or []
         ai_item_counter = 0
@@ -3663,7 +3737,19 @@ def _materialize_wbs(
                     fallback_name=est.work_name,
                 )
 
-    groups = _sort_stage_groups(groups)
+    if sequence_locked:
+        taxonomy_orders = [
+            float(group.sort_order)
+            for group in groups
+            if group.stage_instance_id and not _is_fallback_group_title(group.title)
+        ]
+        fallback_order = max(taxonomy_orders, default=0.0) + 1000.0
+        for group in groups:
+            if _is_fallback_group_title(group.title):
+                group.sort_order = fallback_order
+                fallback_order += 1000.0
+
+    groups = _sort_stage_groups(groups, sequence_locked=sequence_locked)
     return groups, items, warnings
 
 
@@ -4010,6 +4096,11 @@ async def create_group(
     db: AsyncSession, project_id: str, session_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
     session = await get_session_by_id(db, project_id, session_id)
+    sequence_policy = await load_sequence_policy_for_session(db, session)
+    if sequence_policy.locked:
+        raise SequenceLockedByTaxonomy(
+            "Порядок и состав верхнеуровневых групп заданы taxonomy snapshot."
+        )
     title = str(payload.get("title") or "").strip()
     if not title:
         raise ValueError("Название группы не может быть пустым")
@@ -4036,6 +4127,20 @@ async def update_group(
     db: AsyncSession, project_id: str, group_id: str, patch: dict[str, Any]
 ) -> dict[str, Any]:
     group = await _get_group(db, project_id, group_id)
+    session = await get_session_by_id(db, project_id, group.session_id)
+    sequence_policy = await load_sequence_policy_for_session(db, session)
+    title_changed = (
+        "title" in patch
+        and patch.get("title") is not None
+        and str(patch.get("title") or "").strip() != str(group.title or "").strip()
+    )
+    sort_changed = False
+    if "sort_order" in patch and patch.get("sort_order") is not None:
+        sort_changed = float(patch["sort_order"]) != float(group.sort_order)
+    if sequence_policy.locked and (title_changed or sort_changed):
+        raise SequenceLockedByTaxonomy(
+            "Название и порядок taxonomy-группы заблокированы справочником."
+        )
     if "title" in patch and patch["title"]:
         group.title = str(patch["title"]).strip()
     if "sort_order" in patch and patch["sort_order"] is not None:
@@ -4052,6 +4157,12 @@ async def delete_group(
     db: AsyncSession, project_id: str, group_id: str
 ) -> dict[str, Any]:
     group = await _get_group(db, project_id, group_id)
+    session = await get_session_by_id(db, project_id, group.session_id)
+    sequence_policy = await load_sequence_policy_for_session(db, session)
+    if sequence_policy.locked and group.stage_instance_id:
+        raise SequenceLockedByTaxonomy(
+            "Taxonomy-группа не может быть удалена в locked-режиме."
+        )
     if group.items:
         raise PermissionError(
             "Нельзя удалить непустую группу — сначала перенесите или "
@@ -4625,9 +4736,6 @@ async def approve_stage2(
     for g in groups:
         accepted = [it for it in g.items if it.review_status != "rejected"]
         if not accepted:
-            for it in g.items:
-                await db.delete(it)
-            await db.delete(g)
             continue
         if g.status != "card_generated":
             raise ValueError(
@@ -4660,9 +4768,6 @@ async def skip_stage2(
     for group in groups:
         accepted = [item for item in group.items if item.review_status != "rejected"]
         if not accepted:
-            for item in group.items:
-                await db.delete(item)
-            await db.delete(group)
             continue
         accepted_count += len(accepted)
 
@@ -6166,7 +6271,11 @@ _SEQUENCE_ALLOWED_STATUSES = {
 
 
 def _is_fallback_group_title(title: str | None) -> bool:
-    return (title or "").strip() in {FALLBACK_DISPLAY_TITLE, FALLBACK_GROUP_TITLE}
+    return (title or "").strip() in {
+        FALLBACK_DISPLAY_TITLE,
+        FALLBACK_GROUP_TITLE,
+        STAGE_AWARE_FALLBACK_TITLE,
+    }
 
 
 async def _load_session_groups(
@@ -6208,14 +6317,22 @@ async def propose_group_sequence(
     обновлённый sort_order; статус сессии → gpr_sequence_review. Оператор затем
     правит порядок вручную (PATCH /groups/{id}) и подтверждает approve-sequence.
     """
-    from app.services.ktp_gpr_service import _ai_order_groups
-
     session = await get_session_by_id(db, project_id, session_id)
     if session.status not in _SEQUENCE_ALLOWED_STATUSES:
         raise ValueError(
             "Последовательность групп можно строить только после утверждения "
             "карточек КТП (этап 2)"
         )
+
+    sequence_policy = await load_sequence_policy_for_session(db, session)
+    if sequence_policy.locked:
+        if session.status != "gpr_sequence_review":
+            session.status = "gpr_sequence_review"
+            session.updated_at = _now()
+            await db.commit()
+        return await get_wbs(db, project_id, session_id)
+
+    from app.services.ktp_gpr_service import _ai_order_groups
 
     groups = await _load_session_groups(db, session_id)
     normal = [g for g in groups if not _is_fallback_group_title(g.title)]
@@ -6247,6 +6364,14 @@ async def approve_group_sequence(
     session = await get_session_by_id(db, project_id, session_id)
     if session.status not in {"gpr_sequence_review", "gpr_ready", "gpr_pending"}:
         raise ValueError("Нет последовательности групп для утверждения")
+
+    sequence_policy = await load_sequence_policy_for_session(db, session)
+    if sequence_policy.locked:
+        session.status = "gpr_ready"
+        session.updated_at = _now()
+        await db.commit()
+        await db.refresh(session)
+        return session
 
     groups = await _load_session_groups(db, session_id)
     fallback = [g for g in groups if _is_fallback_group_title(g.title)]

@@ -19,8 +19,10 @@ try:
     from app.services.ktp_floor_sequence_service import (
         STRUCTURAL_COMPLETION_STAGE_INSTANCE_ID,
         build_brick_house_floor_dependencies,
+        build_locked_sequence_dependencies,
         projection_metadata,
     )
+    from app.services.ktp_sequence_policy_service import sequence_policy_from_snapshot
     from app.services.quantity_projection_service import enrich_quantity_projections
     from app.services.semantic_options_service import (
         generate_semantic_operation_projections,
@@ -33,8 +35,10 @@ except ModuleNotFoundError:
     from services.ktp_floor_sequence_service import (
         STRUCTURAL_COMPLETION_STAGE_INSTANCE_ID,
         build_brick_house_floor_dependencies,
+        build_locked_sequence_dependencies,
         projection_metadata,
     )
+    from services.ktp_sequence_policy_service import sequence_policy_from_snapshot
     from services.quantity_projection_service import enrich_quantity_projections
     from services.semantic_options_service import (
         generate_semantic_operation_projections,
@@ -164,6 +168,13 @@ class PostImportCalculationPipeline:
         generate_semantic_operation_projections(variant, stages, evidence=evidence)
         enrich_quantity_projections(row_objects, variant=variant, stage_instances=stages)
 
+        active_stage_ids = {
+            str(projection.get("target_stage_instance_id") or "")
+            for row_obj in row_objects
+            for projection in (row_obj.raw_data.get("ktp_quantity_projections") or [])
+            if projection.get("target_stage_instance_id")
+        }
+
         groups = [SimpleNamespace(
             id=_id("ktp-group", batch_id, stage["stage_instance_id"]),
             stage_instance_id=stage["stage_instance_id"],
@@ -177,8 +188,18 @@ class PostImportCalculationPipeline:
             component_role=stage.get("component_role"),
             sort_order=stage.get("sort_order"),
             title=stage.get("title"),
+            items=(
+                [SimpleNamespace(review_status="accepted", gpr_included=True)]
+                if stage["stage_instance_id"] in active_stage_ids
+                else []
+            ),
         ) for stage in stages]
-        dependency_report = build_brick_house_floor_dependencies(groups)
+        sequence_policy = sequence_policy_from_snapshot(snapshot)
+        dependency_report = (
+            build_locked_sequence_dependencies(groups)
+            if sequence_policy.locked
+            else build_brick_house_floor_dependencies(groups)
+        )
         predecessors: dict[str, list[str]] = {}
         for group_id, depends_on in dependency_report.edges:
             predecessors.setdefault(group_id, []).append(depends_on)
@@ -227,7 +248,11 @@ class PostImportCalculationPipeline:
                          projection.get("applicability_hash"), projection.get("applicability_hash_version"),
                          projection.get("applicability_schema_version"), _json_dump(metadata)),
                     )
-                    group_id = _id("ktp-group", batch_id, str(projection.get("stage_instance_id")))
+                    group_id = _id(
+                        "ktp-group",
+                        batch_id,
+                        str(projection.get("target_stage_instance_id") or ""),
+                    )
                     lineage = projection_metadata(projection)
                     lineage["group_id"] = group_id
                     lineage["quantity"] = projection.get("quantity")

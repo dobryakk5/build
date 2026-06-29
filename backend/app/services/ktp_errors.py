@@ -29,6 +29,10 @@ class KtpConflictError(KtpDomainError):
     http_status = 409
 
 
+class SequenceLockedByTaxonomy(KtpConflictError):
+    code = "sequence_is_locked_by_taxonomy"
+
+
 class KtpValidationError(KtpDomainError):
     code = "ktp_validation_error"
     http_status = 422

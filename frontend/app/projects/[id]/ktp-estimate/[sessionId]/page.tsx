@@ -211,8 +211,15 @@ function compareStageGroups(a: KtpWbsGroup, b: KtpWbsGroup) {
   return a.sort_order - b.sort_order || a.title.localeCompare(b.title, "ru");
 }
 
-function floorSections(groups: KtpWbsGroup[]) {
-  const sorted = [...groups].sort(compareStageGroups);
+function floorSections(groups: KtpWbsGroup[], sequenceLocked = false) {
+  const sorted = [...groups].sort(
+    sequenceLocked
+      ? (a, b) => a.sort_order - b.sort_order || a.title.localeCompare(b.title, "ru")
+      : compareStageGroups,
+  );
+  if (sequenceLocked) {
+    return [{ key: "__locked__", title: "", showTitle: false as const, groups: sorted }];
+  }
   const hasFloors = sorted.some((group) => group.floor_number != null || group.floor_label);
   if (!hasFloors) {
     return [{ key: "__all__", title: "", showTitle: false, groups: sorted }];
@@ -1089,7 +1096,10 @@ function Stage1({
   );
   const unresolvedDisputes = pendingAi + pendingReview;
   const approveDisabled = busy || unresolvedDisputes > 0;
-  const stageFloorSections = useMemo(() => floorSections(wbs.groups), [wbs.groups]);
+  const stageFloorSections = useMemo(
+    () => floorSections(wbs.groups, wbs.sequence_locked),
+    [wbs.groups, wbs.sequence_locked],
+  );
   const orderedGroups = useMemo(
     () => stageFloorSections.flatMap((section) => section.groups),
     [stageFloorSections],
@@ -1143,6 +1153,11 @@ function Stage1({
           )
         }
       />
+      {wbs.sequence_locked && (
+        <div style={{ ...feedbackStyle, marginBottom: 14 }}>
+          Порядок задан справочником
+        </div>
+      )}
       {unresolvedDisputes > 0 && (
         <div style={{ ...feedbackStyle, marginBottom: 14 }}>
           До утверждения структуры закройте все спорные строки: {unresolvedDisputes}.
@@ -1178,12 +1193,13 @@ function Stage1({
               addItemOptimistic={addItemOptimistic}
               acceptRecommendedItemOptimistic={acceptRecommendedItemOptimistic}
               approveReviewItemOptimistic={approveReviewItemOptimistic}
+              sequenceLocked={wbs.sequence_locked}
             />
           ))}
         </div>
       ))}
 
-      <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+      {!wbs.sequence_locked && <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <input
           value={newGroup}
           onChange={(e) => setNewGroup(e.target.value)}
@@ -1203,7 +1219,7 @@ function Stage1({
         >
           + Группа
         </button>
-      </div>
+      </div>}
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
         <button
           type="button"
@@ -1228,6 +1244,7 @@ function Stage1Group({
   addItemOptimistic,
   acceptRecommendedItemOptimistic,
   approveReviewItemOptimistic,
+  sequenceLocked,
 }: {
   group: KtpWbsGroup;
   groupOptions: { id: string; title: string }[];
@@ -1237,6 +1254,7 @@ function Stage1Group({
   addItemOptimistic: (groupId: string, name: string) => Promise<void>;
   acceptRecommendedItemOptimistic: (itemId: string) => Promise<void>;
   approveReviewItemOptimistic: (itemId: string) => Promise<void>;
+  sequenceLocked: boolean;
 }) {
   const [title, setTitle] = useState(() => displayStageGroupTitle(group.title) || group.title);
   const [newItem, setNewItem] = useState("");
@@ -1281,12 +1299,14 @@ function Stage1Group({
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           onBlur={() => {
+            if (sequenceLocked) return;
             const cleanTitle = title.trim();
             const persistedTitle = displayStageGroupTitle(group.title) || group.title;
             if (cleanTitle && cleanTitle !== persistedTitle) {
               void run(() => ktpEstimate.updateGroup(projectId, group.id, { title: title.trim() }));
             }
           }}
+          disabled={sequenceLocked}
           style={{ ...inputStyle, fontWeight: 600, flex: 1 }}
         />
         {group.wt_code && (
@@ -1297,14 +1317,14 @@ function Stage1Group({
             WT {group.wt_code}
           </span>
         )}
-        <button
+        {!sequenceLocked && <button
           style={btn("danger")}
           disabled={busy}
           onClick={() => run(() => ktpEstimate.deleteGroup(projectId, group.id))}
           title={group.items.length ? "Сначала перенесите или удалите работы" : "Удалить группу"}
         >
           Удалить группу
-        </button>
+        </button>}
       </div>
 
       {group.items.map((it) => {
@@ -3439,7 +3459,16 @@ function Stage3({
         </div>
       )}
 
-      {wbs.groups.map((g) => (
+      {wbs.groups
+        .filter(
+          (g) =>
+            g.items.some((item) => item.review_status === "accepted")
+            && (
+              !wbs.sequence_locked
+              || !["Прочие позиции сметы", "Прочие работы сметы", "Нераспределённые работы"].includes(g.title.trim())
+            ),
+        )
+        .map((g) => (
         <div key={g.id} style={{ ...card, padding: 14, marginBottom: 10 }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 600 }}>
             <span>{g.title}</span>

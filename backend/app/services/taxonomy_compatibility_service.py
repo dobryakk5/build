@@ -16,6 +16,9 @@ BRICK_HOUSE_VARIANT_ID = "residential_construction_kirpichnye_doma"
 BRICK_HOUSE_VARIANT_NUMBER = "2.7"
 BRICK_HOUSE_VARIANT_SCHEMA_VERSION = "brick_house_2_7@2.0.0"
 SNAPSHOT_SCHEMA_VERSION = "taxonomy_snapshot@1.0.0"
+_SUPPORTED_V65_SNAPSHOT_RE = re.compile(
+    r"^construction_work_dictionary_v6_5_\d+@"
+)
 
 SNAPSHOT_KEYS = (
     "estimate_type_id",
@@ -233,7 +236,7 @@ def batch_uses_legacy_taxonomy(batch: Any, estimates: Iterable[Any]) -> bool:
         variant_id == BRICK_HOUSE_VARIANT_ID
         and taxonomy_mode == "persisted_snapshot"
         and snapshot_version
-        and "v6_5_0" in snapshot_version
+        and _SUPPORTED_V65_SNAPSHOT_RE.match(snapshot_version)
     ):
         return False
     if is_legacy_taxonomy_record(batch, current_version=current):

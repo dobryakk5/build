@@ -911,6 +911,7 @@ export interface KtpWbsGroup {
   template_stage_number?: string | null;
   stage_number?: string | null;
   floor_number?: number | null;
+  floor_kind?: string | null;
   floor_label?: string | null;
   floor_component?: string | null;
   component_role?: string | null;
@@ -1020,6 +1021,9 @@ export interface KtpWbs {
   groups: KtpWbsGroup[];
   group_dependencies: KtpWbsGroupDependency[];
   session_subtypes: KtpSessionSubtype[];
+  sequence_mode: "editable" | "locked";
+  sequence_locked: boolean;
+  sequence_source?: string | null;
 }
 
 export interface KtpEstimateCard {

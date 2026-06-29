@@ -122,7 +122,7 @@ def _preview_content_hash(session: EstimatePreviewSession, rows: Iterable[Estima
 
 def _dynamic_taxonomy_version() -> str:
     dictionary, _hash = load_target_dictionary()
-    return str(dictionary.get("dictionary_version") or "construction_work_dictionary_v6_5_0")
+    return str(dictionary.get("dictionary_version") or "construction_work_dictionary_v6_5_1")
 
 
 def _coerce_stage10_radio_options(

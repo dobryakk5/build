@@ -42,6 +42,10 @@ from app.services.gantt_calculations import (
     calculate_working_days,
 )
 from app.services.ktp_estimate_service import gpr_blocker
+from app.services.ktp_sequence_policy_service import (
+    SequencePolicy,
+    sequence_policy_from_batch,
+)
 from app.services.openrouter_embeddings import create_chat_completion, parse_json_object
 
 logger = logging.getLogger(__name__)
@@ -54,7 +58,11 @@ SEQUENCE_REVIEW_STATUS = "gpr_sequence_review"
 SEQUENCE_READY_STATUS = "gpr_ready"
 
 # Заголовки fallback-группы «прочих» работ (текущий + legacy).
-FALLBACK_GROUP_TITLES = {"Прочие позиции сметы", "Прочие работы сметы"}
+FALLBACK_GROUP_TITLES = {
+    "Прочие позиции сметы",
+    "Прочие работы сметы",
+    "Нераспределённые работы",
+}
 
 
 def _uuid() -> str:
@@ -138,7 +146,8 @@ async def _process_gpr(job_id: str) -> None:
         warnings: list[str] = []
         try:
             batch = await db.get(EstimateBatch, session.estimate_batch_id)
-            groups = list(
+            sequence_policy = sequence_policy_from_batch(batch)
+            all_groups = list(
                 await db.scalars(
                     select(KtpWbsGroup)
                     .where(KtpWbsGroup.session_id == session_id)
@@ -148,13 +157,45 @@ async def _process_gpr(job_id: str) -> None:
             )
             # только принятые работы — НЕ мутируем relationship (delete-orphan),
             # держим отдельный список на не-mapped атрибуте группы
-            for g in groups:
-                g.accepted_items = [
-                    it for it in g.items if it.review_status != "rejected"
-                ]
-            groups = [g for g in groups if g.accepted_items]
+            for g in all_groups:
+                if sequence_policy.locked:
+                    g.accepted_items = [
+                        it
+                        for it in g.items
+                        if it.review_status == "accepted"
+                        and getattr(it, "gpr_included", True) is not False
+                    ]
+                else:
+                    g.accepted_items = [
+                        it for it in g.items if it.review_status != "rejected"
+                    ]
+            groups = [
+                g
+                for g in all_groups
+                if g.accepted_items
+                and (not sequence_policy.locked or not _is_fallback_group(g.title))
+            ]
             if not groups:
-                raise ValueError("В КТП нет принятых работ для построения ГПР")
+                if not sequence_policy.locked:
+                    raise ValueError("В КТП нет принятых работ для построения ГПР")
+                all_group_ids = [group.id for group in all_groups]
+                if all_group_ids:
+                    await db.execute(
+                        delete(KtpWbsGroupDependency).where(
+                            KtpWbsGroupDependency.group_id.in_(all_group_ids)
+                        )
+                    )
+                await _clear_existing_gantt(db, session.project_id, batch.id)
+                session.status = "gpr_done"
+                session.error_message = None
+                job.status = "done"
+                job.result = {
+                    "session_id": session_id,
+                    "gantt_tasks_count": 0,
+                    "dependency_count": 0,
+                    "warnings": warnings,
+                }
+                return
 
             blocked = [
                 it for g in groups for it in g.accepted_items if gpr_blocker(it)
@@ -176,12 +217,16 @@ async def _process_gpr(job_id: str) -> None:
             await _progress("Расставляем зависимости между группами…")
 
             # Шаг 4 — зависимости между группами
-            dep_edges = await _resolve_group_dependencies(groups, warnings)
-            await db.execute(
-                delete(KtpWbsGroupDependency).where(
-                    KtpWbsGroupDependency.group_id.in_([g.id for g in groups])
-                )
+            dep_edges = await _resolve_group_dependencies(
+                groups, warnings, sequence_policy=sequence_policy
             )
+            all_group_ids = [group.id for group in all_groups]
+            if all_group_ids:
+                await db.execute(
+                    delete(KtpWbsGroupDependency).where(
+                        KtpWbsGroupDependency.group_id.in_(all_group_ids)
+                    )
+                )
             for gid, dep_gid in dep_edges:
                 db.add(
                     KtpWbsGroupDependency(group_id=gid, depends_on_group_id=dep_gid)
@@ -192,7 +237,14 @@ async def _process_gpr(job_id: str) -> None:
             _schedule_groups(groups, dep_edges, start_default)
 
             # Запись в gantt_tasks
-            counts = await _write_gantt(db, session, batch, groups, dep_edges)
+            counts = await _write_gantt(
+                db,
+                session,
+                batch,
+                groups,
+                dep_edges,
+                sequence_policy=sequence_policy,
+            )
 
             session.status = "gpr_done"
             session.error_message = None
@@ -637,7 +689,10 @@ async def _ai_order_groups(groups: list[KtpWbsGroup]) -> list[str]:
 
 
 async def _resolve_group_dependencies(
-    groups: list[KtpWbsGroup], warnings: list[str]
+    groups: list[KtpWbsGroup],
+    warnings: list[str],
+    *,
+    sequence_policy: SequencePolicy | None = None,
 ) -> list[tuple[str, str]]:
     """Возвращает рёбра (group_id, depends_on_group_id) без циклов.
 
@@ -647,6 +702,13 @@ async def _resolve_group_dependencies(
     """
     if len(groups) < 2:
         return []
+
+    if sequence_policy is not None and sequence_policy.locked:
+        from app.services.ktp_floor_sequence_service import (
+            build_locked_sequence_dependencies,
+        )
+
+        return list(build_locked_sequence_dependencies(groups).edges)
 
     # Variant 2.7 uses deterministic stage-instance dependencies.  AI remains
     # the fallback for all other project variants and legacy sessions.
@@ -799,19 +861,11 @@ def _schedule_groups(
 # ЗАПИСЬ В GANTT
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _write_gantt(
+async def _clear_existing_gantt(
     db: AsyncSession,
-    session: KtpEstimateSession,
-    batch: EstimateBatch,
-    groups: list[KtpWbsGroup],
-    dep_edges: list[tuple[str, str]],
-) -> dict[str, int]:
-    from app.services.upload_service import _get_row_order_offset
-
-    project_id = session.project_id
-    batch_id = batch.id
-
-    # soft-delete существующих задач батча + их зависимостей
+    project_id: str,
+    batch_id: str,
+) -> None:
     existing_ids = list(
         await db.scalars(
             select(GanttTask.id)
@@ -820,21 +874,39 @@ async def _write_gantt(
             .where(GanttTask.deleted_at.is_(None))
         )
     )
-    if existing_ids:
-        await db.execute(
-            delete(TaskDependency).where(
-                or_(
-                    TaskDependency.task_id.in_(existing_ids),
-                    TaskDependency.depends_on.in_(existing_ids),
-                )
+    if not existing_ids:
+        return
+    await db.execute(
+        delete(TaskDependency).where(
+            or_(
+                TaskDependency.task_id.in_(existing_ids),
+                TaskDependency.depends_on.in_(existing_ids),
             )
         )
-        await db.execute(
-            GanttTask.__table__.update()
-            .where(GanttTask.id.in_(existing_ids))
-            .values(deleted_at=datetime.now(timezone.utc))
-        )
-        await db.flush()
+    )
+    await db.execute(
+        GanttTask.__table__.update()
+        .where(GanttTask.id.in_(existing_ids))
+        .values(deleted_at=datetime.now(timezone.utc))
+    )
+    await db.flush()
+
+async def _write_gantt(
+    db: AsyncSession,
+    session: KtpEstimateSession,
+    batch: EstimateBatch,
+    groups: list[KtpWbsGroup],
+    dep_edges: list[tuple[str, str]],
+    *,
+    sequence_policy: SequencePolicy | None = None,
+) -> dict[str, int]:
+    from app.services.upload_service import _get_row_order_offset
+
+    project_id = session.project_id
+    batch_id = batch.id
+
+    # soft-delete существующих задач батча + их зависимостей
+    await _clear_existing_gantt(db, project_id, batch_id)
 
     hours_per_day = float(batch.hours_per_day or DEFAULT_HOURS_PER_DAY)
     row_order = await _get_row_order_offset(project_id, db)
@@ -950,8 +1022,12 @@ async def _write_gantt(
         build_brick_house_floor_dependencies,
     )
 
-    floor_report = build_brick_house_floor_dependencies(groups)
-    milestone = floor_report.milestone
+    floor_report = (
+        build_brick_house_floor_dependencies(groups)
+        if sequence_policy is None or not sequence_policy.locked
+        else None
+    )
+    milestone = floor_report.milestone if floor_report is not None else None
     if milestone is not None:
         wait_leaf_ids: list[str] = []
         for group_id in milestone.wait_group_ids:
