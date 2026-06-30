@@ -68,6 +68,10 @@ from app.services.taxonomy_snapshot_service import (
     resolve_config_path,
 )
 from app.services.floor_structure_service import build_stage_instances, validate_building_params
+from app.services.semantic_options_service import (
+    STRICT_STAGE_OPTION_CONTRACT_VERSION,
+    resolve_semantic_options,
+)
 from app.services.ktp_errors import (
     InvalidStageAwareRowReference,
     KtpNotFoundError,
@@ -1929,6 +1933,13 @@ def _append_catalog_recommendations(
         )
         if target_group is None:
             continue
+        selected_group_option = str(target_group.get("semantic_stage_option_id") or "").strip() or None
+        if target_group.get("execution_applicability") == "not_applicable":
+            skipped.append({"name": item.name, "reason": "stage_not_applicable"})
+            continue
+        if stage_option_id and selected_group_option and stage_option_id != selected_group_option:
+            skipped.append({"name": item.name, "reason": "stage_option_not_selected"})
+            continue
         raw_item = {
             "name": item.name,
             "origin": "ai_added",
@@ -1996,6 +2007,17 @@ def _stage_instances_from_batch_snapshot(
         )
     params = validate_building_params(batch.building_params, variant)
     stages = build_stage_instances(variant, params)
+    if str(variant.get("stage_option_selection_contract_version") or "") == STRICT_STAGE_OPTION_CONTRACT_VERSION:
+        report = resolve_semantic_options(
+            variant,
+            stages,
+            project_structure_options=batch.project_structure_options or {},
+        )
+        if not report.valid:
+            raise TaxonomySnapshotIntegrity(
+                "Не удалось разрешить обязательные semantic options из batch.",
+                details={"issues": [issue.as_dict() for issue in report.issues]},
+            )
     source = "batch_snapshot_dynamic" if params is not None else "batch_snapshot_static"
     return stages, source, snapshot
 
@@ -2100,6 +2122,14 @@ def _build_stage_aware_groups(
         stage_number = str(stage.get("number") or "").strip()
         if not stage_number:
             continue
+        selected_option_id = str(stage.get("semantic_stage_option_id") or "").strip()
+        selected_option = next(
+            (
+                option for option in stage.get("stage_options") or []
+                if isinstance(option, dict) and str(option.get("id") or "") == selected_option_id
+            ),
+            {},
+        )
         section_key = _stage_section_key(stage_number)
         groups[section_key] = {
             "title": (
@@ -2126,6 +2156,12 @@ def _build_stage_aware_groups(
             "sequence_mode": stage.get("sequence_mode"),
             "sequence_source": stage.get("sequence_source"),
             "stage_options_mode": stage.get("stage_options_mode") or "none",
+            "semantic_stage_option_id": stage.get("semantic_stage_option_id"),
+            "semantic_stage_option_title": stage.get("semantic_stage_option_title"),
+            "stage_option_source": stage.get("stage_option_source"),
+            "execution_applicability": stage.get("execution_applicability", "applicable"),
+            "selected_option_operation_codes": list(selected_option.get("operation_codes") or []),
+            "selected_option_package_codes": list(selected_option.get("package_codes") or []),
             "items": [],
         }
 
@@ -3415,6 +3451,10 @@ def _materialize_wbs(
                         "floor_label": descriptor.floor_label,
                         "floor_component": descriptor.floor_component,
                         "component_role": descriptor.component_role,
+                        "semantic_stage_option_id": (projection or {}).get("semantic_stage_option_id") or raw_group.get("semantic_stage_option_id"),
+                        "semantic_stage_option_title": (projection or {}).get("semantic_stage_option_title") or raw_group.get("semantic_stage_option_title"),
+                        "stage_option_source": (projection or {}).get("stage_option_source") or raw_group.get("stage_option_source"),
+                        "execution_applicability": (projection or {}).get("execution_applicability") or raw_group.get("execution_applicability") or "applicable",
                     },
                 )
             return existing
@@ -3446,7 +3486,11 @@ def _materialize_wbs(
             wt_code=wt_code,
             work_section_code=work_section_code,
             work_section_name=work_section_name,
-            status="draft",
+            status=(
+                "not_applicable"
+                if (projection or {}).get("execution_applicability", raw_group.get("execution_applicability")) == "not_applicable"
+                else "draft"
+            ),
         )
         _set_metadata(
             group,
@@ -3460,6 +3504,10 @@ def _materialize_wbs(
                 "floor_label": descriptor.floor_label,
                 "floor_component": descriptor.floor_component,
                 "component_role": descriptor.component_role,
+                "semantic_stage_option_id": (projection or {}).get("semantic_stage_option_id") or raw_group.get("semantic_stage_option_id"),
+                "semantic_stage_option_title": (projection or {}).get("semantic_stage_option_title") or raw_group.get("semantic_stage_option_title"),
+                "stage_option_source": (projection or {}).get("stage_option_source") or raw_group.get("stage_option_source"),
+                "execution_applicability": (projection or {}).get("execution_applicability") or raw_group.get("execution_applicability") or "applicable",
             },
         )
         groups_by_key[descriptor.key] = group
@@ -3539,6 +3587,21 @@ def _materialize_wbs(
         fallback_name: str,
     ) -> None:
         group = _ensure_group(raw_group, group_index, projection)
+        if getattr(group, "execution_applicability", "applicable") == "not_applicable":
+            return
+        group_option = str(getattr(group, "semantic_stage_option_id", None) or "").strip()
+        projection_option = str(projection.get("semantic_stage_option_id") or "").strip()
+        if group_option and projection_option and group_option != projection_option:
+            return
+        if origin == "ai_added" and group_option:
+            allowed_operations = set(map(str, raw_group.get("selected_option_operation_codes") or []))
+            allowed_packages = set(map(str, raw_group.get("selected_option_package_codes") or []))
+            operation_code = str(projection.get("operation_code") or "").strip()
+            package_code = str(projection.get("operation_package_code") or "").strip()
+            if (operation_code and operation_code not in allowed_operations) or (
+                package_code and package_code not in allowed_packages
+            ):
+                return
         projected_name = str(projection.get("name") or fallback_name).strip() or fallback_name
         work_type_fields = _work_type_fields(projected_name, estimate)
         if origin == "ai_added" and raw_item.get("recommendation_source") == CATALOG_RECOMMENDATION_SOURCE:

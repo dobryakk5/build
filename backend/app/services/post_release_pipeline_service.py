@@ -89,7 +89,11 @@ class PostImportCalculationPipeline:
         )
         stages = build_stage_instances(variant, params)
         options = _json_load(batch["project_structure_options"], {})
-        resolve_semantic_options(variant, stages, project_structure_options=options)
+        resolution = resolve_semantic_options(
+            variant, stages, project_structure_options=options
+        )
+        if not resolution.valid:
+            raise ValueError("semantic_stage_option_resolution_failed")
 
         estimates = self.store.connection.execute(
             "SELECT * FROM estimates WHERE estimate_batch_id=? ORDER BY source_row_index, source_row_key",
@@ -110,8 +114,13 @@ class PostImportCalculationPipeline:
             stage = stage_lookup.get((template, floor_number)) or stage_lookup.get((template, None))
             if stage is None:
                 continue
-            option_ids = list(stage.get("semantic_stage_option_ids") or [])
-            option_id = classified.get("semantic_stage_option_id") or (option_ids[0] if option_ids else None)
+            option_id = stage.get("semantic_stage_option_id")
+            detected_option_id = classified.get("semantic_stage_option_id")
+            option_conflict = bool(
+                detected_option_id and option_id and detected_option_id != option_id
+            )
+            if option_id == "no_finish" and stage.get("canonical_stage_id") == "residential_construction.naruzhnaya_fasadnaya_otdelka":
+                option_conflict = True
             operation_code = (
                 classified.get("operation_code")
                 or classified.get("selected_operation_code")
@@ -125,6 +134,9 @@ class PostImportCalculationPipeline:
             evidence.append({
                 "stage_instance_id": stage["stage_instance_id"],
                 "semantic_stage_option_id": option_id,
+                "semantic_stage_option_ids": [option_id] if option_id else [],
+                "detected_semantic_stage_option_id": detected_option_id,
+                "stage_option_conflict": option_conflict,
                 "operation_code": operation_code,
                 "source_row_key": source_key,
                 "work_scope_key": row["work_scope_key"],
@@ -157,8 +169,9 @@ class PostImportCalculationPipeline:
                 "applicability_hash": row["applicability_hash"],
                 "applicability_hash_version": row["applicability_hash_version"],
                 "applicability_schema_version": row["applicability_schema_version"],
-                "resolution_status": "resolved",
-                "calculation_blocked": False,
+                "resolution_status": "needs_review" if option_conflict else "resolved",
+                "calculation_blocked": option_conflict,
+                "reason_code": "stage_option_conflicts_with_project_selection" if option_conflict else None,
             }
             row_objects.append(SimpleNamespace(
                 id=row["id"], quantity=parsed.get("quantity"), unit=parsed.get("unit") or parsed.get("unit_code"),

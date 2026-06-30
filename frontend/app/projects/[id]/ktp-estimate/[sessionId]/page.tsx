@@ -1726,6 +1726,7 @@ function Stage2Group({
 
   const statusLabel: Record<KtpWbsGroup["status"], string> = {
     draft: "Не создана",
+    not_applicable: "Не выполняется",
     card_questions: "Нужны данные",
     card_generated: "Готова",
     card_failed: "Ошибка",

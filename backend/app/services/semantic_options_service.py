@@ -27,10 +27,13 @@ PROJECTION_GENERATION_STATUS_VALUES = frozenset(
         "generated",
         "skipped_no_selected_options",
         "skipped_recommendations_not_confirmed",
+        "skipped_not_applicable",
         "blocked",
         "failed",
     }
 )
+
+STRICT_STAGE_OPTION_CONTRACT_VERSION = "1.1"
 
 MATERIALIZATION_SOURCES = frozenset(
     {
@@ -59,6 +62,247 @@ class SemanticOptionIssue:
         if self.details is not None:
             payload["details"] = deepcopy(dict(self.details))
         return payload
+
+
+class StageOptionValidationError(ValueError):
+    """Structured validation failure shared by preview and import."""
+
+    def __init__(self, issues: Sequence[SemanticOptionIssue]):
+        ordered = tuple(issues)
+        self.issues = ordered
+        self.code = ordered[0].code if ordered else "invalid_stage_option"
+        super().__init__(self.code)
+
+    def as_details(self) -> dict[str, Any]:
+        details: dict[str, Any] = {"issues": [issue.as_dict() for issue in self.issues]}
+        if len(self.issues) == 1:
+            issue = self.issues[0]
+            details["canonical_stage_id"] = issue.canonical_stage_id
+            details.update(dict(issue.details or {}))
+        missing = [
+            {
+                "canonical_stage_id": issue.canonical_stage_id,
+                **dict(issue.details or {}),
+            }
+            for issue in self.issues
+            if issue.code == "stage_option_required"
+        ]
+        if missing:
+            details["missing"] = missing
+        return details
+
+
+@dataclass(frozen=True)
+class StageOptionValidationResult:
+    normalized_options: dict[str, str]
+    dropped_stage_options: tuple[dict[str, Any], ...]
+    auto_selected_options: tuple[dict[str, Any], ...]
+
+
+def _condition_matches(condition: Any, building_params: Mapping[str, Any]) -> bool:
+    if not isinstance(condition, Mapping):
+        return True
+    parameter = str(condition.get("parameter") or "").strip()
+    if not parameter:
+        return True
+    actual = building_params.get(parameter)
+    if "equals" in condition:
+        return actual == condition.get("equals")
+    if "in" in condition and isinstance(condition.get("in"), Sequence):
+        return actual in condition.get("in")
+    return True
+
+
+def _stage_is_applicable(
+    stage: Mapping[str, Any],
+    *,
+    stage_instances: Sequence[Mapping[str, Any]],
+    building_params: Mapping[str, Any],
+) -> bool:
+    stage_id = str(stage.get("canonical_stage_id") or "")
+    template_number = str(stage.get("number") or stage.get("template_stage_number") or "")
+    has_instance = any(
+        str(instance.get("canonical_stage_id") or "") == stage_id
+        and (
+            not template_number
+            or str(instance.get("template_stage_number") or instance.get("number") or "") == template_number
+        )
+        for instance in stage_instances
+    )
+    condition = stage.get("applicable_when")
+    if condition is None and isinstance(stage.get("stage_options_policy"), Mapping):
+        condition = stage["stage_options_policy"].get("applicable_when")
+    return has_instance and _condition_matches(condition, building_params)
+
+
+def _applicable_option_ids(
+    stage: Mapping[str, Any], building_params: Mapping[str, Any]
+) -> list[str]:
+    result: list[str] = []
+    for option in stage.get("stage_options") or []:
+        if not isinstance(option, Mapping):
+            continue
+        option_id = str(option.get("id") or "").strip()
+        if option_id and _condition_matches(option.get("applicable_when"), building_params):
+            result.append(option_id)
+    return result
+
+
+def validate_required_stage_options(
+    *,
+    variant: Mapping[str, Any],
+    stage_instances: Sequence[Mapping[str, Any]],
+    building_params: Mapping[str, Any],
+    submitted_project_structure_options: Mapping[str, Any],
+    inherited_draft_options: Mapping[str, Any] | None = None,
+) -> StageOptionValidationResult:
+    """Validate and normalize the strict building-level selectable-one contract."""
+    if not isinstance(submitted_project_structure_options, Mapping):
+        raise StageOptionValidationError((SemanticOptionIssue(
+            "invalid_stage_option", "", details={"expected_type": "object"}
+        ),))
+    inherited = inherited_draft_options or {}
+    if not isinstance(inherited, Mapping):
+        inherited = {}
+
+    selectable = [
+        stage for stage in (variant.get("stages") or [])
+        if isinstance(stage, Mapping)
+        and str(_selection_policy(stage).get("mode") or stage.get("stage_options_mode") or "none") == "selectable_one"
+    ]
+    selectable.sort(key=lambda stage: str(stage.get("number") or ""))
+    known_stage_ids = {str(stage.get("canonical_stage_id") or "") for stage in selectable}
+    merged: dict[str, Any] = {str(key): value for key, value in inherited.items()}
+    merged.update({str(key): value for key, value in submitted_project_structure_options.items()})
+
+    issues: list[SemanticOptionIssue] = []
+    normalized: dict[str, str] = {}
+    dropped: list[dict[str, Any]] = []
+    auto_selected: list[dict[str, Any]] = []
+
+    for stage_id in sorted(set(merged) - known_stage_ids):
+        issues.append(SemanticOptionIssue(
+            "invalid_stage_option", stage_id, details={"reason": "stage_has_no_selectable_options"}
+        ))
+
+    for stage in selectable:
+        stage_id = str(stage.get("canonical_stage_id") or "")
+        policy = _selection_policy(stage)
+        applicable = _stage_is_applicable(
+            stage, stage_instances=stage_instances, building_params=building_params
+        )
+        explicitly_submitted = stage_id in submitted_project_structure_options
+        inherited_value_present = stage_id in inherited
+        value_present = stage_id in merged
+        raw_value = merged.get(stage_id)
+
+        if not applicable:
+            if explicitly_submitted:
+                issues.append(SemanticOptionIssue(
+                    "stage_option_not_applicable",
+                    stage_id,
+                    details={
+                        "option_id": raw_value,
+                        "reason": "basement_disabled" if not building_params.get("has_basement") else "stage_not_applicable",
+                    },
+                ))
+            elif inherited_value_present:
+                dropped.append({
+                    "canonical_stage_id": stage_id,
+                    "option_id": inherited.get(stage_id),
+                    "reason": "stage_not_applicable",
+                })
+            continue
+
+        allowed = _applicable_option_ids(stage, building_params)
+        if value_present:
+            if isinstance(raw_value, (list, tuple)):
+                issues.append(SemanticOptionIssue(
+                    "too_many_stage_options_selected",
+                    stage_id,
+                    details={"selected_count": len(raw_value), "max_selected": 1},
+                ))
+                continue
+            option_id = _trim_option(raw_value)
+            if option_id is None or option_id not in allowed:
+                issues.append(SemanticOptionIssue(
+                    "invalid_stage_option",
+                    stage_id,
+                    details={"option_id": raw_value, "allowed_option_ids": allowed},
+                ))
+                continue
+            normalized[stage_id] = option_id
+            continue
+
+        required = bool(policy.get("selection_required", False)) or int(policy.get("min_selected", 0)) > 0
+        if len(allowed) == 1:
+            normalized[stage_id] = allowed[0]
+            auto_selected.append({
+                "canonical_stage_id": stage_id,
+                "option_id": allowed[0],
+                "source": "auto_single_allowed_option",
+            })
+        elif required:
+            issues.append(SemanticOptionIssue(
+                "stage_option_required",
+                stage_id,
+                details={
+                    "template_stage_number": str(stage.get("number") or ""),
+                    "allowed_option_ids": allowed,
+                },
+            ))
+
+    if issues:
+        priority = {
+            "too_many_stage_options_selected": 0,
+            "invalid_stage_option": 1,
+            "stage_option_not_applicable": 2,
+            "stage_option_required": 3,
+        }
+        issues.sort(key=lambda issue: (priority.get(issue.code, 9), issue.canonical_stage_id))
+        raise StageOptionValidationError(tuple(issues))
+    return StageOptionValidationResult(normalized, tuple(dropped), tuple(auto_selected))
+
+
+def build_stage_option_requirements(
+    *,
+    variant: Mapping[str, Any],
+    stage_instances: Sequence[Mapping[str, Any]],
+    building_params: Mapping[str, Any],
+    normalized_options: Mapping[str, str],
+    auto_selected_stage_ids: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    auto_ids = set(auto_selected_stage_ids)
+    result: list[dict[str, Any]] = []
+    for stage in variant.get("stages") or []:
+        if not isinstance(stage, Mapping):
+            continue
+        policy = _selection_policy(stage)
+        if str(policy.get("mode") or stage.get("stage_options_mode") or "none") != "selectable_one":
+            continue
+        if not _stage_is_applicable(stage, stage_instances=stage_instances, building_params=building_params):
+            continue
+        stage_id = str(stage.get("canonical_stage_id") or "")
+        selected = normalized_options.get(stage_id)
+        options = [
+            {"id": str(option.get("id")), "title": str(option.get("title") or option.get("id"))}
+            for option in stage.get("stage_options") or []
+            if isinstance(option, Mapping)
+            and str(option.get("id") or "") in _applicable_option_ids(stage, building_params)
+        ]
+        result.append({
+            "canonical_stage_id": stage_id,
+            "template_stage_number": str(stage.get("number") or ""),
+            "title": str(stage.get("title") or ""),
+            "selection_mode": "one_of",
+            "required": bool(policy.get("selection_required", False)) or int(policy.get("min_selected", 0)) > 0,
+            "selected_option_id": selected,
+            "selection_source": (
+                "auto_single_allowed_option" if stage_id in auto_ids else "project_structure_options"
+            ) if selected else None,
+            "options": options,
+        })
+    return result
 
 
 @dataclass(frozen=True)
@@ -356,6 +600,7 @@ def resolve_semantic_options(
     stage_by_id = _stage_index(variant)
     resolved_count = 0
     review_count = 0
+    strict_contract = str(variant.get("stage_option_selection_contract_version") or "") == STRICT_STAGE_OPTION_CONTRACT_VERSION
 
     for instance in stage_instances:
         canonical_stage_id = str(instance.get("canonical_stage_id") or "")
@@ -369,7 +614,9 @@ def resolve_semantic_options(
             continue
 
         instance["semantic_stage_option_ids"] = []
-        instance.pop("semantic_stage_option_id", None)
+        instance["semantic_stage_option_id"] = None
+        instance["semantic_stage_option_title"] = None
+        instance["execution_applicability"] = "applicable"
         instance["stage_option_source"] = None
         instance["stage_option_auto_selected"] = False
         instance["classification_status"] = "resolved"
@@ -387,11 +634,16 @@ def resolve_semantic_options(
         source_found = False
         raw_value: Any = None
 
-        for source_name, source in (
-            ("manual_override", manual_overrides),
-            ("project_structure_options", normalized_project),
-            ("classified_from_row", classified_options),
-        ):
+        sources = (
+            (("project_structure_options", normalized_project),)
+            if strict_contract
+            else (
+                ("manual_override", manual_overrides),
+                ("project_structure_options", normalized_project),
+                ("classified_from_row", classified_options),
+            )
+        )
+        for source_name, source in sources:
             found, candidate = _lookup_source_value(
                 source,
                 stage_instance_id=stage_instance_id,
@@ -430,7 +682,7 @@ def resolve_semantic_options(
                 instance["projection_generation_reason_code"] = project_issue.code
                 review_count += 1
                 continue
-            allowed = list(_stage_option_index(stage))
+            allowed = _applicable_option_ids(stage, {})
             if len(allowed) == 1:
                 selected = [allowed[0]]
                 selected_source = "auto_single_allowed_option"
@@ -464,6 +716,13 @@ def resolve_semantic_options(
                 selected_source = None
 
         instance["semantic_stage_option_ids"] = list(selected)
+        instance["semantic_stage_option_id"] = selected[0] if len(selected) == 1 else None
+        if len(selected) == 1:
+            option = _stage_option_index(stage).get(selected[0]) or {}
+            instance["semantic_stage_option_title"] = option.get("title")
+            instance["execution_applicability"] = str(
+                option.get("execution_applicability") or "applicable"
+            )
         if selected_source:
             if selected_source not in STAGE_OPTION_SOURCE_VALUES:
                 raise ValueError(f"Unsupported stage_option_source: {selected_source}")
@@ -472,6 +731,9 @@ def resolve_semantic_options(
         instance["classification_status"] = "resolved"
         instance["reason_code"] = None
         instance["operation_resolution_status"] = "resolved"
+        if instance["execution_applicability"] == "not_applicable":
+            instance["projection_generation_status"] = "skipped_not_applicable"
+            instance["resolved_operation_codes"] = []
         resolved_count += 1
 
         if selected_source == "project_structure_options" and str(policy.get("selection_scope") or "building") == "building":
@@ -684,6 +946,13 @@ def generate_semantic_operation_projections(
         instance["recommended_operation_candidates"] = candidates
         selected = list(instance.get("semantic_stage_option_ids") or [])
 
+        if instance.get("execution_applicability") == "not_applicable":
+            instance["projection_generation_status"] = "skipped_not_applicable"
+            instance["recommendation_only"] = False
+            instance["resolved_operation_codes"] = []
+            instance["recommended_operation_candidates"] = []
+            continue
+
         if instance.get("classification_status") == "needs_review" or instance.get("reason_code"):
             reason = str(instance.get("reason_code") or "stage_option_required")
             instance["projection_generation_status"] = "blocked"
@@ -757,6 +1026,11 @@ def validate_projection_generation_state(stage_instance: Mapping[str, Any]) -> t
             errors.append("failed_projection_generation_reason_forbidden")
         if not failure:
             errors.append("failed_projection_generation_failure_code_required")
+    elif status == "skipped_not_applicable":
+        if reason is not None or failure is not None or details is not None:
+            errors.append("not_applicable_projection_generation_error_fields_forbidden")
+        if stage_instance.get("operation_projections"):
+            errors.append("not_applicable_projection_generation_operations_forbidden")
     elif reason is not None or failure is not None or details is not None:
         errors.append("projection_generation_auxiliary_fields_forbidden")
     return tuple(errors)

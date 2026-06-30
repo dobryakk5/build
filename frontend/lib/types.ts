@@ -189,6 +189,20 @@ export interface PreviewResult {
   project_id?: string | null;
   project_variant_id?: string | null;
   preview_content_hash?: string | null;
+  building_params?: Record<string, unknown> | null;
+  project_structure_options?: Record<string, string> | null;
+  stage_option_requirements?: Array<{
+    canonical_stage_id: string;
+    template_stage_number: string;
+    title: string;
+    selection_mode: "one_of";
+    required: boolean;
+    selected_option_id: string | null;
+    selection_source: string | null;
+    options: Array<{ id: string; title: string }>;
+  }>;
+  dropped_stage_options?: Array<Record<string, unknown>>;
+  auto_selected_stage_options?: Array<Record<string, unknown>>;
   filename: string;
   parser_profile: string;
   detected_format?: string | null;
@@ -915,7 +929,11 @@ export interface KtpWbsGroup {
   floor_label?: string | null;
   floor_component?: string | null;
   component_role?: string | null;
-  status: "draft" | "card_questions" | "card_generated" | "card_failed";
+  semantic_stage_option_id?: string | null;
+  semantic_stage_option_title?: string | null;
+  stage_option_source?: string | null;
+  execution_applicability: "applicable" | "not_applicable";
+  status: "draft" | "not_applicable" | "card_questions" | "card_generated" | "card_failed";
   start_date?: string | null;
   duration_days?: number | null;
   items: KtpWbsItem[];

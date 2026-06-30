@@ -243,6 +243,7 @@ export default function UploadPage() {
     has_mansard: false,
   });
   const [stage10SelectedOptions, setStage10SelectedOptions] = useState<Record<string, string>>({});
+  const [stage10OptionsSaving, setStage10OptionsSaving] = useState(false);
 
   const { job, loading: polling } = useJobPoller(jobId);
   const status = job?.status;
@@ -288,15 +289,41 @@ export default function UploadPage() {
   const stage10RadioGroups = useMemo(() => {
     if (!isDynamicFloorVariant || !selectedProjectVariant?.stages?.length) return [];
 
+    if (preview?.preview_backend === "db_stage10" && preview.stage_option_requirements?.length) {
+      return preview.stage_option_requirements.map((requirement) => ({
+        id: requirement.canonical_stage_id,
+        number: requirement.template_stage_number,
+        title: requirement.title,
+        canonical_stage_id: requirement.canonical_stage_id,
+        stage_options_mode: "selectable_one",
+        stage_options: requirement.options,
+      } as WorkStage));
+    }
+
     return selectedProjectVariant.stages.filter((stage): stage is WorkStage => {
       const stageId = String(stage.canonical_stage_id || "").trim();
       const mode = stage.stage_options_mode;
       if (!stageId || !["selectable_one", "selectable_many"].includes(mode)) return false;
       if (!stage.stage_options?.some((option) => String(option.id || "").trim())) return false;
       if (!stage10BuildingParams.has_basement && BASEMENT_BRANCH_STAGE_IDS.has(stageId)) return false;
+      if (stage.number === "2.7.10" && stage10BuildingParams.floors_count === 1 && stage10BuildingParams.has_mansard) return false;
       return true;
     });
-  }, [isDynamicFloorVariant, selectedProjectVariant, stage10BuildingParams.has_basement]);
+  }, [isDynamicFloorVariant, preview, selectedProjectVariant, stage10BuildingParams]);
+  useEffect(() => {
+    if (preview?.preview_backend !== "db_stage10") return;
+    const normalized = Object.fromEntries(
+      Object.entries(preview.project_structure_options || {}).filter(([, value]) => typeof value === "string"),
+    ) as Record<string, string>;
+    setStage10SelectedOptions(normalized);
+    if (preview.building_params) {
+      setStage10BuildingParams((current) => ({
+        floors_count: Number(preview.building_params?.floors_count || current.floors_count),
+        has_basement: Boolean(preview.building_params?.has_basement),
+        has_mansard: Boolean(preview.building_params?.has_mansard),
+      }));
+    }
+  }, [preview]);
   const answeredCount = Object.values(clarificationAnswers).filter((answers) => answers.length > 0).length;
   const questionsCount = activeClarification?.sections.reduce((sum, section) => sum + section.questions.length, 0) ?? 0;
   const allClarificationsAnswered = questionsCount > 0 && answeredCount === questionsCount;
@@ -885,7 +912,39 @@ export default function UploadPage() {
     setMappingPayload(null);
   }
 
-  function selectStage10Option(stageId: string, optionId: string) {
+  async function selectStage10Option(stageId: string, optionId: string) {
+    if (preview?.preview_backend === "db_stage10" && preview.preview_content_hash) {
+      const previous = stage10SelectedOptions[stageId];
+      setStage10SelectedOptions((current) => ({ ...current, [stageId]: optionId }));
+      setStage10OptionsSaving(true);
+      try {
+        const updated = await estimates.updateDbStage10Preview(
+          preview.preview_id,
+          preview.preview_content_hash,
+          preview.filename,
+          preview.parser_profile || "auto",
+          undefined,
+          { [stageId]: optionId },
+        );
+        setPreview(updated);
+        setStage10SelectedOptions(
+          Object.fromEntries(
+            Object.entries(updated.project_structure_options || {}).filter(([, value]) => typeof value === "string"),
+          ) as Record<string, string>,
+        );
+      } catch (error: any) {
+        setStage10SelectedOptions((current) => {
+          const next = { ...current };
+          if (previous) next[stageId] = previous;
+          else delete next[stageId];
+          return next;
+        });
+        alert(error?.message || "Не удалось сохранить вариант технологии");
+      } finally {
+        setStage10OptionsSaving(false);
+      }
+      return;
+    }
     if (previewIdFromQuery) {
       restoredPreviewRef.current = previewIdFromQuery;
     }
@@ -1291,7 +1350,8 @@ export default function UploadPage() {
                                   type="radio"
                                   name={`stage10-option-${stageId}`}
                                   checked={checked}
-                                  onChange={() => selectStage10Option(stageId, optionId)}
+                                  disabled={stage10OptionsSaving || confirming}
+                                  onChange={() => void selectStage10Option(stageId, optionId)}
                                 />
                                 <span>{option.title}</span>
                               </label>

@@ -35,6 +35,12 @@ class ConfirmEstimatePreviewRequest(BaseModel):
     row_decisions: list[ConfirmRowDecision] = Field(default_factory=list)
 
 
+class UpdateEstimatePreviewRequest(BaseModel):
+    expected_preview_content_hash: str = Field(min_length=64, max_length=64)
+    building_params: dict[str, Any] | None = None
+    project_structure_options: dict[str, Any] | None = None
+
+
 def _raise(exc: Exception) -> None:
     if isinstance(exc, (PreviewDomainError, FeatureFlagError)):
         detail: dict[str, Any] = {"code": exc.code}
@@ -111,6 +117,25 @@ async def get_preview(
         return await EstimatePreviewService(db=db).get_preview(
             owner_user_id=current_user.id,
             preview_session_id=preview_session_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise(exc)
+
+
+@router.patch("/{preview_session_id}")
+async def update_preview(
+    preview_session_id: str,
+    body: UpdateEstimatePreviewRequest,
+    current_user: Any = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        return await EstimatePreviewService(db=db).update_preview(
+            owner_user_id=current_user.id,
+            preview_session_id=preview_session_id,
+            expected_preview_content_hash=body.expected_preview_content_hash,
+            building_params=body.building_params,
+            submitted_project_structure_options=body.project_structure_options,
         )
     except Exception as exc:  # noqa: BLE001
         _raise(exc)

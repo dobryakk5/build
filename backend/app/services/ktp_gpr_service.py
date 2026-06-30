@@ -158,6 +158,12 @@ async def _process_gpr(job_id: str) -> None:
             # только принятые работы — НЕ мутируем relationship (delete-orphan),
             # держим отдельный список на не-mapped атрибуте группы
             for g in all_groups:
+                if getattr(g, "execution_applicability", "applicable") == "not_applicable":
+                    g.accepted_items = []
+                    g.start_date = None
+                    g.duration_days = None
+                    g.gantt_task_id = None
+                    continue
                 if sequence_policy.locked:
                     g.accepted_items = [
                         it
@@ -173,6 +179,7 @@ async def _process_gpr(job_id: str) -> None:
                 g
                 for g in all_groups
                 if g.accepted_items
+                and getattr(g, "execution_applicability", "applicable") == "applicable"
                 and (not sequence_policy.locked or not _is_fallback_group(g.title))
             ]
             if not groups:

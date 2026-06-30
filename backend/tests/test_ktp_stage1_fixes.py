@@ -62,6 +62,15 @@ def make_batch(*, with_snapshot: bool = True) -> EstimateBatch:
             "has_basement": True,
             "has_mansard": True,
         },
+        project_structure_options={
+            "residential_construction.fundamentnye_raboty": "usp",
+            "residential_construction.vysokiy_cokol": "brick",
+            "residential_construction.ustroystvo_perekrytiy_cokolya": "precast_rc",
+            "residential_construction.ustroystvo_peremychek_nad_proemami_kladki_etazha": "metal",
+            "residential_construction.ustroystvo_perekrytiy_etazha": "monolithic_rc",
+            "residential_construction.ustroystvo_vnutrennih_peregorodok_etazha": "block",
+            "residential_construction.naruzhnaya_fasadnaya_otdelka": "facing_brick",
+        },
     )
 
 

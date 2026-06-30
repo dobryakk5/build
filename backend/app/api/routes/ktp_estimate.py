@@ -191,6 +191,10 @@ class GroupOut(BaseModel):
     floor_label: str | None = None
     floor_component: str | None = None
     component_role: str | None = None
+    semantic_stage_option_id: str | None = None
+    semantic_stage_option_title: str | None = None
+    stage_option_source: str | None = None
+    execution_applicability: str = "applicable"
     status: str
     start_date: str | None = None
     duration_days: int | None = None
@@ -216,6 +220,10 @@ class GroupOut(BaseModel):
             floor_label=g.floor_label,
             floor_component=g.floor_component,
             component_role=g.component_role,
+            semantic_stage_option_id=getattr(g, "semantic_stage_option_id", None),
+            semantic_stage_option_title=getattr(g, "semantic_stage_option_title", None),
+            stage_option_source=getattr(g, "stage_option_source", None),
+            execution_applicability=getattr(g, "execution_applicability", None) or "applicable",
             status=g.status,
             start_date=str(g.start_date) if g.start_date else None,
             duration_days=g.duration_days,

@@ -69,6 +69,18 @@ type Stage10PreviewResponse = {
   expires_at?: string | null;
   building_params?: Record<string, any> | null;
   project_structure_options?: Record<string, any> | null;
+  stage_option_requirements?: Array<{
+    canonical_stage_id: string;
+    template_stage_number: string;
+    title: string;
+    selection_mode: "one_of";
+    required: boolean;
+    selected_option_id: string | null;
+    selection_source: string | null;
+    options: Array<{ id: string; title: string }>;
+  }>;
+  dropped_stage_options?: Array<Record<string, unknown>>;
+  auto_selected_stage_options?: Array<Record<string, unknown>>;
   rows: Stage10PreviewRow[];
 };
 
@@ -167,6 +179,11 @@ function stage10PreviewToLegacyPreview(data: Stage10PreviewResponse, filename: s
     project_id: data.project_id,
     project_variant_id: data.project_variant_id,
     preview_content_hash: data.preview_content_hash,
+    building_params: data.building_params,
+    project_structure_options: data.project_structure_options as Record<string, string> | null | undefined,
+    stage_option_requirements: data.stage_option_requirements,
+    dropped_stage_options: data.dropped_stage_options,
+    auto_selected_stage_options: data.auto_selected_stage_options,
     filename,
     parser_profile: parserProfile,
     detected_format: null,
@@ -584,6 +601,22 @@ export const estimates = {
     request<void>(`/estimate-previews/${encodeURIComponent(previewId)}/cancel`, {
       method: "POST",
     }),
+  updateDbStage10Preview: (
+    previewId: string,
+    expectedPreviewContentHash: string,
+    filename: string,
+    parserProfile: string,
+    buildingParams?: Record<string, unknown>,
+    projectStructureOptions?: Record<string, unknown>,
+  ): Promise<PreviewResult> =>
+    request<Stage10PreviewResponse>(`/estimate-previews/${encodeURIComponent(previewId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        expected_preview_content_hash: expectedPreviewContentHash,
+        building_params: buildingParams,
+        project_structure_options: projectStructureOptions,
+      }),
+    }).then((data) => stage10PreviewToLegacyPreview(data, filename, parserProfile)),
   confirmImport: (pid: string, previewId: string, buildGantt?: boolean, edits?: PreviewEdits) =>
     request<{ job_id: string }>(`/projects/${pid}/estimates/upload/confirm`, {
       method: "POST",

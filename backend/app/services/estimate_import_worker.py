@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -9,16 +10,31 @@ from uuid import uuid4
 
 from sqlalchemy import and_, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer
 
-from app.models import Estimate, EstimateBatch
+from app.models import (
+    Estimate,
+    EstimateBatch,
+    EstimateQuantityProjection,
+    StageInstanceProjectionSummary,
+)
 from app.models.stage10 import EstimateImportJob, EstimatePreviewRow, EstimatePreviewSession, TransactionalOutbox
 from app.services.dynamic_floor_feature_flag import DynamicFloorFeatureGate
+from app.services.canonical_json_service import CanonicalJsonServiceV2
+from app.services.floor_structure_service import build_stage_instances, validate_building_params
+from app.services.semantic_options_service import (
+    STRICT_STAGE_OPTION_CONTRACT_VERSION,
+    StageOptionValidationError,
+    generate_semantic_operation_projections,
+    resolve_semantic_options,
+    validate_required_stage_options,
+)
 from app.services.source_identity_service import resolve_work_scope_key
+from app.services.taxonomy_snapshot_service import load_immutable_taxonomy_snapshot
 
 
 OUTBOX_MAX_PUBLICATION_ATTEMPTS = 6
 MATERIALIZATION_ROW_BATCH_SIZE = 250
+SEMANTIC_RESOLUTION_FAILURE = "semantic_stage_option_resolution_failed"
 
 
 def utcnow() -> datetime:
@@ -147,9 +163,168 @@ def _hierarchy_selection_from_batch(batch: EstimateBatch) -> dict[str, Any]:
     }
 
 
+def _resolve_import_semantic_context(
+    *,
+    session: EstimatePreviewSession,
+    batch: EstimateBatch,
+    job: EstimateImportJob,
+) -> tuple[dict[str, Any], list[dict[str, Any]], bool]:
+    snapshot_payload = session.snapshot_payload if isinstance(session.snapshot_payload, dict) else None
+    if not snapshot_payload:
+        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+    actual_payload_hash = hashlib.sha256(
+        CanonicalJsonServiceV2.dump_bytes(snapshot_payload)
+    ).hexdigest()
+    if actual_payload_hash != session.snapshot_hash or actual_payload_hash != job.snapshot_hash:
+        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+
+    snapshot = batch.taxonomy_snapshot if isinstance(batch.taxonomy_snapshot, dict) else None
+    if not snapshot:
+        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+    try:
+        immutable = load_immutable_taxonomy_snapshot(snapshot)
+        immutable.assert_integrity(snapshot)
+    except Exception as exc:  # noqa: BLE001 - normalized import integrity failure
+        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE) from exc
+    variant = snapshot.get("variant") if isinstance(snapshot.get("variant"), dict) else None
+    if not variant:
+        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+
+    payload_options = snapshot_payload.get("project_structure_options")
+    payload_building = snapshot_payload.get("building_params")
+    batch_options = batch.project_structure_options if isinstance(batch.project_structure_options, dict) else {}
+    batch_building = batch.building_params if isinstance(batch.building_params, dict) else {}
+    if payload_options != session.project_structure_options or payload_options != batch_options:
+        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+    if payload_building != session.building_params or payload_building != batch_building:
+        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+
+    try:
+        params = validate_building_params(batch_building, variant)
+        stages = build_stage_instances(variant, params)
+        strict_contract = str(variant.get("stage_option_selection_contract_version") or "") == STRICT_STAGE_OPTION_CONTRACT_VERSION
+        if strict_contract:
+            stage_by_id = {
+                str(stage.get("canonical_stage_id") or ""): stage
+                for stage in variant.get("stages") or []
+                if isinstance(stage, dict)
+            }
+            for group in variant.get("branch_groups") or []:
+                if not isinstance(group, dict):
+                    raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+                stage = stage_by_id.get(str(group.get("canonical_stage_id") or ""))
+                allowed = {
+                    str(option.get("id") or "")
+                    for option in (stage or {}).get("stage_options") or []
+                    if isinstance(option, dict)
+                }
+                if stage is None or not set(map(str, group.get("option_ids") or [])).issubset(allowed):
+                    raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+            validation = validate_required_stage_options(
+                variant=variant,
+                stage_instances=stages,
+                building_params=batch_building,
+                submitted_project_structure_options=batch_options,
+            )
+            if validation.normalized_options != batch_options:
+                raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+            report = resolve_semantic_options(
+                variant,
+                stages,
+                project_structure_options=batch_options,
+            )
+            if not report.valid:
+                raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+            for stage in stages:
+                mode = str(stage.get("stage_options_mode") or "none")
+                if mode == "selectable_one":
+                    singular = stage.get("semantic_stage_option_id")
+                    plural = stage.get("semantic_stage_option_ids") or []
+                    if (
+                        plural != ([singular] if singular else [])
+                        or not singular
+                        or not stage.get("semantic_stage_option_title")
+                        or stage.get("stage_option_source") not in {
+                            "project_structure_options",
+                            "auto_single_allowed_option",
+                        }
+                    ):
+                        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+    except (StageOptionValidationError, ValueError, TypeError, KeyError) as exc:
+        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE) from exc
+    return dict(variant), stages, strict_contract
+
+
+def _apply_confirmed_stage_options(
+    rows: list[SimpleNamespace],
+    *,
+    variant: dict[str, Any],
+    resolved_stages: list[dict[str, Any]],
+) -> None:
+    stage_by_instance = {
+        str(stage.get("stage_instance_id") or ""): stage for stage in resolved_stages
+    }
+    stage_by_canonical: dict[str, dict[str, Any]] = {}
+    for stage in resolved_stages:
+        stage_by_canonical.setdefault(str(stage.get("canonical_stage_id") or ""), stage)
+    option_ids_by_stage = {
+        str(stage.get("canonical_stage_id") or ""): {
+            str(option.get("id") or "")
+            for option in stage.get("stage_options") or []
+            if isinstance(option, dict)
+        }
+        for stage in variant.get("stages") or []
+        if isinstance(stage, dict)
+    }
+    facade_stage_id = "residential_construction.naruzhnaya_fasadnaya_otdelka"
+
+    for row in rows:
+        raw = row.raw_data if isinstance(row.raw_data, dict) else {}
+        stage = stage_by_instance.get(str(raw.get("stage_instance_id") or ""))
+        if stage is None:
+            stage = stage_by_canonical.get(str(raw.get("canonical_stage_id") or ""))
+        if stage is None or str(stage.get("stage_options_mode") or "none") != "selectable_one":
+            continue
+        selected = stage.get("semantic_stage_option_id")
+        if not selected:
+            raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+        canonical_stage_id = str(stage.get("canonical_stage_id") or "")
+        raw_detected = raw.get("semantic_stage_option_id") or raw.get("stage_option_id")
+        detected = str(raw_detected) if raw_detected in option_ids_by_stage.get(canonical_stage_id, set()) else None
+        conflict = bool(detected and detected != selected)
+        if selected == "no_finish" and canonical_stage_id == facade_stage_id and raw.get("row_role", "work") == "work":
+            conflict = True
+
+        raw["selected_semantic_stage_option_id"] = selected
+        raw["detected_semantic_stage_option_id"] = detected
+        raw["semantic_stage_option_id"] = selected
+        raw["semantic_stage_option_ids"] = [selected]
+        raw["semantic_stage_option_title"] = stage.get("semantic_stage_option_title")
+        raw["stage_option_id"] = selected
+        raw["stage_option_title"] = stage.get("semantic_stage_option_title")
+        raw["stage_option_source"] = "project_structure_options"
+        raw["stage_option_conflict"] = conflict
+        raw["execution_applicability"] = stage.get("execution_applicability", "applicable")
+        if conflict:
+            raw["needs_review"] = True
+            raw["operator_review_required"] = True
+            raw["review_reason"] = "stage_option_conflicts_with_project_selection"
+            raw["operator_review_reason"] = "stage_option_conflicts_with_project_selection"
+            raw["resolution_status"] = "needs_review"
+            raw["calculation_blocked"] = True
+            raw["reason_code"] = "stage_option_conflicts_with_project_selection"
+        else:
+            raw.setdefault("resolution_status", "resolved")
+            raw.setdefault("calculation_blocked", False)
+        row.raw_data = raw
+
+
 def _prepare_stage10_rows_for_materialization(
     snapshot_rows: list[dict[str, Any]],
     batch: EstimateBatch,
+    *,
+    variant: dict[str, Any] | None = None,
+    resolved_stages: list[dict[str, Any]] | None = None,
 ) -> list[SimpleNamespace]:
     materialized_rows: list[SimpleNamespace] = []
     for index, row in enumerate(snapshot_rows):
@@ -185,13 +360,71 @@ def _prepare_stage10_rows_for_materialization(
         hierarchy_selection = _hierarchy_selection_from_batch(batch)
         _ensure_stage10_building_params(batch, materialized_rows)
         preclassified = _enrich_work_subtypes_sync(materialized_rows, hierarchy_selection)
-        _enrich_work_stages_sync(
-            materialized_rows,
-            hierarchy_selection,
-            preclassified,
-            batch.building_params if isinstance(batch.building_params, dict) else None,
-        )
-        _apply_stage10_text_overrides(materialized_rows, batch)
+        if resolved_stages is None:
+            _enrich_work_stages_sync(
+                materialized_rows,
+                hierarchy_selection,
+                preclassified,
+                batch.building_params if isinstance(batch.building_params, dict) else None,
+            )
+        else:
+            from app.services.stage_classifier import StageClassifier
+            from app.services.work_taxonomy_service import get_sequential_scoring_policy
+
+            classifier = StageClassifier(get_sequential_scoring_policy())
+            for row in materialized_rows:
+                raw = row.raw_data if isinstance(row.raw_data, dict) else {}
+                match = classifier.classify_row_to_stage(
+                    " ".join(str(value or "") for value in (row.section, row.work_name)),
+                    str(raw.get("row_role") or "work"),
+                    resolved_stages,
+                    estimate_profile_id=str(hierarchy_selection.get("estimate_type_id") or ""),
+                )
+                raw.update(match.as_raw_data(
+                    estimate_type_id=str(hierarchy_selection.get("estimate_type_id") or ""),
+                    estimate_type_number=str(hierarchy_selection.get("estimate_type_number") or ""),
+                    project_variant_id=str(hierarchy_selection.get("project_variant_id") or ""),
+                    project_variant_number=str(hierarchy_selection.get("project_variant_number") or ""),
+                    row_role=str(raw.get("row_role") or "work"),
+                ))
+                row.raw_data = raw
+        _apply_stage10_text_overrides(materialized_rows, batch, stages=resolved_stages)
+        if variant is not None and resolved_stages is not None:
+            _apply_confirmed_stage_options(
+                materialized_rows,
+                variant=variant,
+                resolved_stages=resolved_stages,
+            )
+            from app.services.quantity_projection_service import enrich_quantity_projections
+
+            evidence: list[dict[str, Any]] = []
+            for row in materialized_rows:
+                raw = row.raw_data if isinstance(row.raw_data, dict) else {}
+                if raw.get("calculation_blocked") or not raw.get("operation_code"):
+                    continue
+                evidence.append({
+                    "stage_instance_id": raw.get("stage_instance_id"),
+                    "semantic_stage_option_id": raw.get("semantic_stage_option_id"),
+                    "operation_code": raw.get("operation_code"),
+                    "operation_package_code": raw.get("operation_package_code"),
+                    "source_row_key": raw.get("source_row_key"),
+                    "work_scope_key": raw.get("work_scope_key") or resolve_work_scope_key(raw.get("source_row_key")),
+                    "applicability_hash": raw.get("applicability_hash"),
+                    "applicability_hash_version": raw.get("applicability_hash_version"),
+                    "applicability_schema_version": raw.get("applicability_schema_version"),
+                    "quantity": row.quantity,
+                    "unit_code": row.unit,
+                    "quantity_source": "explicit",
+                    "materialization_source": "matched_to_source_row",
+                })
+            generate_semantic_operation_projections(
+                variant, resolved_stages, evidence=evidence
+            )
+            enrich_quantity_projections(
+                materialized_rows,
+                variant=variant,
+                stage_instances=resolved_stages,
+            )
     return materialized_rows
 
 
@@ -407,16 +640,22 @@ def _subtype_titles() -> dict[str, str]:
     return titles
 
 
-def _apply_stage10_text_overrides(rows: list[SimpleNamespace], batch: EstimateBatch) -> None:
-    from app.services.work_taxonomy_service import get_project_variant_stage_instances
-
+def _apply_stage10_text_overrides(
+    rows: list[SimpleNamespace],
+    batch: EstimateBatch,
+    *,
+    stages: list[dict[str, Any]] | None = None,
+) -> None:
     building_params = batch.building_params if isinstance(batch.building_params, dict) else {}
     hierarchy = _hierarchy_selection_from_batch(batch)
-    stages = get_project_variant_stage_instances(
-        str(hierarchy["estimate_type_id"]),
-        str(hierarchy["project_variant_id"]),
-        building_params,
-    )
+    if stages is None:
+        from app.services.work_taxonomy_service import get_project_variant_stage_instances
+
+        stages = get_project_variant_stage_instances(
+            str(hierarchy["estimate_type_id"]),
+            str(hierarchy["project_variant_id"]),
+            building_params,
+        )
     stage_by_number = {str(stage.get("number") or ""): stage for stage in stages}
     subtype_names = _subtype_titles()
     for row in rows:
@@ -552,6 +791,7 @@ def _estimate_from_stage10_row(
         stage_options_mode=raw.get("stage_options_mode"),
         stage_option_id=raw.get("stage_option_id"),
         stage_option_title=raw.get("stage_option_title"),
+        stage_option_source=raw.get("stage_option_source"),
         section_id=raw.get("section_id"),
         subtype_id=raw.get("subtype_id"),
         row_role=raw.get("row_role"),
@@ -603,7 +843,6 @@ class EstimateImportWorker:
 
         session = await self.db.scalar(
             select(EstimatePreviewSession)
-            .options(defer(EstimatePreviewSession.snapshot_payload))
             .where(EstimatePreviewSession.id == job.preview_session_id)
             .with_for_update()
         )
@@ -617,7 +856,12 @@ class EstimateImportWorker:
                 raise RuntimeError("preview_session_not_confirmed")
             self.feature_gate.ensure_allowed(project_variant_id=session.project_variant_id, user_id=session.owner_user_id)
             if not session.snapshot_hash or session.snapshot_hash != job.snapshot_hash:
-                raise RuntimeError("preview_snapshot_integrity_mismatch")
+                raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+            variant, resolved_stages, strict_semantic_contract = _resolve_import_semantic_context(
+                session=session,
+                batch=batch,
+                job=job,
+            )
             existing_count = len(
                 list(
                     await self.db.scalars(
@@ -627,34 +871,21 @@ class EstimateImportWorker:
             )
             created = 0
             if existing_count == 0:
-                last_row_index: int | None = None
-                last_row_key: str | None = None
-                while True:
-                    rows_query = (
-                        select(EstimatePreviewRow)
-                        .where(EstimatePreviewRow.preview_session_id == session.id)
-                        .order_by(EstimatePreviewRow.source_row_index, EstimatePreviewRow.source_row_key)
-                        .limit(MATERIALIZATION_ROW_BATCH_SIZE)
+                immutable_rows = session.snapshot_payload.get("rows") if isinstance(session.snapshot_payload, dict) else None
+                if not isinstance(immutable_rows, list):
+                    raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+                for offset in range(0, len(immutable_rows), MATERIALIZATION_ROW_BATCH_SIZE):
+                    snapshot_rows = immutable_rows[offset : offset + MATERIALIZATION_ROW_BATCH_SIZE]
+                    if not all(isinstance(row, dict) for row in snapshot_rows):
+                        raise RuntimeError(SEMANTIC_RESOLUTION_FAILURE)
+                    materialized_rows = _prepare_stage10_rows_for_materialization(
+                        snapshot_rows,
+                        batch,
+                        variant=variant if strict_semantic_contract else None,
+                        resolved_stages=resolved_stages if strict_semantic_contract else None,
                     )
-                    if last_row_index is not None and last_row_key is not None:
-                        rows_query = rows_query.where(
-                            or_(
-                                EstimatePreviewRow.source_row_index > last_row_index,
-                                and_(
-                                    EstimatePreviewRow.source_row_index == last_row_index,
-                                    EstimatePreviewRow.source_row_key > last_row_key,
-                                ),
-                            )
-                        )
-                    preview_rows = list(
-                        await self.db.scalars(rows_query)
-                    )
-                    if not preview_rows:
-                        break
-
-                    snapshot_rows = [_snapshot_row_from_preview_row(row) for row in preview_rows]
-                    materialized_rows = _prepare_stage10_rows_for_materialization(snapshot_rows, batch)
                     values: list[dict[str, Any]] = []
+                    projection_values: list[dict[str, Any]] = []
                     for item in materialized_rows:
                         row = item.stage10_snapshot_row
                         raw = item.raw_data if isinstance(item.raw_data, dict) else {}
@@ -668,17 +899,58 @@ class EstimateImportWorker:
                             source_row_key=source_row_key,
                         )
                         values.append(_estimate_insert_values(est))
+                        for projection in raw.get("ktp_quantity_projections") or []:
+                            if not isinstance(projection, dict) or not projection.get("projection_id"):
+                                continue
+                            projection_values.append({
+                                "id": str(uuid4()),
+                                "estimate_batch_id": batch.id,
+                                "estimate_id": est.id,
+                                "source_row_key": source_row_key,
+                                "projection_id": projection.get("projection_id"),
+                                "stage_instance_id": projection.get("target_stage_instance_id"),
+                                "operation_code": projection.get("operation_code"),
+                                "operation_package_code": projection.get("operation_package_code"),
+                                "semantic_stage_option_id": projection.get("semantic_stage_option_id"),
+                                "work_scope_key": projection.get("work_scope_key"),
+                                "applicability": raw.get("applicability") or {},
+                                "applicability_hash": projection.get("applicability_hash"),
+                                "applicability_hash_version": projection.get("applicability_hash_version"),
+                                "applicability_schema_version": projection.get("applicability_schema_version"),
+                                "quantity": projection.get("quantity"),
+                                "unit_code": projection.get("unit_code"),
+                                "resolution_status": projection.get("resolution_status") or "resolved",
+                                "reason_code": projection.get("reason_code"),
+                                "metadata_json": projection,
+                                "created_at": utcnow(),
+                            })
                         created += 1
                     if values:
                         await self.db.execute(insert(Estimate), values)
                         await self.db.flush()
-                    last_row = preview_rows[-1]
-                    last_row_index = last_row.source_row_index
-                    last_row_key = last_row.source_row_key
-                    for preview_row in preview_rows:
-                        self.db.expunge(preview_row)
+                    if projection_values:
+                        await self.db.execute(insert(EstimateQuantityProjection), projection_values)
+                        await self.db.flush()
                 if created == 0:
                     raise RuntimeError("preview_rows_missing")
+                if strict_semantic_contract:
+                    summaries = [
+                        {
+                            "id": str(uuid4()),
+                            "estimate_batch_id": batch.id,
+                            "stage_instance_id": str(stage.get("stage_instance_id") or ""),
+                            "projection_generation_status": str(
+                                stage.get("projection_generation_status") or "pending"
+                            ),
+                            "failure_code": stage.get("projection_generation_failure_code"),
+                            "metadata_json": stage,
+                            "created_at": utcnow(),
+                        }
+                        for stage in resolved_stages
+                        if stage.get("stage_instance_id")
+                    ]
+                    if summaries:
+                        await self.db.execute(insert(StageInstanceProjectionSummary), summaries)
             await self.db.execute(
                 EstimateBatch.__table__.update()
                 .where(EstimateBatch.project_id == batch.project_id)
@@ -695,14 +967,22 @@ class EstimateImportWorker:
             await self.db.commit()
             return WorkerRunResult(job.id, "completed", materialized_estimate_count=created)
         except Exception as exc:
+            await self.db.rollback()
+            job = await self.db.get(EstimateImportJob, str(job_id))
+            batch = await self.db.get(EstimateBatch, str(job.estimate_batch_id)) if job is not None else None
             if batch is not None:
                 batch.import_status = "blocked"
                 batch.calculation_status = "blocked"
                 batch.calculation_block_reason = str(exc)
                 batch.is_active = False
             job.status = "blocked"
-            job.reason_code = str(exc)
+            reason_code = SEMANTIC_RESOLUTION_FAILURE if str(exc) == SEMANTIC_RESOLUTION_FAILURE else str(exc)
+            job.reason_code = reason_code
+            job.reason_details = {
+                "exception_type": type(exc).__name__,
+                "message": str(exc),
+            }
             job.finished_at = utcnow()
             job.updated_at = utcnow()
             await self.db.commit()
-            return WorkerRunResult(job.id, "blocked", reason_code=str(exc))
+            return WorkerRunResult(job.id, "blocked", reason_code=reason_code)

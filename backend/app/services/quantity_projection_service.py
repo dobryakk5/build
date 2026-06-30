@@ -267,6 +267,11 @@ def _projection_payload(
     needs_review: bool = False,
     review_reason: str | None = None,
 ) -> dict[str, Any]:
+    target_option_id = str(target_stage.get("semantic_stage_option_id") or "").strip() or None
+    if target_stage.get("execution_applicability") == "not_applicable":
+        return {}
+    if target_option_id and target_option_id != binding.semantic_stage_option_id:
+        return {}
     target_instance_id = str(target_stage.get("stage_instance_id") or binding.stage_instance_id)
     effective_needs_review = bool(
         needs_review
@@ -314,7 +319,9 @@ def _projection_payload(
         "operation_package_code": binding.operation_package_code,
         "calculation_code": binding.calculation_code,
         "semantic_stage_option_id": binding.semantic_stage_option_id,
+        "semantic_stage_option_title": target_stage.get("semantic_stage_option_title"),
         "stage_option_source": binding.stage_option_source,
+        "execution_applicability": target_stage.get("execution_applicability", "applicable"),
         "source_row_key": binding.source_row_key,
         "work_scope_key": binding.work_scope_key,
         "applicability_hash": binding.applicability_hash,
@@ -350,6 +357,8 @@ def _mark_review(binding: _RowBinding, reason: str) -> None:
 
 
 def _append_projection(binding: _RowBinding, payload: dict[str, Any]) -> None:
+    if not payload or not payload.get("projection_id"):
+        return
     projections = list(binding.raw.get("ktp_quantity_projections") or [])
     if not any(item.get("projection_id") == payload.get("projection_id") for item in projections if isinstance(item, dict)):
         projections.append(payload)
@@ -400,6 +409,14 @@ def _prepare_bindings(
 
         if raw.get("row_role") != "work" or not raw.get("work_type_applicable", True):
             skipped += 1
+            continue
+        if raw.get("stage_option_conflict") or raw.get("calculation_blocked"):
+            skipped += 1
+            raw["quantity_projection_needs_review"] = True
+            raw["quantity_projection_review_reason"] = (
+                raw.get("reason_code") or "stage_option_conflicts_with_project_selection"
+            )
+            raw["quantity_projection_review_reasons"] = [raw["quantity_projection_review_reason"]]
             continue
         operation_code = str(raw.get("operation_code") or "").strip()
         package_code = str(raw.get("operation_package_code") or "").strip() or None
@@ -776,6 +793,10 @@ def ktp_projection_payloads_for_estimate(estimate: Any) -> list[dict[str, Any]]:
     When no stage-6 projection exists it returns one backward-compatible item.
     """
     raw = estimate.raw_data if isinstance(getattr(estimate, "raw_data", None), dict) else {}
+    if raw.get("stage_option_conflict") or raw.get("calculation_blocked"):
+        return []
+    if raw.get("execution_applicability") == "not_applicable":
+        return []
     source_projections = [
         dict(item)
         for item in (raw.get("ktp_quantity_projections") or [])

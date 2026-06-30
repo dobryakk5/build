@@ -285,7 +285,7 @@ async def test_work_taxonomy_helpers_fallback_to_json_v6_5():
 
     assert len(sections) == 19
     assert len(subtypes) == 219
-    assert dictionary_version() == "construction_work_dictionary_v6_5_1@1.9.1"
+    assert dictionary_version() == "construction_work_dictionary_v6_5_1@1.9.2"
     taxonomy_codes = [s["taxonomy_code"] for s in subtypes]
     assert len(set(taxonomy_codes)) == len(subtypes)
     assert all(code and "." in code for code in taxonomy_codes)
@@ -296,7 +296,7 @@ async def test_work_taxonomy_helpers_fallback_to_json_v6_5():
 
 def test_project_hierarchy_exposes_types_and_variants():
     hierarchy = get_project_hierarchy()
-    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_5_1@1.9.1"
+    assert hierarchy["dictionary_version"] == "construction_work_dictionary_v6_5_1@1.9.2"
     assert len(hierarchy["estimate_types"]) == 9
     assert sum(len(t["project_variants"]) for t in hierarchy["estimate_types"]) == 65
     assert sum(

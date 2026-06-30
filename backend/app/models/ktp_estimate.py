@@ -106,6 +106,12 @@ class KtpWbsGroup(Base, TimestampMixin):
     floor_label: Mapped[str | None] = mapped_column(String(128))
     floor_component: Mapped[str | None] = mapped_column(String(64))
     component_role: Mapped[str | None] = mapped_column(String(128))
+    semantic_stage_option_id: Mapped[str | None] = mapped_column(String(128))
+    semantic_stage_option_title: Mapped[str | None] = mapped_column(Text)
+    stage_option_source: Mapped[str | None] = mapped_column(String(64))
+    execution_applicability: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="applicable"
+    )
     # Этап 2 — карточка КТП
     card_title: Mapped[str | None] = mapped_column(Text)
     card_goal: Mapped[str | None] = mapped_column(Text)
