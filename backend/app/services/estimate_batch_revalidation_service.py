@@ -39,6 +39,16 @@ REVIEW_REASON_CODES = frozenset(
     }
 )
 
+RETRYABLE_IMPORT_REASON_CODES = frozenset(
+    {
+        # "dbapi" was persisted by the old exception normalizer before the
+        # concrete database failure was mapped to a stable import reason.
+        "dbapi",
+        "estimate_import_database_error",
+        "estimate_import_failed",
+    }
+)
+
 GUARDED_OPERATIONS = frozenset({"recalculate", "confirm", "generate_ktp", "generate_gpr"})
 
 
@@ -98,6 +108,17 @@ class EstimateBatchIntegrityValidator:
         current = batch.calculation_block_reason
         if current in REVIEW_REASON_CODES:
             review.add(current)
+        elif current in RETRYABLE_IMPORT_REASON_CODES:
+            estimate_count = int(
+                await self.db.scalar(
+                    select(func.count()).select_from(Estimate).where(
+                        Estimate.estimate_batch_id == batch.id
+                    )
+                )
+                or 0
+            )
+            if estimate_count != 0 or batch.import_status not in {"blocked", "failed", "pending"}:
+                blocking.add(current)
         elif current in BLOCKING_REASON_CODES:
             await self._validate_known_block(batch, current, blocking)
         elif current:

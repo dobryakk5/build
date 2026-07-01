@@ -3,11 +3,13 @@ import sys
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.floor_structure_service import build_stage_instances, validate_building_params
 from app.services.estimate_import_worker import (
+    DATABASE_IMPORT_FAILURE,
     GENERIC_IMPORT_FAILURE,
     _apply_confirmed_stage_options,
     _exception_reason_code,
@@ -180,4 +182,15 @@ def test_import_failure_reason_is_stable_and_fits_database_column():
     assert _exception_reason_code(DomainFailure("verbose details")) == "domain_failure"
     assert _exception_reason_code(RuntimeError("preview_rows_missing")) == "preview_rows_missing"
     assert _exception_reason_code(RuntimeError("x" * 500)) == GENERIC_IMPORT_FAILURE
+    db_error = DBAPIError("INSERT", {}, RuntimeError("value too long"))
+    assert _exception_reason_code(db_error) == DATABASE_IMPORT_FAILURE
     assert len(_exception_reason_code(RuntimeError("x" * 500))) <= 128
+
+
+def test_projection_status_storage_fits_longest_contract_value():
+    from app.models import EstimateBatch, StageInstanceProjectionSummary
+    from app.services.semantic_options_service import PROJECTION_GENERATION_STATUS_VALUES
+
+    longest = max(map(len, PROJECTION_GENERATION_STATUS_VALUES))
+    assert StageInstanceProjectionSummary.__table__.c.projection_generation_status.type.length >= longest
+    assert EstimateBatch.__table__.c.projection_generation_status.type.length >= longest

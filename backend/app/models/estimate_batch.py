@@ -59,7 +59,7 @@ class EstimateBatch(Base, SoftDeleteMixin):
     taxonomy_locked: Mapped[bool | None] = mapped_column(Boolean)
     work_rate_catalog_version: Mapped[str | None] = mapped_column(String(64))
     work_rate_catalog_hash: Mapped[str | None] = mapped_column(String(128))
-    projection_generation_status: Mapped[str | None] = mapped_column(String(32))
+    projection_generation_status: Mapped[str | None] = mapped_column(String(64))
     projection_failure_code: Mapped[str | None] = mapped_column(String(128))
     projection_failure_details: Mapped[dict | None] = mapped_column(JSONB)
     revalidated_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)

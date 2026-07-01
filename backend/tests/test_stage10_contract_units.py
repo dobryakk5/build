@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -26,6 +27,7 @@ from app.services.stage10_jsonb_registry import (
 )
 from app.services.taxonomy_compatibility_service import batch_uses_legacy_taxonomy
 from app.api.routes.estimates import _forbid_dynamic_floor_legacy_redis_path
+from app.services.estimate_batch_revalidation_service import EstimateBatchIntegrityValidator
 
 
 def test_stage10_revalidation_permission_is_project_role_scoped():
@@ -97,3 +99,20 @@ def test_stage10_snapshot_batch_is_not_legacy_when_estimate_raw_data_is_audit_on
     ]
 
     assert not batch_uses_legacy_taxonomy(batch, estimates)
+
+
+@pytest.mark.asyncio
+async def test_legacy_dbapi_block_is_retryable_only_without_partial_estimates():
+    batch = SimpleNamespace(
+        id="00000000-0000-0000-0000-000000000001",
+        calculation_block_reason="dbapi",
+        applicability_hash_version=2,
+        import_status="blocked",
+    )
+    db = SimpleNamespace(scalar=AsyncMock(return_value=0))
+    report = await EstimateBatchIntegrityValidator(db).validate(batch)
+    assert not report.blocked
+
+    db.scalar = AsyncMock(return_value=1)
+    report = await EstimateBatchIntegrityValidator(db).validate(batch)
+    assert report.blocking_reason_codes == ("dbapi",)

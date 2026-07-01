@@ -160,7 +160,7 @@ class StageInstanceProjectionSummary(Base):
     id: Mapped[str] = mapped_column(PGUUID(as_uuid=False), primary_key=True, default=_uuid)
     estimate_batch_id: Mapped[str] = mapped_column(ForeignKey("estimate_batches.id", ondelete="CASCADE"), nullable=False)
     stage_instance_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    projection_generation_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    projection_generation_status: Mapped[str] = mapped_column(String(64), nullable=False)
     failure_code: Mapped[str | None] = mapped_column(String(128))
     metadata_json: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, nullable=False)

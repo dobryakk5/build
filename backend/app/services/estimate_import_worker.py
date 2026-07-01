@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,7 @@ from uuid import uuid4
 
 from sqlalchemy import and_, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.models import (
     Estimate,
@@ -36,6 +38,10 @@ OUTBOX_MAX_PUBLICATION_ATTEMPTS = 6
 MATERIALIZATION_ROW_BATCH_SIZE = 250
 SEMANTIC_RESOLUTION_FAILURE = "semantic_stage_option_resolution_failed"
 GENERIC_IMPORT_FAILURE = "estimate_import_failed"
+DATABASE_IMPORT_FAILURE = "estimate_import_database_error"
+DATABASE_INTEGRITY_FAILURE = "estimate_import_integrity_error"
+
+logger = logging.getLogger(__name__)
 
 
 def utcnow() -> datetime:
@@ -44,6 +50,10 @@ def utcnow() -> datetime:
 
 def _exception_reason_code(exc: Exception) -> str:
     """Return a stable DB-safe reason code; keep verbose diagnostics in reason_details."""
+    if isinstance(exc, IntegrityError):
+        return DATABASE_INTEGRITY_FAILURE
+    if isinstance(exc, DBAPIError):
+        return DATABASE_IMPORT_FAILURE
     for attribute in ("reason_code", "code"):
         value = getattr(exc, attribute, None)
         if isinstance(value, str) and value.strip():
@@ -986,6 +996,14 @@ class EstimateImportWorker:
             job = await self.db.get(EstimateImportJob, str(job_id))
             batch = await self.db.get(EstimateBatch, str(job.estimate_batch_id)) if job is not None else None
             reason_code = _exception_reason_code(exc)
+            original = getattr(exc, "orig", None)
+            logger.exception(
+                "estimate import job %s blocked: reason=%s exception=%s original=%s",
+                job_id,
+                reason_code,
+                type(exc).__name__,
+                type(original).__name__ if original is not None else None,
+            )
             if batch is not None:
                 batch.import_status = "blocked"
                 batch.calculation_status = "blocked"
@@ -996,6 +1014,8 @@ class EstimateImportWorker:
             job.reason_details = {
                 "exception_type": type(exc).__name__,
                 "message": str(exc),
+                "dbapi_original_type": type(original).__name__ if original is not None else None,
+                "dbapi_original_message": str(original) if original is not None else None,
             }
             job.finished_at = utcnow()
             job.updated_at = utcnow()
