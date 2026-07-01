@@ -518,6 +518,7 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
         await db.scalars(
             select(KtpWbsGroup)
             .where(KtpWbsGroup.session_id == session_id)
+            .where(KtpWbsGroup.execution_applicability == "applicable")
             .options(selectinload(KtpWbsGroup.items))
             .order_by(KtpWbsGroup.sort_order, KtpWbsGroup.created_at)
         )
@@ -529,7 +530,8 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
         list(
             await db.scalars(
                 select(KtpWbsGroupDependency).where(
-                    KtpWbsGroupDependency.group_id.in_(group_ids)
+                    KtpWbsGroupDependency.group_id.in_(group_ids),
+                    KtpWbsGroupDependency.depends_on_group_id.in_(group_ids),
                 )
             )
         )
@@ -734,6 +736,7 @@ async def _get_group(
         select(KtpWbsGroup)
         .where(KtpWbsGroup.id == group_id)
         .where(KtpWbsGroup.project_id == project_id)
+        .where(KtpWbsGroup.execution_applicability == "applicable")
         .options(selectinload(KtpWbsGroup.items))
     )
     if not group:
@@ -749,6 +752,7 @@ async def _get_item(
         .join(KtpWbsGroup, KtpWbsItem.group_id == KtpWbsGroup.id)
         .where(KtpWbsItem.id == item_id)
         .where(KtpWbsGroup.project_id == project_id)
+        .where(KtpWbsGroup.execution_applicability == "applicable")
     )
     if not item:
         raise KtpNotFoundError(f"Работа WBS {item_id} не найдена в проекте {project_id}")
@@ -1122,6 +1126,10 @@ async def _process_stage1(job_id: str) -> None:
                 "gap_fill_duplicates": diagnostics.get("gap_fill_duplicates") or [],
                 "catalog_recommendations": diagnostics.get("catalog_recommendations") or [],
                 "catalog_recommendation_duplicates": diagnostics.get("catalog_recommendation_duplicates") or [],
+                "suppressed_not_applicable_rows": diagnostics.get(
+                    "suppressed_not_applicable_rows"
+                )
+                or [],
             }
             flag_modified(locked_session, "stage1_raw_json")
             locked_session.llm_model = settings.KTP_GENERATION_MODEL
@@ -1425,8 +1433,8 @@ def _locked_stage_group_sort_key(group: Any) -> tuple[Any, ...]:
     except (TypeError, ValueError):
         sort_order = 0.0
     return (
-        1 if _is_fallback_group_title(title) else 0,
         sort_order,
+        str(_group_value(group, "stage_instance_id") or ""),
         title,
         str(_group_value(group, "id") or ""),
     )
@@ -1439,6 +1447,21 @@ def _sort_stage_groups(
 ) -> list[Any]:
     key = _locked_stage_group_sort_key if sequence_locked else _legacy_stage_group_sort_key
     return sorted(groups, key=key)
+
+
+def _assign_locked_wbs_codes(groups: list[Any]) -> None:
+    """Expose the numeric catalog code without renumbering stage templates."""
+    for group in groups:
+        if (
+            str(_group_value(group, "execution_applicability") or "applicable")
+            != "applicable"
+        ):
+            continue
+        template_number = str(
+            _group_value(group, "template_stage_number") or ""
+        ).strip()
+        if re.fullmatch(r"2\.7\.\d+", template_number):
+            setattr(group, "wbs_code", template_number)
 
 
 def _estimate_stage_number(est: Estimate) -> str | None:
@@ -3399,6 +3422,9 @@ def _materialize_wbs(
     diagnostics = diagnostics if diagnostics is not None else {}
     invalid_row_keys = diagnostics.setdefault("invalid_estimate_row_keys", [])
     duplicate_row_keys = diagnostics.setdefault("duplicate_estimate_row_keys", [])
+    suppressed_not_applicable_rows = diagnostics.setdefault(
+        "suppressed_not_applicable_rows", []
+    )
     groups: list[KtpWbsGroup] = []
     items: list[KtpWbsItem] = []
     warnings: list[str] = []
@@ -3586,6 +3612,12 @@ def _materialize_wbs(
         origin: str,
         fallback_name: str,
     ) -> None:
+        if str(
+            projection.get("execution_applicability")
+            or raw_group.get("execution_applicability")
+            or "applicable"
+        ) == "not_applicable":
+            return
         group = _ensure_group(raw_group, group_index, projection)
         if getattr(group, "execution_applicability", "applicable") == "not_applicable":
             return
@@ -3663,7 +3695,11 @@ def _materialize_wbs(
 
     if sequence_locked:
         for g_idx, raw_g in enumerate(raw_groups, start=1):
-            if raw_g.get("stage_instance_id"):
+            if (
+                raw_g.get("stage_instance_id")
+                and str(raw_g.get("execution_applicability") or "applicable")
+                == "applicable"
+            ):
                 _ensure_group(raw_g, g_idx, None)
 
     for g_idx, raw_g in enumerate(raw_groups, start=1):
@@ -3717,6 +3753,25 @@ def _materialize_wbs(
                         )
                     continue
                 seen_estimate_ids.add(estimate.id)
+
+            if str(raw_g.get("execution_applicability") or "applicable") == "not_applicable":
+                if estimate is not None:
+                    suppressed_not_applicable_rows.append(
+                        {
+                            "row_key": row_key,
+                            "estimate_id": estimate.id,
+                            "work_name": estimate.work_name,
+                            "stage_instance_id": raw_g.get("stage_instance_id"),
+                            "template_stage_number": raw_g.get("template_stage_number"),
+                            "semantic_stage_option_id": raw_g.get(
+                                "semantic_stage_option_id"
+                            ),
+                            "reason": "stage_not_applicable",
+                        }
+                    )
+                continue
+
+            if estimate is not None:
                 from app.services.quantity_projection_service import (
                     ktp_projection_payloads_for_estimate,
                 )
@@ -3813,6 +3868,8 @@ def _materialize_wbs(
                 fallback_order += 1000.0
 
     groups = _sort_stage_groups(groups, sequence_locked=sequence_locked)
+    if sequence_locked:
+        _assign_locked_wbs_codes(groups)
     return groups, items, warnings
 
 

@@ -209,6 +209,51 @@ def test_materialize_wbs_ai_added_is_pending():
     assert not any("не распределены" in w for w in warnings)
 
 
+def test_not_applicable_stage_suppresses_estimate_without_fallback():
+    from app.services.ktp_estimate_service import (
+        FALLBACK_GROUP_TITLE,
+        GROUPING_MODE_STAGE_AWARE,
+        _materialize_wbs,
+    )
+
+    estimate = make_est("e1", "Наружная фасадная отделка")
+    diagnostics = {}
+    groups, items, warnings = _materialize_wbs(
+        make_session(),
+        [{
+            "title": "Наружная фасадная отделка",
+            "sort_order": 16000,
+            "sequence_mode": "locked",
+            "stage_instance_id": "stage:facade",
+            "template_stage_number": "2.7.16",
+            "stage_number": "2.7.16",
+            "semantic_stage_option_id": "no_finish",
+            "execution_applicability": "not_applicable",
+            "items": [{
+                "name": estimate.work_name,
+                "origin": "from_estimate",
+                "row_key": "R001",
+            }],
+        }],
+        {"R001": estimate},
+        diagnostics=diagnostics,
+        grouping_mode=GROUPING_MODE_STAGE_AWARE,
+    )
+
+    assert groups == []
+    assert items == []
+    assert not any(FALLBACK_GROUP_TITLE in warning for warning in warnings)
+    assert diagnostics["suppressed_not_applicable_rows"] == [{
+        "row_key": "R001",
+        "estimate_id": "e1",
+        "work_name": "Наружная фасадная отделка",
+        "stage_instance_id": "stage:facade",
+        "template_stage_number": "2.7.16",
+        "semantic_stage_option_id": "no_finish",
+        "reason": "stage_not_applicable",
+    }]
+
+
 def test_stage_aware_groups_use_json_work_stage_order():
     from app.services.ktp_estimate_service import _build_stage_aware_groups
 
@@ -1136,6 +1181,57 @@ def test_reassign_sequence_sort_order_pins_fallback_last():
     assert b.sort_order == 1000.0
     assert a.sort_order == 2000.0
     assert z.sort_order == 3000.0  # fallback после всех обычных
+
+
+def test_assign_locked_wbs_codes_preserves_catalog_code():
+    from app.services.ktp_estimate_service import _assign_locked_wbs_codes
+
+    later = SimpleNamespace(
+        id="z",
+        title="Стены",
+        sort_order=1000,
+        stage_instance_id="stage:z",
+        template_stage_number="2.7.8",
+        execution_applicability="applicable",
+        wbs_code=None,
+    )
+    earlier = SimpleNamespace(
+        id="a",
+        title="Стены",
+        sort_order=1000,
+        stage_instance_id="stage:a",
+        template_stage_number="2.7.8",
+        execution_applicability="applicable",
+        wbs_code=None,
+    )
+    excluded = SimpleNamespace(
+        id="excluded",
+        title="Без отделки",
+        sort_order=2000,
+        stage_instance_id="stage:16",
+        template_stage_number="2.7.16",
+        execution_applicability="not_applicable",
+        wbs_code=None,
+    )
+    following = SimpleNamespace(
+        id="following",
+        title="Следующий этап",
+        sort_order=3000,
+        stage_instance_id="stage:17",
+        template_stage_number="2.7.17",
+        execution_applicability="applicable",
+        wbs_code=None,
+    )
+
+    _assign_locked_wbs_codes([later, earlier, excluded, following])
+    assert earlier.wbs_code == "2.7.8"
+    assert later.wbs_code == "2.7.8"
+    assert excluded.wbs_code is None
+    assert following.wbs_code == "2.7.17"
+
+    _assign_locked_wbs_codes([earlier, later])
+    assert earlier.wbs_code == "2.7.8"
+    assert later.wbs_code == "2.7.8"
 
 
 @pytest.mark.asyncio

@@ -155,7 +155,8 @@ function displayStageGroupTitle(title: string | null | undefined) {
 
 function groupIdentifier(group: KtpWbsGroup) {
   return (
-    group.stage_number
+    group.wbs_code
+    || group.stage_number
     || group.template_stage_number
     || (group.stage_instance_id ? group.stage_instance_id.split(":").at(-1) : null)
     || `G-${group.id.slice(0, 8)}`
@@ -167,6 +168,7 @@ function groupIdentifierTitle(group: KtpWbsGroup) {
     group.stage_instance_id ? `stage_instance_id: ${group.stage_instance_id}` : null,
     group.template_stage_number ? `template_stage_number: ${group.template_stage_number}` : null,
     group.stage_number ? `stage_number: ${group.stage_number}` : null,
+    group.wbs_code ? `wbs_code: ${group.wbs_code}` : null,
     group.floor_label ? `floor: ${group.floor_label}` : null,
     group.floor_component ? `component: ${group.floor_component}` : null,
     `group_id: ${group.id}`,

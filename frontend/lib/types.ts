@@ -924,6 +924,7 @@ export interface KtpWbsGroup {
   stage_instance_id?: string | null;
   template_stage_number?: string | null;
   stage_number?: string | null;
+  wbs_code?: string | null;
   floor_number?: number | null;
   floor_kind?: string | null;
   floor_label?: string | null;

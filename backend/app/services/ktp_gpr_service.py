@@ -967,7 +967,7 @@ async def _write_gantt(
             project_id=project_id,
             estimate_batch_id=batch_id,
             parent_id=root.id,
-            name=g.title,
+            name=f"{g.wbs_code}. {g.title}" if g.wbs_code else g.title,
             start_date=g.start_date or start_default,
             working_days=g.duration_days or 1,
             hours_per_day=hours_per_day,

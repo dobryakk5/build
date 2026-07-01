@@ -101,6 +101,7 @@ class KtpWbsGroup(Base, TimestampMixin):
     stage_instance_id: Mapped[str | None] = mapped_column(String(255))
     template_stage_number: Mapped[str | None] = mapped_column(String(64))
     stage_number: Mapped[str | None] = mapped_column(String(64))
+    wbs_code: Mapped[str | None] = mapped_column(String(64))
     floor_number: Mapped[int | None] = mapped_column(Integer)
     floor_kind: Mapped[str | None] = mapped_column(String(32))
     floor_label: Mapped[str | None] = mapped_column(String(128))

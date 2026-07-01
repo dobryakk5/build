@@ -186,6 +186,7 @@ class GroupOut(BaseModel):
     stage_instance_id: str | None = None
     template_stage_number: str | None = None
     stage_number: str | None = None
+    wbs_code: str | None = None
     floor_number: int | None = None
     floor_kind: str | None = None
     floor_label: str | None = None
@@ -215,6 +216,7 @@ class GroupOut(BaseModel):
             stage_instance_id=g.stage_instance_id,
             template_stage_number=g.template_stage_number,
             stage_number=g.stage_number,
+            wbs_code=g.wbs_code,
             floor_number=g.floor_number,
             floor_kind=g.floor_kind,
             floor_label=g.floor_label,

@@ -142,7 +142,7 @@ def test_import_row_inherits_selected_option_and_detected_conflict_is_review_onl
     assert conflict.raw_data["calculation_blocked"] is True
 
 
-def test_no_finish_materializes_visible_empty_not_applicable_group():
+def test_no_finish_does_not_materialize_working_group():
     session = KtpEstimateSession(
         id="00000000-0000-0000-0000-000000000101",
         project_id="00000000-0000-0000-0000-000000000102",
@@ -168,11 +168,7 @@ def test_no_finish_materializes_visible_empty_not_applicable_group():
         {},
     )
     assert items == []
-    assert len(groups) == 1
-    assert groups[0].semantic_stage_option_id == "no_finish"
-    assert groups[0].execution_applicability == "not_applicable"
-    assert groups[0].status == "not_applicable"
-    assert groups[0].duration_days is None
+    assert groups == []
 
 
 def test_import_failure_reason_is_stable_and_fits_database_column():

@@ -314,6 +314,10 @@ def test_locked_materialization_keeps_empty_taxonomy_groups() -> None:
     assert items == []
     assert warnings == []
     assert [float(group.sort_order) for group in groups] == list(range(1000, 20000, 1000))
+    assert [group.wbs_code for group in groups] == [
+        group.template_stage_number for group in groups
+    ]
+    assert any(group.stage_number == "2.7.F1.10" for group in groups)
     assert next(group for group in groups if group.template_stage_number == "2.7.11").floor_kind == "aggregate"
 
 
