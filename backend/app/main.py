@@ -1,5 +1,7 @@
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
+import socket
 import asyncpg
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -41,6 +43,7 @@ from app.services.work_taxonomy_service import assert_project_hierarchy_compatib
 
 
 _APP_DIR = Path(__file__).resolve().parent
+logger = logging.getLogger(__name__)
 work_rates_router = create_work_rate_router(
     catalog_path=resolve_config_path(settings.WORK_RATE_CATALOG_PATH),
     taxonomy_path=resolve_config_path(settings.WORK_TAXONOMY_PATH),
@@ -68,14 +71,52 @@ app = FastAPI(
 )
 
 
+def _is_database_connectivity_error(exc: Exception) -> bool:
+    connectivity_error_types = (
+        asyncpg.PostgresConnectionError,
+        asyncpg.CannotConnectNowError,
+        ConnectionError,
+        TimeoutError,
+        socket.timeout,
+    )
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, connectivity_error_types):
+            return True
+        current = getattr(current, "orig", None) or current.__cause__ or current.__context__
+    return False
+
+
 @app.exception_handler(asyncpg.PostgresConnectionError)
 @app.exception_handler(asyncpg.CannotConnectNowError)
 @app.exception_handler(OperationalError)
 @app.exception_handler(DBAPIError)
 async def database_unavailable_handler(request: Request, exc: Exception):
+    exc_info = (type(exc), exc, exc.__traceback__)
+    if _is_database_connectivity_error(exc):
+        logger.error(
+            "Database connectivity error on %s %s",
+            request.method,
+            request.url.path,
+            exc_info=exc_info,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"detail": {"code": "database_unavailable"}},
+        )
+
+    logger.error(
+        "Unhandled database error on %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc_info,
+    )
     return JSONResponse(
-        status_code=503,
-        content={"detail": {"code": "database_unavailable"}},
+        status_code=500,
+        content={"detail": {"code": "database_error"}},
     )
 
 app.add_middleware(
