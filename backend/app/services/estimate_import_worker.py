@@ -35,10 +35,25 @@ from app.services.taxonomy_snapshot_service import load_immutable_taxonomy_snaps
 OUTBOX_MAX_PUBLICATION_ATTEMPTS = 6
 MATERIALIZATION_ROW_BATCH_SIZE = 250
 SEMANTIC_RESOLUTION_FAILURE = "semantic_stage_option_resolution_failed"
+GENERIC_IMPORT_FAILURE = "estimate_import_failed"
 
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _exception_reason_code(exc: Exception) -> str:
+    """Return a stable DB-safe reason code; keep verbose diagnostics in reason_details."""
+    for attribute in ("reason_code", "code"):
+        value = getattr(exc, attribute, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:128]
+    message = str(exc).strip()
+    if message == SEMANTIC_RESOLUTION_FAILURE:
+        return SEMANTIC_RESOLUTION_FAILURE
+    if message and len(message) <= 128 and re.fullmatch(r"[a-z0-9][a-z0-9_.:-]*", message):
+        return message
+    return GENERIC_IMPORT_FAILURE
 
 
 @dataclass(frozen=True)
@@ -970,13 +985,13 @@ class EstimateImportWorker:
             await self.db.rollback()
             job = await self.db.get(EstimateImportJob, str(job_id))
             batch = await self.db.get(EstimateBatch, str(job.estimate_batch_id)) if job is not None else None
+            reason_code = _exception_reason_code(exc)
             if batch is not None:
                 batch.import_status = "blocked"
                 batch.calculation_status = "blocked"
-                batch.calculation_block_reason = str(exc)
+                batch.calculation_block_reason = reason_code
                 batch.is_active = False
             job.status = "blocked"
-            reason_code = SEMANTIC_RESOLUTION_FAILURE if str(exc) == SEMANTIC_RESOLUTION_FAILURE else str(exc)
             job.reason_code = reason_code
             job.reason_details = {
                 "exception_type": type(exc).__name__,

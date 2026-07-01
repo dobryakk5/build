@@ -169,6 +169,8 @@ async def _process_stage10_estimate_import_queue_async() -> dict[str, int | str]
                 try:
                     result = await worker.run_job(str(job_id))
                 finally:
+                    if db.in_transaction():
+                        await db.rollback()
                     db.sync_session.expunge_all()
                     gc.collect()
                 if result.status == "completed":
@@ -182,6 +184,8 @@ async def _process_stage10_estimate_import_queue_async() -> dict[str, int | str]
                 "blocked": blocked,
             }
         finally:
+            if db.in_transaction():
+                await db.rollback()
             await db.execute(
                 text("SELECT pg_advisory_unlock(:lock_id)").bindparams(
                     lock_id=STAGE10_IMPORT_ADVISORY_LOCK_ID

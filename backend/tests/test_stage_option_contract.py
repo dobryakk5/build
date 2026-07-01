@@ -7,7 +7,11 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from app.services.floor_structure_service import build_stage_instances, validate_building_params
-from app.services.estimate_import_worker import _apply_confirmed_stage_options
+from app.services.estimate_import_worker import (
+    GENERIC_IMPORT_FAILURE,
+    _apply_confirmed_stage_options,
+    _exception_reason_code,
+)
 from app.models import KtpEstimateSession
 from app.services.ktp_estimate_service import _materialize_wbs
 from app.services.semantic_options_service import (
@@ -167,3 +171,13 @@ def test_no_finish_materializes_visible_empty_not_applicable_group():
     assert groups[0].execution_applicability == "not_applicable"
     assert groups[0].status == "not_applicable"
     assert groups[0].duration_days is None
+
+
+def test_import_failure_reason_is_stable_and_fits_database_column():
+    class DomainFailure(RuntimeError):
+        reason_code = "domain_failure"
+
+    assert _exception_reason_code(DomainFailure("verbose details")) == "domain_failure"
+    assert _exception_reason_code(RuntimeError("preview_rows_missing")) == "preview_rows_missing"
+    assert _exception_reason_code(RuntimeError("x" * 500)) == GENERIC_IMPORT_FAILURE
+    assert len(_exception_reason_code(RuntimeError("x" * 500))) <= 128

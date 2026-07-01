@@ -674,7 +674,7 @@ export default function UploadPage() {
         setPreview(null);
         setJobId(null);
         setStage10PendingBatchId(res.estimate_batch_id);
-        setStage10ImportNotice("Процесс распознавания больших смет может длится несколько минут");
+        setStage10ImportNotice("Процесс распознавания больших смет может длиться несколько минут");
         trackActivity("ESTIMATE_UPLOAD_JOB_CREATED", {
           projectId: id,
           entityType: "estimate_batch",
