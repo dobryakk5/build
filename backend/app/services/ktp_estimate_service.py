@@ -1452,7 +1452,22 @@ def _sort_stage_groups(
     sequence_locked: bool = False,
 ) -> list[Any]:
     key = _locked_stage_group_sort_key if sequence_locked else _legacy_stage_group_sort_key
-    return sorted(groups, key=key)
+    ordered = sorted(groups, key=key)
+    if not sequence_locked:
+        return ordered
+
+    # Taxonomy snapshots created before the 2.7.11/2.7.12 sequence fix contain
+    # these two global stages in reverse catalog order. Keep floor-loop ordering
+    # intact and repair only that adjacent legacy pair on read/materialization.
+    for index in range(len(ordered) - 1):
+        current = str(_group_value(ordered[index], "template_stage_number") or "")
+        following = str(
+            _group_value(ordered[index + 1], "template_stage_number") or ""
+        )
+        if current == "2.7.12" and following == "2.7.11":
+            ordered[index], ordered[index + 1] = ordered[index + 1], ordered[index]
+            break
+    return ordered
 
 
 def _assign_locked_wbs_codes(groups: list[Any]) -> None:

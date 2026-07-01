@@ -58,7 +58,7 @@ def test_locked_sequence_two_floors_with_basement_exact_order() -> None:
     assert [stage["template_stage_number"] for stage in stages] == [
         "2.7.1", "2.7.2", "2.7.3", "2.7.4", "2.7.5", "2.7.6", "2.7.7",
         "2.7.8", "2.7.9", "2.7.10", "2.7.8", "2.7.9", "2.7.10",
-        "2.7.12", "2.7.11", "2.7.13", "2.7.14", "2.7.15", "2.7.16",
+        "2.7.11", "2.7.12", "2.7.13", "2.7.14", "2.7.15", "2.7.16",
     ]
     assert [stage["sort_order"] for stage in stages] == list(range(1000, 20000, 1000))
     assert [stage["title"] for stage in stages] == [
@@ -75,12 +75,32 @@ def test_locked_sequence_two_floors_with_basement_exact_order() -> None:
         "Кладка наружных и внутренних несущих стен — 2 этаж",
         "Устройство перемычек — 2 этаж",
         "Устройство перекрытия — 2 этаж",
-        "Устройство верхнего армопояса и крепление мауэрлата",
         "Устройство внутренних перегородок — этажи 1–2",
+        "Устройство верхнего армопояса и крепление мауэрлата",
         "Утепление фасадных стен",
         "Кровельные работы",
         "Оконные и дверные блоки",
         "Наружная фасадная отделка",
+    ]
+
+
+def test_locked_group_sort_repairs_legacy_12_before_11_pair() -> None:
+    from app.services.ktp_estimate_service import _sort_stage_groups
+
+    groups = [
+        SimpleNamespace(id="10", template_stage_number="2.7.10", sort_order=7000, title="10"),
+        SimpleNamespace(id="12", template_stage_number="2.7.12", sort_order=8000, title="12"),
+        SimpleNamespace(id="11", template_stage_number="2.7.11", sort_order=9000, title="11"),
+        SimpleNamespace(id="13", template_stage_number="2.7.13", sort_order=10000, title="13"),
+    ]
+
+    ordered = _sort_stage_groups(groups, sequence_locked=True)
+
+    assert [group.template_stage_number for group in ordered] == [
+        "2.7.10",
+        "2.7.11",
+        "2.7.12",
+        "2.7.13",
     ]
 
 

@@ -220,6 +220,19 @@ function floorSections(groups: KtpWbsGroup[], sequenceLocked = false) {
       : compareStageGroups,
   );
   if (sequenceLocked) {
+    // Older immutable taxonomy snapshots placed the global 2.7.12 stage
+    // immediately before 2.7.11. Correct that legacy display pair without
+    // disturbing the per-floor 2.7.8 → 2.7.9 → 2.7.10 loops.
+    const reversedPairIndex = sorted.findIndex((group, index) => (
+      group.template_stage_number === "2.7.12"
+      && sorted[index + 1]?.template_stage_number === "2.7.11"
+    ));
+    if (reversedPairIndex >= 0) {
+      [sorted[reversedPairIndex], sorted[reversedPairIndex + 1]] = [
+        sorted[reversedPairIndex + 1],
+        sorted[reversedPairIndex],
+      ];
+    }
     return [{ key: "__locked__", title: "", showTitle: false as const, groups: sorted }];
   }
   const hasFloors = sorted.some((group) => group.floor_number != null || group.floor_label);
