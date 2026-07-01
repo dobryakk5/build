@@ -190,3 +190,11 @@ def test_projection_status_storage_fits_longest_contract_value():
     longest = max(map(len, PROJECTION_GENERATION_STATUS_VALUES))
     assert StageInstanceProjectionSummary.__table__.c.projection_generation_status.type.length >= longest
     assert EstimateBatch.__table__.c.projection_generation_status.type.length >= longest
+
+
+def test_wbs_quantity_source_storage_fits_longest_contract_value():
+    from app.models import KtpWbsItem
+    from app.services.quantity_projection_service import QUANTITY_SOURCE_VALUES
+
+    longest = max(map(len, QUANTITY_SOURCE_VALUES))
+    assert KtpWbsItem.__table__.c.quantity_source.type.length >= longest

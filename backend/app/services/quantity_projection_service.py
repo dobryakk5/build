@@ -16,6 +16,21 @@ from typing import Any, Callable, Iterable
 
 PROJECTION_VERSION = "brick-house-quantity-projection-v1"
 
+# Persisted in ``ktp_wbs_items.quantity_source``. Keep the database contract
+# large enough for every value emitted by the projection pipeline.
+QUANTITY_SOURCE_VALUES = frozenset(
+    {
+        "ai_estimated",
+        "derived_from_operation",
+        "estimate",
+        "explicit",
+        "inherited_from_floor_1",
+        "no_quantity",
+        "user",
+        "verified_model",
+    }
+)
+
 
 @dataclass(frozen=True)
 class QuantityProjectionReport:

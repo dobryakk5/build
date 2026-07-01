@@ -164,7 +164,7 @@ class KtpWbsItem(Base, TimestampMixin):
     unit: Mapped[str | None] = mapped_column(String(50))
     quantity: Mapped[float | None] = mapped_column(Numeric(12, 3))
     # estimate | ai_estimated | user
-    quantity_source: Mapped[str | None] = mapped_column(String(16))
+    quantity_source: Mapped[str | None] = mapped_column(String(32))
     # pending | accepted | rejected
     review_status: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="accepted"
