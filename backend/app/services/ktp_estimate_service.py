@@ -524,6 +524,12 @@ async def get_wbs(db: AsyncSession, project_id: str, session_id: str) -> dict[st
         )
     )
     groups = _sort_stage_groups(groups, sequence_locked=sequence_policy.locked)
+    batch = await db.get(EstimateBatch, session.estimate_batch_id)
+    groups = _filter_visible_locked_groups(
+        groups,
+        batch=batch,
+        sequence_locked=sequence_policy.locked,
+    )
     await _attach_stage_review_metadata(db, groups)
     group_ids = [g.id for g in groups]
     deps = (
@@ -1462,6 +1468,53 @@ def _assign_locked_wbs_codes(groups: list[Any]) -> None:
         ).strip()
         if re.fullmatch(r"2\.7\.\d+", template_number):
             setattr(group, "wbs_code", template_number)
+
+
+def _expected_locked_stage_instance_ids_from_batch(
+    batch: EstimateBatch | None,
+) -> set[str] | None:
+    if batch is None:
+        return None
+    if not (
+        isinstance(batch.taxonomy_snapshot, dict)
+        and batch.taxonomy_snapshot.get("snapshot_content_hash")
+        and batch.taxonomy_snapshot.get("snapshot_schema_version")
+    ):
+        return None
+    try:
+        stages, _source, _snapshot = _stage_instances_from_batch_snapshot(batch)
+    except Exception:  # noqa: BLE001 - read path must not break legacy sessions
+        logger.exception(
+            "Cannot resolve expected locked stage instances for batch %s",
+            getattr(batch, "id", None),
+        )
+        return None
+    if not any(stage.get("sequence_mode") == "locked" for stage in stages):
+        return None
+    return {
+        str(stage.get("stage_instance_id"))
+        for stage in stages
+        if stage.get("stage_instance_id")
+        and str(stage.get("execution_applicability") or "applicable") == "applicable"
+    }
+
+
+def _filter_visible_locked_groups(
+    groups: list[Any],
+    *,
+    batch: EstimateBatch | None,
+    sequence_locked: bool,
+) -> list[Any]:
+    if not sequence_locked:
+        return groups
+    expected_stage_ids = _expected_locked_stage_instance_ids_from_batch(batch)
+    if expected_stage_ids is None:
+        return groups
+    return [
+        group
+        for group in groups
+        if str(getattr(group, "stage_instance_id", "") or "") in expected_stage_ids
+    ]
 
 
 def _estimate_stage_number(est: Estimate) -> str | None:

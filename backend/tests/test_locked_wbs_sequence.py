@@ -17,6 +17,7 @@ from app.services.ktp_floor_sequence_service import build_locked_sequence_depend
 from app.services.ktp_sequence_policy_service import SequencePolicy, sequence_policy_from_snapshot
 from app.services.quantity_projection_service import enrich_quantity_projections
 from app.services.stage_classifier import StageClassifier
+from app.services.taxonomy_snapshot_service import build_immutable_taxonomy_snapshot
 from app.services.work_taxonomy_service import get_sequential_scoring_policy
 
 
@@ -319,6 +320,49 @@ def test_locked_materialization_keeps_empty_taxonomy_groups() -> None:
     ]
     assert any(group.stage_number == "2.7.F1.10" for group in groups)
     assert next(group for group in groups if group.template_stage_number == "2.7.11").floor_kind == "aggregate"
+
+
+def test_visible_locked_groups_follow_current_building_params_and_options() -> None:
+    from app.services.ktp_estimate_service import _filter_visible_locked_groups
+
+    current_batch = SimpleNamespace(
+        id="batch-current",
+        project_variant_id="residential_construction_kirpichnye_doma",
+        building_params={
+            "floors_count": 1,
+            "has_basement": False,
+            "has_mansard": False,
+        },
+        project_structure_options={
+            "residential_construction.fundamentnye_raboty": "usp",
+            "residential_construction.ustroystvo_peremychek_nad_proemami_kladki_etazha": "metal",
+            "residential_construction.ustroystvo_perekrytiy_etazha": "monolithic_rc",
+            "residential_construction.ustroystvo_vnutrennih_peregorodok_etazha": "block",
+            "residential_construction.naruzhnaya_fasadnaya_otdelka": "no_finish",
+        },
+        taxonomy_snapshot=build_immutable_taxonomy_snapshot(
+            project_variant_id="residential_construction_kirpichnye_doma",
+        ).to_json(),
+    )
+    stale_groups = [
+        SimpleNamespace(
+            stage_instance_id=stage["stage_instance_id"],
+            template_stage_number=stage["template_stage_number"],
+        )
+        for stage in _stages(floors=1, basement=True, mansard=False)
+    ]
+
+    visible = _filter_visible_locked_groups(
+        stale_groups,
+        batch=current_batch,
+        sequence_locked=True,
+    )
+    visible_templates = [group.template_stage_number for group in visible]
+
+    assert "2.7.3" not in visible_templates
+    assert "2.7.7" not in visible_templates
+    assert "2.7.16" not in visible_templates
+    assert "2.7.15" in visible_templates
 
 
 @pytest.mark.asyncio

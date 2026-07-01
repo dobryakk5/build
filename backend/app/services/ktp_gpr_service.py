@@ -41,7 +41,10 @@ from app.services.gantt_calculations import (
     calculate_labor_hours,
     calculate_working_days,
 )
-from app.services.ktp_estimate_service import gpr_blocker
+from app.services.ktp_estimate_service import (
+    _filter_visible_locked_groups,
+    gpr_blocker,
+)
 from app.services.ktp_sequence_policy_service import (
     SequencePolicy,
     sequence_policy_from_batch,
@@ -154,6 +157,11 @@ async def _process_gpr(job_id: str) -> None:
                     .options(selectinload(KtpWbsGroup.items))
                     .order_by(KtpWbsGroup.sort_order)
                 )
+            )
+            all_groups = _filter_visible_locked_groups(
+                all_groups,
+                batch=batch,
+                sequence_locked=sequence_policy.locked,
             )
             # только принятые работы — НЕ мутируем relationship (delete-orphan),
             # держим отдельный список на не-mapped атрибуте группы
