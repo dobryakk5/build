@@ -15,9 +15,13 @@ def upgrade() -> None:
     op.execute(
         """
         ALTER TABLE stage_instance_projection_summaries
-            ALTER COLUMN projection_generation_status TYPE varchar(64);
+            ALTER COLUMN projection_generation_status TYPE varchar(64)
+        """
+    )
+    op.execute(
+        """
         ALTER TABLE estimate_batches
-            ALTER COLUMN projection_generation_status TYPE varchar(64);
+            ALTER COLUMN projection_generation_status TYPE varchar(64)
         """
     )
 
@@ -27,13 +31,25 @@ def downgrade() -> None:
         """
         UPDATE stage_instance_projection_summaries
         SET projection_generation_status = 'blocked'
-        WHERE length(projection_generation_status) > 32;
+        WHERE length(projection_generation_status) > 32
+        """
+    )
+    op.execute(
+        """
         UPDATE estimate_batches
         SET projection_generation_status = 'blocked'
-        WHERE length(projection_generation_status) > 32;
+        WHERE length(projection_generation_status) > 32
+        """
+    )
+    op.execute(
+        """
         ALTER TABLE stage_instance_projection_summaries
-            ALTER COLUMN projection_generation_status TYPE varchar(32);
+            ALTER COLUMN projection_generation_status TYPE varchar(32)
+        """
+    )
+    op.execute(
+        """
         ALTER TABLE estimate_batches
-            ALTER COLUMN projection_generation_status TYPE varchar(32);
+            ALTER COLUMN projection_generation_status TYPE varchar(32)
         """
     )

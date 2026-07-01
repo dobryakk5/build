@@ -15,8 +15,11 @@ def upgrade() -> None:
     op.execute(
         """
         ALTER TABLE ktp_wbs_groups
-            ADD COLUMN IF NOT EXISTS wbs_code varchar(64);
-
+            ADD COLUMN IF NOT EXISTS wbs_code varchar(64)
+        """
+    )
+    op.execute(
+        """
         WITH catalog_codes AS (
             SELECT
                 g.id,
@@ -40,7 +43,7 @@ def upgrade() -> None:
         FROM catalog_codes
         WHERE g.id = catalog_codes.id
           AND catalog_codes.wbs_code ~ '^2[.]7[.][0-9]+$'
-          AND g.wbs_code IS DISTINCT FROM catalog_codes.wbs_code;
+          AND g.wbs_code IS DISTINCT FROM catalog_codes.wbs_code
         """
     )
 
@@ -48,6 +51,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute(
         """
-        ALTER TABLE ktp_wbs_groups DROP COLUMN IF EXISTS wbs_code;
+        ALTER TABLE ktp_wbs_groups DROP COLUMN IF EXISTS wbs_code
         """
     )
