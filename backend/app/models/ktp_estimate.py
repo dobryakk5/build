@@ -171,7 +171,8 @@ class KtpWbsItem(Base, TimestampMixin):
     )
     ai_reason: Mapped[str | None] = mapped_column(Text)
     # Этап 3 — нормы и длительность
-    norm_source: Mapped[str | None] = mapped_column(String(8))  # enir | fer | ai
+    # enir | fer | ai | manual | rate_catalog | user_catalog | catalog_independent
+    norm_source: Mapped[str | None] = mapped_column(String(32))
     norm_ref: Mapped[str | None] = mapped_column(String(64))
     # norm_time | vyrabotka | fallback | manual
     norm_kind: Mapped[str | None] = mapped_column(String(12))

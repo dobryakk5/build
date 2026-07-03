@@ -784,6 +784,14 @@ def test_duration_calculations_share_validation_contract():
         ) is None
 
     assert calculate_working_days(40.4, 5, 8) == 2
+
+
+def test_ktp_norm_source_storage_fits_canonical_rate_sources():
+    from app.models import KtpWbsItem
+
+    length = KtpWbsItem.__table__.c.norm_source.type.length
+    assert length is not None
+    assert length >= len("catalog_independent")
     assert WorkRateSelectionService.calculate_duration(
         40.4,
         crew_size=5,
