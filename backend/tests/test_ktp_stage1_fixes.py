@@ -52,6 +52,7 @@ def make_batch(*, with_snapshot: bool = True) -> EstimateBatch:
     return EstimateBatch(
         id=BATCH_ID,
         project_id=PROJECT_ID,
+        rate_owner_user_id="00000000-0000-0000-0000-000000000003",
         name="brick test",
         estimate_kind=2,
         estimate_type_id="residential_construction",

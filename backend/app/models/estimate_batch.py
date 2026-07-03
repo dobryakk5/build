@@ -24,6 +24,11 @@ class EstimateBatch(Base, SoftDeleteMixin):
         ForeignKey("projects.id", ondelete="CASCADE"),
         nullable=False,
     )
+    rate_owner_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     estimate_kind: Mapped[int] = mapped_column(SmallInteger, nullable=False)
     start_date: Mapped[date | None] = mapped_column(Date)

@@ -1,11 +1,11 @@
 """Rate selection, labour calculations and package-conflict detection."""
 from __future__ import annotations
 
-import math
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+from app.services.gantt_calculations import calculate_working_days
 from app.services.work_context_rules import (
     build_rate_context_text,
     has_any,
@@ -17,10 +17,10 @@ from app.services.work_context_rules import (
     resolve_special_masonry_operation,
 )
 from app.services.work_rate_import_service import normalize_name
-from app.services.user_work_rate_override_service import (
-    UserWorkRateOverride,
-    canonical_applicability_hash,
-    normalize_applicability,
+from app.services.user_work_rate_service import (
+    UserWorkRateRecord,
+    build_work_rate_key,
+    find_compatible_user_rate,
 )
 from app.services.work_rate_models import (
     MAPPING_EXCLUDED,
@@ -155,7 +155,28 @@ class WorkRateSelectionService:
     @classmethod
     def _item_applicability(cls, item: WorkRateItem, mapping: WorkRateMapping | None = None) -> dict[str, Any]:
         expected = dict(item.applicability_json or (item.source_payload or {}).get("applicability") or {})
-        for key, value in cls._inferred_item_applicability(item, mapping).items():
+        inferred = cls._inferred_item_applicability(item, mapping)
+        operation_code = mapping.operation_code if mapping else None
+        operation_fields = {
+            "thermal_insulation": {"insulation_location", "insulation_material"},
+            "roof_structure_installation": {"roof_structure_material"},
+            "roof_covering_installation": {"roof_covering_material", "base_type"},
+            "membrane_installation": {"membrane_type", "installation_position"},
+            "wind_membrane_installation": {"membrane_type", "installation_position"},
+        }
+        contextual_fields = {
+            "insulation_location",
+            "insulation_material",
+            "roof_structure_material",
+            "roof_covering_material",
+            "base_type",
+            "membrane_type",
+            "installation_position",
+        }
+        allowed_contextual = operation_fields.get(operation_code, set())
+        for key, value in inferred.items():
+            if key in contextual_fields and key not in allowed_contextual:
+                continue
             expected.setdefault(key, value)
         return expected
 
@@ -207,32 +228,125 @@ class WorkRateSelectionService:
         return True
 
     @staticmethod
-    def _override_for_item(
+    def _user_rate_result(
         *,
-        item: WorkRateItem,
+        user_rate: UserWorkRateRecord,
+        quantity: float | None,
         operation_code: str,
+        suggested_operation_code: str | None,
+        taxonomy_code: str,
+        object_scope_code: str | None,
+        rate_context_code: str | None,
+        rate_variant_code: str | None,
+    ) -> RateSelectionResult:
+        labor = float(user_rate.labor_hours_per_unit)
+        quantity_missing = quantity is None or quantity <= 0
+        return RateSelectionResult(
+            status="resolved",
+            rate_source="user_catalog",
+            rate_item_id=None,
+            rate_mapping_id=None,
+            selection_source="user_catalog",
+            selection_confidence=1.0,
+            operation_code=operation_code,
+            suggested_operation_code=suggested_operation_code,
+            taxonomy_code=taxonomy_code,
+            object_scope_code=object_scope_code,
+            rate_context_code=rate_context_code,
+            rate_variant_code=rate_variant_code,
+            rate_auto_applicable=True,
+            unit_code=user_rate.unit_code,
+            labor_min=labor,
+            labor_max=labor,
+            labor_avg=labor,
+            labor_basis="user_catalog",
+            norm_base_quantity=1.0,
+            resolution_status="resolved_by_user_catalog",
+            requires_user_input=False,
+            user_rate_id=user_rate.id,
+            user_rate_owner_id=user_rate.user_id,
+            needs_review=quantity_missing,
+            review_reason="quantity_missing" if quantity_missing else None,
+        )
+
+    def _user_fallback(
+        self,
+        *,
         user_id: str | None,
-        user_overrides: Iterable[UserWorkRateOverride] | None,
-        applicability: dict[str, Any] | None,
-    ) -> UserWorkRateOverride | None:
-        if not user_id or not item.source_rate_id:
-            return None
-        expected_hash = canonical_applicability_hash(applicability)
-        for row in user_overrides or ():
-            if not row.is_active or row.user_id != str(user_id):
-                continue
-            if row.source_rate_id != item.source_rate_id:
-                continue
-            if row.selected_target_code != operation_code:
-                continue
-            if row.unit_code != str(item.unit_code or ""):
-                continue
-            if abs(float(row.norm_base_quantity) - float(item.norm_base_quantity or 1)) > 1e-9:
-                continue
-            if row.applicability_hash != expected_hash:
-                continue
-            return row
-        return None
+        user_rates: Iterable[UserWorkRateRecord] | None,
+        taxonomy_code: str,
+        operation_code: str,
+        object_scope_code: str | None,
+        rate_context_code: str | None,
+        rate_variant_code: str | None,
+        unit_code: str | None,
+        quantity: float | None,
+        suggested_operation_code: str | None,
+        candidates: list[dict[str, Any]] | None = None,
+        original_reason: str | None = None,
+        original_sub_reason: str | None = None,
+    ) -> RateSelectionResult:
+        if operation_code in self.operation_packages:
+            return RateSelectionResult(
+                status="needs_decomposition",
+                rate_source=None,
+                operation_code=operation_code,
+                suggested_operation_code=suggested_operation_code,
+                taxonomy_code=taxonomy_code,
+                object_scope_code=object_scope_code,
+                rate_context_code=rate_context_code,
+                rate_variant_code=rate_variant_code,
+                unit_code=unit_code,
+                needs_review=True,
+                review_reason="atomic_work_required",
+                review_sub_reason="package_expansion_required",
+                rate_auto_applicable=False,
+                candidates=list(candidates or []),
+            )
+        if unit_code:
+            key = build_work_rate_key(
+                taxonomy_code=taxonomy_code,
+                operation_code=operation_code,
+                object_scope_code=object_scope_code,
+                rate_context_code=rate_context_code,
+                rate_variant_code=rate_variant_code,
+                unit_code=unit_code,
+            )
+            user_rate = find_compatible_user_rate(
+                rows=user_rates,
+                user_id=user_id,
+                key=key,
+            )
+            if user_rate is not None:
+                return self._user_rate_result(
+                    user_rate=user_rate,
+                    quantity=quantity,
+                    operation_code=operation_code,
+                    suggested_operation_code=suggested_operation_code,
+                    taxonomy_code=taxonomy_code,
+                    object_scope_code=object_scope_code,
+                    rate_context_code=rate_context_code,
+                    rate_variant_code=rate_variant_code,
+                )
+        return RateSelectionResult(
+            status="needs_user_rate",
+            rate_source=None,
+            selection_source=None,
+            operation_code=operation_code,
+            suggested_operation_code=suggested_operation_code,
+            taxonomy_code=taxonomy_code,
+            object_scope_code=object_scope_code,
+            rate_context_code=rate_context_code,
+            rate_variant_code=rate_variant_code,
+            unit_code=unit_code,
+            rate_auto_applicable=False,
+            resolution_status="needs_user_rate",
+            requires_user_input=True,
+            needs_review=True,
+            review_reason="user_rate_input_required",
+            review_sub_reason=original_sub_reason or original_reason or "rate_not_found_for_unit",
+            candidates=list(candidates or []),
+        )
 
     def select_rate(
         self,
@@ -240,6 +354,7 @@ class WorkRateSelectionService:
         taxonomy_code: str,
         operation_code: str,
         object_scope_code: str | None,
+        rate_context_code: str | None = None,
         quantity: float | None,
         unit_code: str | None,
         work_name: str | None = None,
@@ -252,10 +367,10 @@ class WorkRateSelectionService:
         mappings: Iterable[WorkRateMapping],
         sources: Iterable[WorkRateSource],
         user_id: str | None = None,
-        user_overrides: Iterable[UserWorkRateOverride] | None = None,
+        user_rates: Iterable[UserWorkRateRecord] | None = None,
         applicability: dict[str, Any] | None = None,
-        unit_conversion_overrides: dict[tuple[str, str], float] | None = None,
     ) -> RateSelectionResult:
+        """Resolve a rate in the strict order global -> user -> request."""
         work_text, section_context_text, source_context_text = build_rate_context_text(
             work_name=work_name,
             item_text=item_text,
@@ -264,10 +379,40 @@ class WorkRateSelectionService:
             section_description=section_description,
             section_parent_context=section_parent_context,
         )
-        special_operation = resolve_special_masonry_operation(
-            work_text,
-            section_context_text,
-        )
+        taxonomy_code = str(taxonomy_code or "").strip()
+        operation_code = str(operation_code or "").strip()
+        object_scope_code = str(object_scope_code or "").strip() or None
+        unit_code = str(unit_code or "").strip() or None
+        if not taxonomy_code or taxonomy_code == "unknown/needs_review":
+            return RateSelectionResult(
+                status="needs_clarification",
+                taxonomy_code=taxonomy_code or None,
+                operation_code=operation_code or None,
+                object_scope_code=object_scope_code,
+                unit_code=unit_code,
+                needs_review=True,
+                review_reason="work_classification_required",
+            )
+        if not operation_code:
+            return RateSelectionResult(
+                status="needs_clarification",
+                taxonomy_code=taxonomy_code,
+                object_scope_code=object_scope_code,
+                unit_code=unit_code,
+                needs_review=True,
+                review_reason="work_operation_required",
+            )
+        if not unit_code:
+            return RateSelectionResult(
+                status="needs_clarification",
+                taxonomy_code=taxonomy_code,
+                operation_code=operation_code,
+                object_scope_code=object_scope_code,
+                needs_review=True,
+                review_reason="work_unit_required",
+            )
+
+        special_operation = resolve_special_masonry_operation(work_text, section_context_text)
         expected_taxonomy = {
             "facade_cladding": "interior_finishing/facade_finishing",
             "arm_belt_masonry": "load_bearing_walls/arm_belts_lintels",
@@ -280,6 +425,7 @@ class WorkRateSelectionService:
             expected = expected_taxonomy.get(special_operation)
             if expected and taxonomy_code != expected:
                 return RateSelectionResult(
+                    status="needs_clarification",
                     operation_code=operation_code,
                     suggested_operation_code=special_operation,
                     taxonomy_code=taxonomy_code,
@@ -287,59 +433,129 @@ class WorkRateSelectionService:
                     unit_code=unit_code,
                     needs_review=True,
                     review_reason="special_masonry_operation_mismatch",
-                    rate_auto_applicable=False,
                 )
             effective_operation = special_operation
+
         effective_applicability = dict(applicability or {})
-        roof_context_result = None
-        if effective_operation == "roof_covering_installation":
-            roof_context_result = resolve_roof_covering_context(source_context_text)
-            if roof_context_result.context_code:
-                effective_applicability.setdefault("rate_context_code", roof_context_result.context_code)
-            for key, value in (roof_context_result.applicability or {}).items():
-                effective_applicability.setdefault(key, value)
+        selected_context = (
+            str(rate_context_code or "").strip()
+            or str(effective_applicability.get("rate_context_code") or "").strip()
+            or None
+        )
+        context_result = None
+        rate_variant_code: str | None = None
+        missing_variant_fields: list[str] = []
+        variant_review_reason: str | None = None
+        if effective_operation == "brick_masonry":
+            if selected_context is None:
+                context_result = resolve_masonry_context(source_context_text)
+        elif effective_operation == "roof_covering_installation":
+            if selected_context is None:
+                context_result = resolve_roof_covering_context(source_context_text)
         elif effective_operation == "thermal_insulation":
             context_result = resolve_insulation_context(source_context_text)
-            for key, value in (context_result.applicability or {}).items():
-                effective_applicability.setdefault(key, value)
         elif effective_operation == "roof_structure_installation":
             context_result = resolve_roof_structure_context(source_context_text)
-            for key, value in (context_result.applicability or {}).items():
-                effective_applicability.setdefault(key, value)
         elif effective_operation in {"membrane_installation", "wind_membrane_installation"}:
             context_result = resolve_membrane_context(source_context_text)
+        elif effective_operation == "facade_cladding":
+            selected_context = "facade"
+        elif effective_operation == "arm_belt_masonry":
+            selected_context = "brick_arm_belt"
+
+        if context_result is not None:
+            key_context_operation = effective_operation in {
+                "brick_masonry",
+                "roof_covering_installation",
+            }
+            if key_context_operation and context_result.context_code:
+                selected_context = context_result.context_code
+                effective_applicability["rate_context_code"] = selected_context
+            elif context_result.context_code:
+                # Stable canonical discriminator for personal rates. Unlike the
+                # full applicability blob, this contains only operation-specific
+                # material/location semantics and is reusable across projects,
+                # floors and stages.
+                rate_variant_code = context_result.context_code
             for key, value in (context_result.applicability or {}).items():
                 effective_applicability.setdefault(key, value)
-        elif effective_operation == "brick_masonry":
-            context_result = resolve_masonry_context(source_context_text)
-            if context_result.context_code:
-                effective_applicability.setdefault("rate_context_code", context_result.context_code)
-            if not context_result.needs_review:
-                if context_result.context_code == "interior_wall":
-                    effective_applicability.setdefault("installation_position", "interior_side")
-                elif context_result.context_code == "exterior_wall":
-                    effective_applicability.setdefault("installation_position", "exterior_side")
 
-        item_by_id = {item.id: item for item in items if item.is_active}
+            variant_requirements = {
+                "thermal_insulation": ("insulation_location", "insulation_material"),
+                "roof_structure_installation": ("roof_structure_material",),
+                "membrane_installation": ("membrane_type", "installation_position"),
+                "wind_membrane_installation": ("membrane_type", "installation_position"),
+            }
+            required_variant_fields = variant_requirements.get(effective_operation, ())
+            missing_variant_fields = [
+                field_name
+                for field_name in required_variant_fields
+                if not effective_applicability.get(field_name)
+            ]
+            variant_review_reason = context_result.review_reason or "rate_variant_required"
+            if key_context_operation and context_result.needs_review:
+                return RateSelectionResult(
+                    status="needs_clarification",
+                    operation_code=effective_operation,
+                    suggested_operation_code=suggested_operation,
+                    taxonomy_code=taxonomy_code,
+                    object_scope_code=object_scope_code,
+                    rate_context_code=None,
+                    rate_variant_code=rate_variant_code,
+                    unit_code=unit_code,
+                    needs_review=True,
+                    review_reason=context_result.review_reason or "rate_context_required",
+                )
+
+        item_rows = [item for item in items if item.is_active]
+        item_by_id = {item.id: item for item in item_rows}
         source_by_id = {source.id: source for source in sources if source.is_active}
-        operation_candidates: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource]] = []
-        rejected_applicability: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource]] = []
-        rejected_stage: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource]] = []
+        mapping_rows = [mapping for mapping in mappings if mapping.is_active]
 
-        for mapping in mappings:
-            if not mapping.is_active:
-                continue
+        relevant_scope_mappings = [
+            mapping
+            for mapping in mapping_rows
+            if mapping.mapping_mode not in {MAPPING_EXCLUDED, MAPPING_UNMAPPED}
+            and mapping.operation_code == effective_operation
+            and (not mapping.taxonomy_code or mapping.taxonomy_code == taxonomy_code)
+        ]
+        # Scope is mandatory only when every relevant canonical mapping is
+        # scope-specific. A mixture of generic and scoped mappings must not
+        # block a valid generic personal norm.
+        scope_is_required = bool(effective_applicability.get("object_scope_required")) or (
+            bool(relevant_scope_mappings) and all(
+                mapping.object_scope_code is not None
+                for mapping in relevant_scope_mappings
+            )
+        )
+        if scope_is_required and object_scope_code is None:
+            return RateSelectionResult(
+                status="needs_clarification",
+                operation_code=effective_operation,
+                suggested_operation_code=suggested_operation,
+                taxonomy_code=taxonomy_code,
+                object_scope_code=None,
+                rate_context_code=selected_context,
+                rate_variant_code=rate_variant_code,
+                unit_code=unit_code,
+                needs_review=True,
+                review_reason="object_scope_required",
+            )
+
+        global_candidates: list[tuple[int, float, WorkRateItem, WorkRateMapping, WorkRateSource]] = []
+        rejected_candidates: list[dict[str, Any]] = []
+        for mapping in mapping_rows:
             if mapping.mapping_mode in {MAPPING_EXCLUDED, MAPPING_UNMAPPED}:
                 continue
             if mapping.operation_code != effective_operation:
                 continue
             if mapping.taxonomy_code and mapping.taxonomy_code != taxonomy_code:
                 continue
-            if (
-                mapping.object_scope_code
-                and object_scope_code
-                and mapping.object_scope_code != object_scope_code
-            ):
+            # The reusable key is exact. Generic NULL and a concrete value are
+            # different scopes/contexts and must not silently substitute each other.
+            if mapping.object_scope_code != object_scope_code:
+                continue
+            if mapping.rate_context_code != selected_context:
                 continue
             item = item_by_id.get(mapping.rate_item_id)
             if item is None or not item.has_active_mapping:
@@ -349,279 +565,64 @@ class WorkRateSelectionService:
                 continue
             if source.source_kind == SOURCE_OBSERVATION and not item.approved_as_rate:
                 continue
-            item_applicability = self._item_applicability(item, mapping)
-            stage_keys = ("template_stage_numbers", "semantic_stage_option_ids", "floor_numbers", "floor_kinds")
-            if any(item_applicability.get(key) for key in stage_keys) and not self._item_applicability_matches(
-                item,
-                {
-                    key: effective_applicability.get(key)
-                    for key in ("template_stage_number", "semantic_stage_option_id", "floor_number", "floor_kind")
-                },
-                {key: item_applicability.get(key) for key in stage_keys if item_applicability.get(key)},
-            ):
-                rejected_stage.append((item, mapping, source))
+            if item.rate_value_mode == "user_defined_on_first_use":
                 continue
-            if not self._item_applicability_matches(item, effective_applicability, item_applicability):
-                rejected_applicability.append((item, mapping, source))
+            if not item.auto_applicable:
                 continue
-            operation_candidates.append((item, mapping, source))
-
-        if not operation_candidates:
-            reason = {
-                "brick_pillar_masonry": "brick_pillar_rate_not_available",
-                "vent_shaft_masonry": "vent_shaft_masonry_rate_not_available",
-                "facade_cladding": "facade_cladding_rate_not_available",
-            }.get(effective_operation, "no_approved_compatible_rate")
-            sub_reason = (
-                "stage_assignment_mismatch"
-                if rejected_stage
-                else "applicability_mismatch"
-                if rejected_applicability
-                else "package_expansion_required"
-                if effective_operation in self.operation_packages
-                else "atomic_rate_missing"
-            )
-            return RateSelectionResult(
-                operation_code=effective_operation,
-                suggested_operation_code=suggested_operation,
-                taxonomy_code=taxonomy_code,
-                object_scope_code=object_scope_code,
-                unit_code=unit_code,
-                needs_review=True,
-                review_reason=reason,
-                review_sub_reason=sub_reason,
-                rate_auto_applicable=False,
-                candidates=[
-                    {
-                        "rate_item_id": item.id,
-                        "rate_mapping_id": mapping.id,
-                        "source_rate_id": item.source_rate_id,
-                        "name": item.name,
-                        "unit_code": item.unit_code,
-                        "norm_base_quantity": item.norm_base_quantity,
-                        "rate_context_code": mapping.rate_context_code,
-                        "labor_avg": item.labor_avg,
-                        "rejected_reason": sub_reason,
-                        "applicability": self._item_applicability(item, mapping),
-                    }
-                    for item, mapping, _source in [*rejected_stage, *rejected_applicability][:10]
-                ],
-            )
-
-        compatible: list[tuple[WorkRateItem, WorkRateMapping, WorkRateSource, float]] = []
-        for item, mapping, source in operation_candidates:
-            factor = self.unit_conversion_factor(unit_code, item.unit_code)
-            if factor is None and item.unit_code and unit_conversion_overrides:
-                factor = unit_conversion_overrides.get((unit_code, item.unit_code))
-            if factor is not None:
-                compatible.append((item, mapping, source, factor))
-
-        if not compatible:
-            return RateSelectionResult(
-                operation_code=effective_operation,
-                suggested_operation_code=suggested_operation,
-                taxonomy_code=taxonomy_code,
-                object_scope_code=object_scope_code,
-                unit_code=unit_code,
-                needs_review=True,
-                review_reason="unit_incompatible",
-                review_sub_reason="quantity_conversion_required",
-                rate_auto_applicable=False,
-                candidates=[
-                    {
-                        "rate_item_id": item.id,
-                        "rate_mapping_id": mapping.id,
-                        "name": item.name,
-                        "unit_code": item.unit_code,
-                        "norm_base_quantity": item.norm_base_quantity,
-                        "labor_avg": item.labor_avg,
-                        "rate_context_code": mapping.rate_context_code,
-                    }
-                    for item, mapping, _source in operation_candidates[:10]
-                ],
-            )
-
-        selected_context: str | None = None
-        if effective_operation == "brick_masonry":
-            context_result = resolve_masonry_context(source_context_text)
-            selected_context = context_result.context_code
-            contextual_codes = {
-                mapping.rate_context_code
-                for _item, mapping, _source, _factor in compatible
-                if mapping.rate_context_code in {
-                    "exterior_wall", "interior_wall", "frame_infill"
-                }
-            }
-            if context_result.needs_review and contextual_codes:
-                return RateSelectionResult(
-                    operation_code=effective_operation,
-                    suggested_operation_code=suggested_operation,
-                    taxonomy_code=taxonomy_code,
-                    object_scope_code=object_scope_code,
-                    rate_context_code=None,
-                    unit_code=unit_code,
-                    needs_review=True,
-                    review_reason=context_result.review_reason,
-                    rate_auto_applicable=False,
-                )
-            if selected_context:
-                exact = [row for row in compatible if row[1].rate_context_code == selected_context]
-                no_context = [row for row in compatible if row[1].rate_context_code is None]
-                compatible = exact if exact else no_context
-                if not compatible:
-                    return RateSelectionResult(
-                        operation_code=effective_operation,
-                        suggested_operation_code=suggested_operation,
-                        taxonomy_code=taxonomy_code,
-                        object_scope_code=object_scope_code,
-                        rate_context_code=selected_context,
-                        unit_code=unit_code,
-                        needs_review=True,
-                        review_reason="no_approved_compatible_rate",
-                        rate_auto_applicable=False,
-                    )
-        elif effective_operation == "facade_cladding":
-            exact = [row for row in compatible if row[1].rate_context_code == "facade"]
-            no_context = [row for row in compatible if row[1].rate_context_code is None]
-            compatible = exact if exact else no_context
-            selected_context = "facade"
-        elif effective_operation == "arm_belt_masonry":
-            exact = [row for row in compatible if row[1].rate_context_code == "brick_arm_belt"]
-            no_context = [row for row in compatible if row[1].rate_context_code is None]
-            compatible = exact if exact else no_context
-            selected_context = "brick_arm_belt"
-        elif effective_operation == "roof_covering_installation":
-            selected_context = roof_context_result.context_code if roof_context_result else None
-            contextual_codes = {
-                mapping.rate_context_code
-                for _item, mapping, _source, _factor in compatible
-                if mapping.rate_context_code in {"metal_tile", "flexible_shingles"}
-            }
-            if selected_context:
-                exact = [row for row in compatible if row[1].rate_context_code == selected_context]
-                no_context = [row for row in compatible if row[1].rate_context_code is None]
-                compatible = exact if exact else no_context
-            elif contextual_codes:
-                return RateSelectionResult(
-                    operation_code=effective_operation,
-                    suggested_operation_code=suggested_operation,
-                    taxonomy_code=taxonomy_code,
-                    object_scope_code=object_scope_code,
-                    rate_context_code=None,
-                    unit_code=unit_code,
-                    needs_review=True,
-                    review_reason=(roof_context_result.review_reason if roof_context_result else "roof_covering_material_not_resolved"),
-                    rate_auto_applicable=False,
-                )
-
-        # A source row marked "по факту" is a hard user-scoped gate.
-        # It must never silently fall through to a global rate.
-        placeholders = [row for row in compatible if row[0].rate_value_mode == "user_defined_on_first_use"]
-        if placeholders:
-            placeholder_candidates: list[dict[str, Any]] = []
-            for item, mapping, _source, factor in placeholders:
-                override = self._override_for_item(
-                    item=item,
-                    operation_code=effective_operation,
-                    user_id=user_id,
-                    user_overrides=user_overrides,
-                    applicability=effective_applicability,
-                )
-                placeholder_candidates.append({
+            if item.unit_code != unit_code:
+                rejected_candidates.append({
                     "rate_item_id": item.id,
                     "rate_mapping_id": mapping.id,
-                    "source_rate_id": item.source_rate_id,
                     "name": item.name,
                     "unit_code": item.unit_code,
-                    "norm_base_quantity": item.norm_base_quantity,
-                    "conversion_factor": factor,
-                    "requires_user_input": override is None,
+                    "labor_avg": item.labor_avg,
+                    "rejected_reason": "unit_incompatible",
                 })
-                if override is not None:
-                    quantity_missing = quantity is None or quantity <= 0
-                    return RateSelectionResult(
-                        rate_item_id=item.id,
-                        rate_mapping_id=mapping.id,
-                        selection_source="user_override",
-                        selection_confidence=1.0,
-                        operation_code=effective_operation,
-                        suggested_operation_code=suggested_operation,
-                        taxonomy_code=taxonomy_code,
-                        object_scope_code=object_scope_code,
-                        rate_context_code=mapping.rate_context_code or selected_context,
-                        rate_auto_applicable=True,
-                        unit_code=item.unit_code,
-                        labor_min=override.labor_hours_per_norm,
-                        labor_max=override.labor_hours_per_norm,
-                        labor_avg=override.labor_hours_per_norm,
-                        labor_basis="user_override",
-                        norm_base_quantity=item.norm_base_quantity or 1.0,
-                        source_rate_id=item.source_rate_id,
-                        rate_value_mode=item.rate_value_mode,
-                        resolution_status="resolved_by_user_override",
-                        requires_user_input=False,
-                        user_override_id=override.id,
-                        user_override_scope="user",
-                        user_override_owner_id=override.user_id,
-                        applicability_hash=override.applicability_hash,
-                        applicability_json=normalize_applicability(effective_applicability),
-                        needs_review=quantity_missing,
-                        review_reason="quantity_missing" if quantity_missing else None,
-                        candidates=placeholder_candidates,
-                    )
-            item, mapping, _source, _factor = placeholders[0]
-            return RateSelectionResult(
-                rate_item_id=item.id,
-                rate_mapping_id=mapping.id,
-                selection_source="user_defined_on_first_use",
-                selection_confidence=mapping.confidence,
-                operation_code=effective_operation,
-                suggested_operation_code=suggested_operation,
-                taxonomy_code=taxonomy_code,
-                object_scope_code=object_scope_code,
-                rate_context_code=mapping.rate_context_code or selected_context,
-                rate_auto_applicable=False,
-                unit_code=item.unit_code,
-                norm_base_quantity=item.norm_base_quantity or 1.0,
-                source_rate_id=item.source_rate_id,
-                rate_value_mode=item.rate_value_mode,
-                resolution_status="requires_user_input",
-                requires_user_input=True,
-                applicability_hash=canonical_applicability_hash(effective_applicability),
-                applicability_json=normalize_applicability(effective_applicability),
-                needs_review=True,
-                review_reason="user_rate_input_required" if user_id else "user_rate_identity_required",
-                candidates=placeholder_candidates,
-            )
-
-        ranked: list[tuple[int, float, WorkRateItem, WorkRateMapping, float]] = []
-        provisional: list[tuple[int, float, WorkRateItem, WorkRateMapping, float]] = []
-        for item, mapping, source, factor in compatible:
+                continue
+            if item.labor_avg is None:
+                continue
+            item_applicability = self._item_applicability(item, mapping)
+            if not self._item_applicability_matches(item, effective_applicability, item_applicability):
+                rejected_candidates.append({
+                    "rate_item_id": item.id,
+                    "rate_mapping_id": mapping.id,
+                    "name": item.name,
+                    "unit_code": item.unit_code,
+                    "labor_avg": item.labor_avg,
+                    "rejected_reason": "applicability_mismatch",
+                })
+                continue
             priority = self._source_priority(source)
             if source.source_kind == SOURCE_OBSERVATION and item.approved_as_rate:
                 priority = 450
-            row = (priority, mapping.confidence, item, mapping, factor)
-            if item.resolution_status == "requires_manual_approval" and not item.auto_applicable:
-                provisional.append(row)
-            else:
-                ranked.append(row)
-        ranked.sort(key=lambda row: (row[0], row[1]), reverse=True)
-        provisional.sort(key=lambda row: (row[0], row[1]), reverse=True)
+            global_candidates.append((priority, mapping.confidence, item, mapping, source))
 
-        if not ranked and provisional:
-            _priority, confidence, item, mapping, factor = provisional[0]
+        if global_candidates:
+            global_candidates.sort(key=lambda row: (row[0], row[1]), reverse=True)
+            _priority, confidence, item, mapping, source = global_candidates[0]
+            quantity_missing = quantity is None or quantity <= 0
+            selection_source = "project_specific" if (
+                source.source_kind == SOURCE_MANUAL
+                or (source.source_kind == SOURCE_OBSERVATION and item.approved_as_rate)
+            ) else source.source_kind
             return RateSelectionResult(
+                status="resolved",
+                rate_source="global_catalog",
                 rate_item_id=item.id,
                 rate_mapping_id=mapping.id,
-                selection_source="provisional_catalog_candidate",
+                selection_source=selection_source,
                 selection_confidence=confidence,
                 operation_code=effective_operation,
                 suggested_operation_code=suggested_operation,
                 taxonomy_code=taxonomy_code,
                 object_scope_code=object_scope_code,
-                rate_context_code=mapping.rate_context_code or selected_context,
-                rate_auto_applicable=False,
+                rate_context_code=selected_context,
+                rate_variant_code=rate_variant_code,
+                rate_auto_applicable=True,
                 unit_code=item.unit_code,
+                price_min=item.price_min,
+                price_max=item.price_max,
+                price_avg=item.price_avg,
                 labor_min=item.labor_min,
                 labor_max=item.labor_max,
                 labor_avg=item.labor_avg,
@@ -629,112 +630,63 @@ class WorkRateSelectionService:
                 norm_base_quantity=item.norm_base_quantity or 1.0,
                 source_rate_id=item.source_rate_id,
                 rate_value_mode=item.rate_value_mode,
-                resolution_status=item.resolution_status,
-                needs_review=True,
-                review_reason="provisional_rate_requires_approval",
-                review_sub_reason="only_provisional_rate_available",
-                candidates=[{
-                    "rate_item_id": r[2].id, "rate_mapping_id": r[3].id,
-                    "source_rate_id": r[2].source_rate_id, "name": r[2].name,
-                    "unit_code": r[2].unit_code, "norm_base_quantity": r[2].norm_base_quantity,
-                    "rate_context_code": r[3].rate_context_code,
-                    "labor_avg": r[2].labor_avg, "confidence": r[1],
-                    "conversion_factor": r[4],
-                } for r in provisional[:10]],
+                resolution_status="resolved_by_global_catalog",
+                needs_review=quantity_missing,
+                review_reason="quantity_missing" if quantity_missing else None,
+                candidates=[
+                    {
+                        "rate_item_id": candidate_item.id,
+                        "rate_mapping_id": candidate_mapping.id,
+                        "source_id": candidate_item.source_id,
+                        "source_rate_id": candidate_item.source_rate_id,
+                        "name": candidate_item.name,
+                        "unit_code": candidate_item.unit_code,
+                        "norm_base_quantity": candidate_item.norm_base_quantity,
+                        "rate_context_code": candidate_mapping.rate_context_code,
+                        "labor_avg": candidate_item.labor_avg,
+                        "confidence": candidate_confidence,
+                    }
+                    for _, candidate_confidence, candidate_item, candidate_mapping, _ in global_candidates[:10]
+                ],
             )
 
-        if not ranked:
-            reason = (
-                "facade_cladding_rate_not_available"
-                if effective_operation == "facade_cladding"
-                else "no_approved_compatible_rate"
-            )
+        if missing_variant_fields:
             return RateSelectionResult(
+                status="needs_clarification",
                 operation_code=effective_operation,
                 suggested_operation_code=suggested_operation,
                 taxonomy_code=taxonomy_code,
                 object_scope_code=object_scope_code,
                 rate_context_code=selected_context,
+                rate_variant_code=rate_variant_code,
                 unit_code=unit_code,
                 needs_review=True,
-                review_reason=reason,
-                review_sub_reason="package_expansion_required" if effective_operation in self.operation_packages else "atomic_rate_missing",
-                rate_auto_applicable=False,
+                review_reason=variant_review_reason or "rate_variant_required",
+                review_sub_reason=",".join(missing_variant_fields),
             )
 
-        top_priority, top_confidence, top_item, top_mapping, conversion = ranked[0]
-        equivalent = [
-            row for row in ranked
-            if row[0] == top_priority and abs(row[1] - top_confidence) < 0.02
-        ]
-        candidate_rows = list(ranked[:10])
-        for row in provisional:
-            if len(candidate_rows) >= 10:
-                break
-            candidate_rows.append(row)
-        candidates = [
-            {
-                "rate_item_id": item.id,
-                "rate_mapping_id": mapping.id,
-                "source_id": item.source_id,
-                "source_rate_id": item.source_rate_id,
-                "name": item.name,
-                "unit_code": item.unit_code,
-                "norm_base_quantity": item.norm_base_quantity,
-                "rate_context_code": mapping.rate_context_code,
-                "price_avg": item.price_avg,
-                "labor_avg": item.labor_avg,
-                "confidence": confidence,
-                "conversion_factor": factor,
-            }
-            for _, confidence, item, mapping, factor in candidate_rows
-        ]
-        if len(equivalent) > 1:
-            return RateSelectionResult(
-                operation_code=effective_operation,
-                suggested_operation_code=suggested_operation,
-                taxonomy_code=taxonomy_code,
-                object_scope_code=object_scope_code,
-                rate_context_code=selected_context,
-                unit_code=unit_code,
-                needs_review=True,
-                review_reason="multiple_equivalent_rate_candidates",
-                rate_auto_applicable=False,
-                candidates=candidates,
-            )
-
-        source = source_by_id[top_item.source_id]
-        selection_source = "project_specific" if (
-            source.source_kind == SOURCE_MANUAL
-            or (source.source_kind == SOURCE_OBSERVATION and top_item.approved_as_rate)
-        ) else source.source_kind
-        quantity_missing = quantity is None or quantity <= 0
-        return RateSelectionResult(
-            rate_item_id=top_item.id,
-            rate_mapping_id=top_mapping.id,
-            selection_source=selection_source,
-            selection_confidence=top_confidence,
-            operation_code=effective_operation,
-            suggested_operation_code=suggested_operation,
+        original_reason = "unit_incompatible" if any(
+            row.get("rejected_reason") == "unit_incompatible"
+            for row in rejected_candidates
+        ) else "no_approved_compatible_rate"
+        return self._user_fallback(
+            user_id=user_id,
+            user_rates=user_rates,
             taxonomy_code=taxonomy_code,
+            operation_code=effective_operation,
             object_scope_code=object_scope_code,
-            rate_context_code=top_mapping.rate_context_code or selected_context,
-            rate_auto_applicable=True,
-            unit_code=top_item.unit_code,
-            price_min=top_item.price_min,
-            price_max=top_item.price_max,
-            price_avg=top_item.price_avg,
-            labor_min=top_item.labor_min,
-            labor_max=top_item.labor_max,
-            labor_avg=top_item.labor_avg,
-            labor_basis=top_item.labor_basis,
-            norm_base_quantity=top_item.norm_base_quantity or 1.0,
-            source_rate_id=top_item.source_rate_id,
-            rate_value_mode=top_item.rate_value_mode,
-            resolution_status=top_item.resolution_status,
-            needs_review=quantity_missing,
-            review_reason="quantity_missing" if quantity_missing else None,
-            candidates=candidates,
+            rate_context_code=selected_context,
+            rate_variant_code=rate_variant_code,
+            unit_code=unit_code,
+            quantity=quantity,
+            suggested_operation_code=suggested_operation,
+            candidates=rejected_candidates[:10],
+            original_reason=original_reason,
+            original_sub_reason=(
+                "quantity_conversion_required"
+                if original_reason == "unit_incompatible"
+                else "atomic_rate_missing"
+            ),
         )
 
     @staticmethod
@@ -781,9 +733,7 @@ class WorkRateSelectionService:
         crew_size: int | None,
         hours_per_day: float = 8.0,
     ) -> int | None:
-        if labor_hours is None or labor_hours <= 0 or not crew_size or crew_size <= 0 or hours_per_day <= 0:
-            return None
-        return max(1, math.ceil(labor_hours / (crew_size * hours_per_day)))
+        return calculate_working_days(labor_hours, crew_size, hours_per_day)
 
     @staticmethod
     def output_per_day(
@@ -814,9 +764,20 @@ class WorkRateSelectionService:
             return LaborResolution(manual_labor_hours, "manual")
 
         fallback_hours: float | None = None
-        if subtype_output_per_day and subtype_output_per_day > 0 and quantity and quantity > 0 and crew_size and crew_size > 0:
-            days = math.ceil(quantity / subtype_output_per_day)
-            fallback_hours = float(days * crew_size * hours_per_day)
+        if (
+            subtype_output_per_day
+            and subtype_output_per_day > 0
+            and quantity
+            and quantity > 0
+            and crew_size
+            and crew_size > 0
+            and hours_per_day > 0
+        ):
+            # Labour is continuous. Only duration is rounded to whole working
+            # days by calculate_working_days()/calculate_duration().
+            fallback_hours = float(
+                quantity / subtype_output_per_day * crew_size * hours_per_day
+            )
 
         sources: list[tuple[str, float | None]]
         if labor_source_mode == "manual":

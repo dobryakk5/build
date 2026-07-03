@@ -68,6 +68,39 @@ export interface EstimateBatch {
   created_at: string;
 }
 
+export interface UserWorkRate {
+  id: string;
+  user_id: string;
+  taxonomy_code: string;
+  operation_code: string;
+  object_scope_code?: string | null;
+  rate_context_code?: string | null;
+  rate_variant_code?: string | null;
+  unit_code: string;
+  labor_hours_per_unit: number;
+  work_name_snapshot: string;
+  source_estimate_batch_id?: string | null;
+  source_estimate_row_id?: string | null;
+  taxonomy_version_at_creation?: string | null;
+  is_active: boolean;
+}
+
+export interface SaveUserWorkRateResponse {
+  user_rate: UserWorkRate;
+  recalculation: {
+    matched_rows: number;
+    updated_rows: number;
+  };
+  rows: Array<{
+    id: string;
+    rate_status?: string | null;
+    rate_source?: string | null;
+    selected_user_rate_id?: string | null;
+    calculated_labor_hours?: number | null;
+    resolved_labor_hours?: number | null;
+  }>;
+}
+
 export type ParserProfile =
   | "auto"
   | "pdf_materials_labor"
@@ -964,27 +997,10 @@ export interface KtpSessionSubtype {
   // "estimate" — размер бригады взят из загрузки сметы (workers_count)
   crew_source: "default" | "manual" | "estimate" | "none";
   lag_source: "default" | "manual";
-  rate_unit_conversion?: {
-    conversion_status?: string;
-    conversion_method?: string;
-    input_quantity?: number;
-    source_quantity?: number;
-    input_unit?: string;
-    source_unit?: string;
-    target_unit?: string;
-    parameters?: Record<string, unknown>;
-    formula_version?: string;
-    conversion_factor?: number;
-    derived_quantity?: number;
-    confirmed_by_user_id?: string | null;
-    confirmed_at?: string;
-    [key: string]: unknown;
-  } | null;
   selected_rate_item_id?: string | null;
   selected_rate_mapping_id?: string | null;
   rate_unit_code?: string | null;
   item_unit_code?: string | null;
-  unit_conversion_factor?: number | null;
   labor_hours_per_unit_min?: number | null;
   labor_hours_per_unit_avg?: number | null;
   labor_hours_per_unit_max?: number | null;

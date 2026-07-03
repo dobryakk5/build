@@ -4,7 +4,7 @@ from app.services.work_rate_models import MAPPING_DIRECT, WorkRateItem, WorkRate
 from app.services.work_rate_selection_service import WorkRateSelectionService
 
 
-def test_rate_selection_uses_confirmed_conversion_when_source_unit_missing():
+def test_rate_selection_requires_source_unit_even_if_a_target_rate_exists():
     selector = WorkRateSelectionService()
     source = WorkRateSource(source_file="catalog.xlsx")
     item = WorkRateItem(
@@ -36,10 +36,9 @@ def test_rate_selection_uses_confirmed_conversion_when_source_unit_missing():
         items=[item],
         mappings=[mapping],
         sources=[source],
-        unit_conversion_overrides={(None, "m3"): 1.0},
     )
 
-    assert result.rate_item_id == item.id
-    assert result.unit_code == "m3"
-    assert result.rate_auto_applicable is True
-    assert result.review_reason is None
+    assert result.status == "needs_clarification"
+    assert result.rate_item_id is None
+    assert result.rate_auto_applicable is False
+    assert result.review_reason == "work_unit_required"

@@ -24162,22 +24162,21 @@
         },
         "user_rate_binding": {
           "persistence_scope": "user",
-          "storage_entity": "user_work_rate_overrides",
+          "storage_entity": "user_work_rates",
           "accepted_input_units": [
-            "person_shift",
             "person_hour"
           ],
-          "stored_unit": "person_hour_per_norm",
+          "stored_unit": "person_hour_per_unit",
           "global_catalog_mutation_allowed": false,
-          "saved_override_auto_applicable_for_same_user": true,
-          "selected_target_code_required": false,
+          "saved_user_rate_auto_applicable_for_same_user": true,
           "reuse_key": [
             "user_id",
-            "source_rate_id",
-            "selected_target_code",
-            "unit_code",
-            "norm_base_quantity",
-            "applicability_hash"
+            "taxonomy_code",
+            "operation_code",
+            "object_scope_code",
+            "rate_context_code",
+            "rate_variant_code",
+            "unit_code"
           ]
         }
       },
@@ -24267,22 +24266,21 @@
         },
         "user_rate_binding": {
           "persistence_scope": "user",
-          "storage_entity": "user_work_rate_overrides",
+          "storage_entity": "user_work_rates",
           "accepted_input_units": [
-            "person_shift",
             "person_hour"
           ],
-          "stored_unit": "person_hour_per_norm",
+          "stored_unit": "person_hour_per_unit",
           "global_catalog_mutation_allowed": false,
-          "saved_override_auto_applicable_for_same_user": true,
-          "selected_target_code_required": false,
+          "saved_user_rate_auto_applicable_for_same_user": true,
           "reuse_key": [
             "user_id",
-            "source_rate_id",
-            "selected_target_code",
-            "unit_code",
-            "norm_base_quantity",
-            "applicability_hash"
+            "taxonomy_code",
+            "operation_code",
+            "object_scope_code",
+            "rate_context_code",
+            "rate_variant_code",
+            "unit_code"
           ]
         }
       },
@@ -24458,22 +24456,21 @@
         },
         "user_rate_binding": {
           "persistence_scope": "user",
-          "storage_entity": "user_work_rate_overrides",
+          "storage_entity": "user_work_rates",
           "accepted_input_units": [
-            "person_shift",
             "person_hour"
           ],
-          "stored_unit": "person_hour_per_norm",
+          "stored_unit": "person_hour_per_unit",
           "global_catalog_mutation_allowed": false,
-          "saved_override_auto_applicable_for_same_user": true,
-          "selected_target_code_required": false,
+          "saved_user_rate_auto_applicable_for_same_user": true,
           "reuse_key": [
             "user_id",
-            "source_rate_id",
-            "selected_target_code",
-            "unit_code",
-            "norm_base_quantity",
-            "applicability_hash"
+            "taxonomy_code",
+            "operation_code",
+            "object_scope_code",
+            "rate_context_code",
+            "rate_variant_code",
+            "unit_code"
           ]
         }
       },
@@ -24999,22 +24996,21 @@
         },
         "user_rate_binding": {
           "persistence_scope": "user",
-          "storage_entity": "user_work_rate_overrides",
+          "storage_entity": "user_work_rates",
           "accepted_input_units": [
-            "person_shift",
             "person_hour"
           ],
-          "stored_unit": "person_hour_per_norm",
+          "stored_unit": "person_hour_per_unit",
           "global_catalog_mutation_allowed": false,
-          "saved_override_auto_applicable_for_same_user": true,
-          "selected_target_code_required": false,
+          "saved_user_rate_auto_applicable_for_same_user": true,
           "reuse_key": [
             "user_id",
-            "source_rate_id",
-            "selected_target_code",
-            "unit_code",
-            "norm_base_quantity",
-            "applicability_hash"
+            "taxonomy_code",
+            "operation_code",
+            "object_scope_code",
+            "rate_context_code",
+            "rate_variant_code",
+            "unit_code"
           ]
         }
       },
@@ -32572,22 +32568,21 @@
         },
         "user_rate_binding": {
           "persistence_scope": "user",
-          "storage_entity": "user_work_rate_overrides",
+          "storage_entity": "user_work_rates",
           "accepted_input_units": [
-            "person_shift",
             "person_hour"
           ],
-          "stored_unit": "person_hour_per_norm",
+          "stored_unit": "person_hour_per_unit",
           "global_catalog_mutation_allowed": false,
-          "saved_override_auto_applicable_for_same_user": true,
-          "selected_target_code_required": false,
+          "saved_user_rate_auto_applicable_for_same_user": true,
           "reuse_key": [
             "user_id",
-            "source_rate_id",
-            "selected_target_code",
-            "unit_code",
-            "norm_base_quantity",
-            "applicability_hash"
+            "taxonomy_code",
+            "operation_code",
+            "object_scope_code",
+            "rate_context_code",
+            "rate_variant_code",
+            "unit_code"
           ]
         }
       },
@@ -34319,22 +34314,21 @@
         },
         "user_rate_binding": {
           "persistence_scope": "user",
-          "storage_entity": "user_work_rate_overrides",
+          "storage_entity": "user_work_rates",
           "accepted_input_units": [
-            "person_shift",
             "person_hour"
           ],
-          "stored_unit": "person_hour_per_norm",
+          "stored_unit": "person_hour_per_unit",
           "global_catalog_mutation_allowed": false,
-          "saved_override_auto_applicable_for_same_user": true,
-          "selected_target_code_required": false,
+          "saved_user_rate_auto_applicable_for_same_user": true,
           "reuse_key": [
             "user_id",
-            "source_rate_id",
-            "selected_target_code",
-            "unit_code",
-            "norm_base_quantity",
-            "applicability_hash"
+            "taxonomy_code",
+            "operation_code",
+            "object_scope_code",
+            "rate_context_code",
+            "rate_variant_code",
+            "unit_code"
           ]
         }
       },
@@ -36072,22 +36066,21 @@
         },
         "user_rate_binding": {
           "persistence_scope": "user",
-          "storage_entity": "user_work_rate_overrides",
+          "storage_entity": "user_work_rates",
           "accepted_input_units": [
-            "person_shift",
             "person_hour"
           ],
-          "stored_unit": "person_hour_per_norm",
+          "stored_unit": "person_hour_per_unit",
           "global_catalog_mutation_allowed": false,
-          "saved_override_auto_applicable_for_same_user": true,
-          "selected_target_code_required": false,
+          "saved_user_rate_auto_applicable_for_same_user": true,
           "reuse_key": [
             "user_id",
-            "source_rate_id",
-            "selected_target_code",
-            "unit_code",
-            "norm_base_quantity",
-            "applicability_hash"
+            "taxonomy_code",
+            "operation_code",
+            "object_scope_code",
+            "rate_context_code",
+            "rate_variant_code",
+            "unit_code"
           ]
         }
       },

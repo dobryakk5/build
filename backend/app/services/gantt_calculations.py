@@ -16,12 +16,29 @@ def calculate_working_days(
     workers_count: int | None,
     hours_per_day: float | None = DEFAULT_HOURS_PER_DAY,
 ) -> int | None:
-    if labor_hours is None:
-        return None
+    """Return whole working days for a valid positive labour/capacity tuple.
 
-    workers = max(1, int(workers_count or 1))
-    norm = normalize_hours_per_day(hours_per_day)
-    return max(1, math.ceil(float(labor_hours) / (workers * norm)))
+    Missing workers are not silently treated as one worker: duration cannot be
+    derived until both labour and daily crew capacity are known. Rounding to a
+    whole shift belongs here, not in labour-hour calculation.
+    """
+    if labor_hours is None or workers_count is None or hours_per_day is None:
+        return None
+    try:
+        labor = float(labor_hours)
+        workers = int(workers_count)
+        norm = float(hours_per_day)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if (
+        not math.isfinite(labor)
+        or not math.isfinite(norm)
+        or labor <= 0
+        or workers <= 0
+        or norm <= 0
+    ):
+        return None
+    return math.ceil(labor / (workers * norm))
 
 
 def calculate_labor_hours(

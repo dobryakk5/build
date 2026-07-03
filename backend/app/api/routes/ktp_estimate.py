@@ -256,7 +256,6 @@ class SessionSubtypeOut(BaseModel):
     output_source: str = "none"
     crew_source: str = "none"
     lag_source: str = "default"
-    rate_unit_conversion: dict | None = None
     selected_rate_item_id: str | None = None
     selected_rate_mapping_id: str | None = None
     rate_unit_code: str | None = None
@@ -307,7 +306,6 @@ class SessionSubtypeOut(BaseModel):
             output_source=s.output_source or "none",
             crew_source=s.crew_source or "none",
             lag_source=s.lag_source,
-            rate_unit_conversion=getattr(s, "rate_unit_conversion", None),
             selected_rate_item_id=getattr(s, "selected_rate_item_id", None),
             selected_rate_mapping_id=getattr(s, "selected_rate_mapping_id", None),
             rate_unit_code=getattr(s, "rate_unit_code", None),
@@ -448,7 +446,6 @@ class SessionSubtypePatch(BaseModel):
     output_per_day: float | None = None
     crew_size: int | None = None
     lag_after_days: int | None = None
-    rate_unit_conversion: dict | None = None
     selected_rate_item_id: str | None = None
     selected_rate_mapping_id: str | None = None
 

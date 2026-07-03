@@ -551,6 +551,7 @@ class EstimatePreviewService:
             batch = EstimateBatch(
                 id=batch_id,
                 project_id=session.project_id,
+                rate_owner_user_id=session.owner_user_id,
                 name="DB preview import",
                 estimate_kind=int(estimate_type_snapshot.get("estimate_kind") or 1),
                 source_filename=None,

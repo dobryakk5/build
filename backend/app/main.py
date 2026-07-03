@@ -33,6 +33,7 @@ from app.api.routes.nw            import router as nw_router
 from app.api.routes.work_plan     import router as work_plan_router
 from app.api.routes.work_taxonomy import router as work_taxonomy_router
 from app.api.routes.work_rates    import create_work_rate_router
+from app.api.routes.user_work_rates import router as user_work_rates_router
 from app.api.routes.activity      import router as activity_router
 from app.api.routes.estimate_previews import router as estimate_previews_router
 from app.api.routes.estimate_batches import router as estimate_batches_router
@@ -148,6 +149,7 @@ app.include_router(nw_router)
 app.include_router(work_plan_router)
 app.include_router(work_taxonomy_router)
 app.include_router(work_rates_router)
+app.include_router(user_work_rates_router)
 app.include_router(estimate_previews_router)
 app.include_router(estimate_batches_router)
 app.include_router(estimate_import_operations_router)

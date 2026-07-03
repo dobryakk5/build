@@ -21,7 +21,6 @@ from app.services.work_rate_import_service import WorkRateImportService
 from app.services.work_rate_mapping_service import WorkRateMappingService
 from app.services.work_rate_selection_service import WorkRateSelectionService
 from app.services.work_rate_models import MAPPING_MODES, WorkRateMapping
-from app.services.user_work_rate_override_service import UserWorkRateOverrideRepository
 
 
 class CalculatePreviewRequest(BaseModel):
@@ -52,16 +51,6 @@ class UpdateRateRequest(BaseModel):
     auto_applicable: bool | None = None
     resolution_status: str | None = None
 
-
-class UpsertUserRateOverrideRequest(BaseModel):
-    source_rate_id: str
-    selected_target_code: str
-    unit_code: str
-    norm_base_quantity: float = Field(gt=0)
-    applicability: dict[str, Any] = Field(default_factory=dict)
-    input_value: float = Field(gt=0)
-    input_unit: str
-    shift_duration_hours: float = Field(default=8.0, gt=0)
 
 
 class CreateMappingRequest(BaseModel):
@@ -151,44 +140,6 @@ def create_work_rate_router(
         if run is None:
             raise HTTPException(404, "Import run not found")
         return run.as_dict()
-
-    @router.get("/user-overrides")
-    def list_user_rate_overrides(
-        authenticated_user: Any = Depends(authenticated_user_dependency),
-    ) -> list[dict[str, Any]]:
-        user_id = authenticated_user_id(authenticated_user)
-        return [
-            row.as_dict()
-            for row in UserWorkRateOverrideRepository().list(user_id=user_id)
-        ]
-
-    @router.put("/user-overrides")
-    def upsert_user_rate_override(
-        body: UpsertUserRateOverrideRequest,
-        authenticated_user: Any = Depends(authenticated_user_dependency),
-    ) -> dict[str, Any]:
-        user_id = authenticated_user_id(authenticated_user)
-        try:
-            row = UserWorkRateOverrideRepository().upsert(
-                user_id=user_id,
-                **_body_dict(body),
-            )
-        except ValueError as exc:
-            raise HTTPException(422, str(exc)) from exc
-        return row.as_dict()
-
-    @router.delete("/user-overrides/{override_id}")
-    def deactivate_user_rate_override(
-        override_id: str,
-        authenticated_user: Any = Depends(authenticated_user_dependency),
-    ) -> dict[str, Any]:
-        user_id = authenticated_user_id(authenticated_user)
-        if not UserWorkRateOverrideRepository().deactivate(
-            override_id,
-            user_id=user_id,
-        ):
-            raise HTTPException(404, "User rate override not found")
-        return {"id": override_id, "is_active": False}
 
     @router.get("")
     def list_rates(

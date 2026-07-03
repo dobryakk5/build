@@ -313,7 +313,7 @@ class KtpSessionSubtype(Base, TimestampMixin):
     lag_after_days: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
-    # default | manual — пометки источника, чтобы rebuild не перезатирал ручные правки
+    # default | catalog | manual — источник выработки; manual не перезатирается автоматикой
     output_source: Mapped[str] = mapped_column(
         String(8), nullable=False, server_default="default"
     )
@@ -323,4 +323,3 @@ class KtpSessionSubtype(Base, TimestampMixin):
     lag_source: Mapped[str] = mapped_column(
         String(8), nullable=False, server_default="default"
     )
-    rate_unit_conversion: Mapped[dict | None] = mapped_column(JSONB)

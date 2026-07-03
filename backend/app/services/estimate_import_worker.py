@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, insert, or_, select
+from sqlalchemy import insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
@@ -350,6 +350,7 @@ def _prepare_stage10_rows_for_materialization(
     *,
     variant: dict[str, Any] | None = None,
     resolved_stages: list[dict[str, Any]] | None = None,
+    user_work_rates: list[dict[str, Any]] | None = None,
 ) -> list[SimpleNamespace]:
     materialized_rows: list[SimpleNamespace] = []
     for index, row in enumerate(snapshot_rows):
@@ -378,11 +379,14 @@ def _prepare_stage10_rows_for_materialization(
 
     if materialized_rows:
         from app.services.upload_service import (
+            _enrich_work_rates_sync,
             _enrich_work_stages_sync,
             _enrich_work_subtypes_sync,
         )
 
         hierarchy_selection = _hierarchy_selection_from_batch(batch)
+        hierarchy_selection["user_id"] = str(batch.rate_owner_user_id or "") or None
+        hierarchy_selection["user_work_rates"] = list(user_work_rates or [])
         _ensure_stage10_building_params(batch, materialized_rows)
         preclassified = _enrich_work_subtypes_sync(materialized_rows, hierarchy_selection)
         if resolved_stages is None:
@@ -450,6 +454,15 @@ def _prepare_stage10_rows_for_materialization(
                 variant=variant,
                 stage_instances=resolved_stages,
             )
+
+        # Rate enrichment is part of the materialization flow, not a later KTP
+        # side effect. This persists either a resolved global/user snapshot or
+        # a needs_user_rate request directly in Estimate.raw_data.
+        _enrich_work_rates_sync(
+            materialized_rows,
+            hierarchy_selection,
+            project_id=batch.project_id,
+        )
     return materialized_rows
 
 
@@ -895,6 +908,16 @@ class EstimateImportWorker:
                 )
             )
             created = 0
+            rate_owner_user_id = str(batch.rate_owner_user_id or "")
+            if not rate_owner_user_id:
+                raise RuntimeError("rate_owner_user_id_required")
+            from app.services.user_work_rate_service import UserWorkRateRepository
+
+            user_rate_records = await UserWorkRateRepository().list_records(
+                self.db,
+                user_id=rate_owner_user_id,
+            )
+            user_rate_payload = [record.as_dict() for record in user_rate_records]
             if existing_count == 0:
                 immutable_rows = session.snapshot_payload.get("rows") if isinstance(session.snapshot_payload, dict) else None
                 if not isinstance(immutable_rows, list):
@@ -908,6 +931,7 @@ class EstimateImportWorker:
                         batch,
                         variant=variant if strict_semantic_contract else None,
                         resolved_stages=resolved_stages if strict_semantic_contract else None,
+                        user_work_rates=user_rate_payload,
                     )
                     values: list[dict[str, Any]] = []
                     projection_values: list[dict[str, Any]] = []

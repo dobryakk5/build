@@ -217,9 +217,17 @@ def resolve_membrane_context(text: str) -> MasonryContextResult:
     elif has_any(normalized, ("наружн", "снаружи")):
         applicability["installation_position"] = "exterior_side"
 
+    context_code = "_".join(
+        value
+        for value in (
+            applicability.get("membrane_type"),
+            applicability.get("installation_position"),
+        )
+        if value
+    ) or None
     return MasonryContextResult(
-        applicability.get("membrane_type"),
-        needs_review=not bool(applicability),
-        review_reason=None if applicability else "membrane_type_not_resolved",
+        context_code,
+        needs_review=not bool(context_code),
+        review_reason=None if context_code else "membrane_context_not_resolved",
         applicability=applicability or None,
     )

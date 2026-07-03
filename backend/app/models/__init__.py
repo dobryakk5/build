@@ -6,6 +6,7 @@ from .activity     import ActivityEvent
 from .project      import Project, ProjectMember
 from .estimate_batch import EstimateBatch
 from .estimate     import Estimate
+from .user_work_rate import UserWorkRate
 from .fer_words    import FerWordsEntry
 from .material_delay import MaterialDelayEvent
 from .schedule_baseline import ScheduleBaseline, ScheduleBaselineTask
@@ -86,6 +87,7 @@ __all__ = [
     "Project", "ProjectMember",
     "EstimateBatch",
     "Estimate",
+    "UserWorkRate",
     "FerWordsEntry",
     "MaterialDelayEvent",
     "ScheduleBaseline", "ScheduleBaselineTask",

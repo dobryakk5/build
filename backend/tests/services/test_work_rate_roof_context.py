@@ -76,7 +76,7 @@ def test_roof_covering_material_context_filters_equivalent_candidates():
     assert result.rate_auto_applicable is True
 
 
-def test_confirmed_volume_to_area_conversion_enables_rate_selection_and_labor():
+def test_different_unit_does_not_enable_rate_selection():
     selector = WorkRateSelectionService()
     source = WorkRateSource(source_file="catalog.xlsx")
     item = WorkRateItem(
@@ -110,30 +110,10 @@ def test_confirmed_volume_to_area_conversion_enables_rate_selection_and_labor():
         mappings=[mapping],
         sources=[source],
     )
-    assert blocked.review_reason == "unit_incompatible"
-
-    selected = selector.select_rate(
-        taxonomy_code="foundation/foundation_rebar_formwork_concrete",
-        operation_code="formwork_installation",
-        object_scope_code="foundation",
-        quantity=12,
-        unit_code="m3",
-        work_name="Монолитная плита",
-        items=[item],
-        mappings=[mapping],
-        sources=[source],
-        unit_conversion_overrides={("m3", "m2"): 5.0},
-    )
-    assert selected.rate_item_id == item.id
-    assert selected.rate_auto_applicable is True
-
-    totals = WorkRateSelectionService.calculate_labor(
-        quantity=12,
-        quantity_unit="m3",
-        rate_item=item,
-        unit_conversion_factor_override=5.0,
-    )
-    assert totals["labor_avg_total"] == pytest.approx(12.0)
+    assert blocked.status == "needs_user_rate"
+    assert blocked.review_reason == "user_rate_input_required"
+    assert blocked.review_sub_reason == "quantity_conversion_required"
+    assert blocked.rate_item_id is None
 
 
 def test_operation_detector_prefers_tz_atomic_and_package_rules():

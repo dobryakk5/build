@@ -239,12 +239,12 @@ def catalog_labor_for_projection(
             "selected_rate_item_id", "source_rate_id", "labor_hours_per_unit_avg",
         )
     )
-    override_id = _text(raw.get("user_work_rate_override_id"))
-    override_owner_id = _text(raw.get("user_work_rate_override_owner_id"))
-    if override_id and (
+    user_rate_id = _text(raw.get("selected_user_rate_id"))
+    user_rate_owner_id = _text(raw.get("user_rate_owner_id"))
+    if user_rate_id and (
         not owner_user_id
-        or not override_owner_id
-        or override_owner_id != str(owner_user_id)
+        or not user_rate_owner_id
+        or user_rate_owner_id != str(owner_user_id)
     ):
         requires_input = True
 

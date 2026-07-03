@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from app.services.work_rate_models import RateSelectionResult, WorkRateItem
@@ -59,19 +60,20 @@ def apply_rate_to_raw_data(
     crew_size: int | None = None,
     hours_per_day: float = 8.0,
     calculation_group_key: str | None = None,
+    work_name: str | None = None,
 ) -> dict[str, Any]:
     raw = dict(raw_data or {})
     calculation: dict[str, Any] = {}
     calculation_item = rate_item
-    if selection.user_override_id and selection.unit_code:
+    if selection.user_rate_id and selection.unit_code:
         calculation_item = WorkRateItem(
-            id=selection.rate_item_id or "user-override",
+            id=f"user-rate:{selection.user_rate_id}",
             unit_code=selection.unit_code,
             norm_base_quantity=selection.norm_base_quantity or 1.0,
             labor_min=selection.labor_min,
             labor_avg=selection.labor_avg,
             labor_max=selection.labor_max,
-            labor_basis=selection.labor_basis or "user_override",
+            labor_basis=selection.labor_basis or "user_catalog",
         )
     if calculation_item is not None:
         calculation = WorkRateSelectionService.calculate_labor(
@@ -84,7 +86,7 @@ def apply_rate_to_raw_data(
     catalog_derived = None
     if calculation_item is not None and selection.rate_auto_applicable:
         labor_total = calculation.get("labor_avg_total")
-        if calculation_item.labor_basis in {"normative", "independent_market_estimate", "manual", "provisional_engineer_norm", "user_override"}:
+        if calculation_item.labor_basis in {"normative", "independent_market_estimate", "manual", "provisional_engineer_norm", "user_catalog"}:
             catalog_independent = labor_total
         elif calculation_item.labor_basis == "derived_from_price":
             catalog_derived = labor_total
@@ -107,13 +109,17 @@ def apply_rate_to_raw_data(
             "operation_code": selection.operation_code,
             "suggested_operation_code": selection.suggested_operation_code,
             "rate_context_code": selection.rate_context_code,
+            "rate_variant_code": selection.rate_variant_code,
             "rate_auto_applicable": selection.rate_auto_applicable,
             "selected_rate_item_id": selection.rate_item_id,
             "selected_rate_mapping_id": selection.rate_mapping_id,
+            "rate_status": selection.status,
+            "rate_source": selection.rate_source,
             "rate_selection_source": selection.selection_source,
             "rate_confidence": selection.selection_confidence,
             "rate_needs_review": selection.needs_review or resolved.needs_review,
             "rate_review_reason": selection.review_reason or resolved.reason,
+            "rate_review_sub_reason": selection.review_sub_reason,
             "rate_unit_code": selection.unit_code,
             "rate_price_min": selection.price_min,
             "rate_price_max": selection.price_max,
@@ -126,18 +132,21 @@ def apply_rate_to_raw_data(
             "rate_value_mode": selection.rate_value_mode,
             "rate_resolution_status": selection.resolution_status,
             "rate_requires_user_input": selection.requires_user_input,
-            "user_work_rate_override_id": selection.user_override_id,
-            "user_work_rate_override_scope": selection.user_override_scope,
-            "user_work_rate_override_owner_id": selection.user_override_owner_id,
-            "rate_applicability_hash": selection.applicability_hash,
+            "selected_user_rate_id": selection.user_rate_id,
+            "user_rate_owner_id": selection.user_rate_owner_id,
             "rate_applicability": selection.applicability_json,
             "user_rate_input_request": ({
-                "source_rate_id": selection.source_rate_id,
-                "selected_target_code": selection.operation_code,
+                "work_name": work_name or raw.get("work_name") or raw.get("item_text") or raw.get("name"),
+                "taxonomy_code": selection.taxonomy_code,
+                "operation_code": selection.operation_code,
+                "object_scope_code": selection.object_scope_code,
+                "rate_context_code": selection.rate_context_code,
+                "rate_variant_code": selection.rate_variant_code,
                 "unit_code": selection.unit_code,
-                "norm_base_quantity": selection.norm_base_quantity,
-                "applicability": selection.applicability_json,
-                "accepted_input_units": ["person_shift", "person_hour"],
+                "labor_unit": "person_hour",
+                "norm_base_quantity": 1,
+                "reason": "rate_not_found_for_unit",
+                "prompt": f"Укажите трудозатраты в чел.-ч на 1 {selection.unit_code}",
             } if selection.requires_user_input else None),
             "calculated_labor_hours_min": calculation.get("labor_min_total"),
             "calculated_labor_hours_avg": calculation.get("labor_avg_total"),
@@ -146,6 +155,12 @@ def apply_rate_to_raw_data(
             "resolved_labor_source": resolved.resolved_labor_source,
             "labor_source_mode": labor_source_mode,
             "calculation_group_key": calculation_group_key,
+            "applied_rate_source": selection.rate_source if selection.status == "resolved" else None,
+            "applied_rate_id": (selection.user_rate_id or selection.rate_item_id) if selection.status == "resolved" else None,
+            "applied_unit_code": selection.unit_code if selection.status == "resolved" else None,
+            "applied_labor_hours_per_unit": selection.labor_avg if selection.status == "resolved" else None,
+            "calculated_labor_hours": calculation.get("labor_avg_total") if selection.status == "resolved" else None,
+            "rate_calculated_at": datetime.now(timezone.utc).isoformat() if selection.status == "resolved" else None,
             "rate_calculation_payload": {
                 "selection": selection.as_dict(),
                 "calculation": calculation,

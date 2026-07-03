@@ -207,6 +207,8 @@ class WorkRateImportResult:
 
 @dataclass(slots=True)
 class RateSelectionResult:
+    status: str = "needs_user_rate"
+    rate_source: str | None = None
     rate_item_id: str | None = None
     rate_mapping_id: str | None = None
     selection_source: str | None = None
@@ -215,6 +217,7 @@ class RateSelectionResult:
     taxonomy_code: str | None = None
     object_scope_code: str | None = None
     rate_context_code: str | None = None
+    rate_variant_code: str | None = None
     suggested_operation_code: str | None = None
     rate_auto_applicable: bool = False
     unit_code: str | None = None
@@ -230,10 +233,8 @@ class RateSelectionResult:
     rate_value_mode: str | None = None
     resolution_status: str | None = None
     requires_user_input: bool = False
-    user_override_id: str | None = None
-    user_override_scope: str | None = None
-    user_override_owner_id: str | None = None
-    applicability_hash: str | None = None
+    user_rate_id: str | None = None
+    user_rate_owner_id: str | None = None
     applicability_json: dict[str, Any] = field(default_factory=dict)
     needs_review: bool = False
     review_reason: str | None = None

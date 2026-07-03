@@ -5215,12 +5215,8 @@ def _set_rate_trace(row: Any, payload: dict[str, Any] | None) -> None:
 
 
 def _stored_operator_rate_selection(row: Any) -> dict[str, Any]:
-    for payload in (
-        getattr(row, "rate_unit_conversion", None),
-        getattr(row, "rate_trace", None),
-    ):
-        if not isinstance(payload, dict):
-            continue
+    payload = getattr(row, "rate_trace", None)
+    if isinstance(payload, dict):
         selection = payload.get("operator_selection")
         if isinstance(selection, dict):
             return dict(selection)
@@ -5319,74 +5315,6 @@ def _rate_candidate_trace(
     }
 
 
-def _confirmed_rate_unit_conversion(
-    payload: Any,
-    *,
-    source_unit: str | None,
-) -> dict[str, Any] | None:
-    if not isinstance(payload, dict):
-        return None
-    if payload.get("conversion_status") != "user_confirmed":
-        return None
-    target_unit = str(payload.get("target_unit") or "").strip() or None
-    input_unit = str(payload.get("input_unit") or payload.get("source_unit") or "").strip() or None
-    factor = _float_or_none(payload.get("conversion_factor"))
-    if not target_unit or not input_unit or factor is None:
-        return None
-    if source_unit and input_unit != source_unit:
-        return None
-    result = dict(payload)
-    result["input_unit"] = input_unit
-    result["source_unit"] = input_unit
-    result["target_unit"] = target_unit
-    result["conversion_factor"] = factor
-    return result
-
-
-def _suggest_rate_unit_conversion(
-    *,
-    text: str | None,
-    source_quantity: float | None,
-    source_unit: str | None,
-    target_unit: str | None,
-    operation_code: str | None,
-) -> dict[str, Any] | None:
-    if not text or not source_quantity or source_quantity <= 0 or not source_unit or not target_unit:
-        return None
-    normalized = text.lower().replace("ё", "е")
-    if source_unit == "m2" and target_unit == "m3" and operation_code in {"block_masonry", "brick_masonry"}:
-        match = re.search(r"\b(\d{2,3}(?:[,.]\d+)?)\s*мм\b", normalized)
-        if not match:
-            return {
-                "conversion_status": "requires_user_input",
-                "conversion_method": "area_to_volume_by_thickness",
-                "input_quantity": source_quantity,
-                "source_quantity": source_quantity,
-                "input_unit": source_unit,
-                "source_unit": source_unit,
-                "target_unit": target_unit,
-                "parameters": {},
-                "formula_version": "1",
-            }
-        thickness_m = float(match.group(1).replace(",", ".")) / 1000.0
-        factor = thickness_m
-        derived_quantity = source_quantity * factor
-        return {
-            "conversion_status": "requires_confirmation",
-            "conversion_method": "area_to_volume_by_thickness",
-            "input_quantity": source_quantity,
-            "source_quantity": source_quantity,
-            "input_unit": source_unit,
-            "source_unit": source_unit,
-            "target_unit": target_unit,
-            "parameters": {"thickness_m": round(thickness_m, 6)},
-            "formula_version": "1",
-            "conversion_factor": round(factor, 6),
-            "derived_quantity": round(derived_quantity, 6),
-        }
-    return None
-
-
 def _package_component_rate_candidates(
     *,
     selector: Any,
@@ -5403,7 +5331,6 @@ def _package_component_rate_candidates(
     section_parent_context: str | None,
     catalog: Any,
     applicability: dict[str, Any],
-    unit_conversion_overrides: dict[tuple[str, str], float] | None,
 ) -> list[dict[str, Any]]:
     if not package_code:
         return []
@@ -5421,6 +5348,7 @@ def _package_component_rate_candidates(
             taxonomy_code=taxonomy_code,
             operation_code=component_code,
             object_scope_code=object_scope_code,
+            rate_context_code=applicability.get("rate_context_code"),
             quantity=quantity,
             unit_code=unit_code,
             work_name=work_name,
@@ -5433,7 +5361,6 @@ def _package_component_rate_candidates(
             mappings=catalog.mappings,
             sources=catalog.sources,
             applicability=applicability,
-            unit_conversion_overrides=unit_conversion_overrides,
         )
         component_rows = list(component_selection.candidates or [])
         if component_selection.rate_item_id and not any(
@@ -5495,9 +5422,11 @@ def _package_component_rate_candidates(
 
 @lru_cache(maxsize=4)
 def _load_work_rate_catalog_cached(path_text: str):
+    from pathlib import Path
     from app.services.work_rate_catalog_service import WorkRateCatalog
 
-    return WorkRateCatalog.load(path_text)
+    path = Path(path_text)
+    return WorkRateCatalog.load(path) if path.exists() else WorkRateCatalog()
 
 
 @lru_cache(maxsize=1)
@@ -5509,6 +5438,41 @@ def _work_rate_operation_packages() -> dict[str, Any]:
     return packages
 
 
+def _subtype_default_output_per_day(
+    row: KtpSessionSubtype,
+    subtype_defaults: dict[str, WorkSubtype],
+) -> float | None:
+    ref = subtype_defaults.get(
+        base_subtype_code(str(row.work_subtype_code or row.subtype_code))
+    )
+    if ref is None or ref.output_per_day is None:
+        return None
+    return float(ref.output_per_day)
+
+
+def _sync_automatic_output_per_day(
+    row: KtpSessionSubtype,
+    *,
+    catalog_output_per_day: float | None,
+    default_output_per_day: float | None,
+) -> None:
+    """Refresh non-manual output and remove stale catalog projections.
+
+    A catalog value is valid only while the selected rate can still produce an
+    output for the current crew. If the rate disappears or crew capacity is
+    incomplete, restore the current subtype default instead of preserving an
+    orphaned ``output_source="catalog"`` value.
+    """
+    if row.output_source == "manual":
+        return
+    if catalog_output_per_day is not None and catalog_output_per_day > 0:
+        row.output_per_day = catalog_output_per_day
+        row.output_source = "catalog"
+        return
+    row.output_per_day = default_output_per_day
+    row.output_source = "default"
+
+
 async def _attach_session_subtype_rate_projection(
     db: AsyncSession,
     session_id: str,
@@ -5518,26 +5482,43 @@ async def _attach_session_subtype_rate_projection(
         return
 
     catalog_path = resolve_config_path(settings.WORK_RATE_CATALOG_PATH)
-    if not catalog_path.exists():
-        for row in rows:
-            _clear_rate_projection(row, "catalog_labor_not_available")
-        return
 
     from app.services.work_rate_import_service import normalize_unit as normalize_work_rate_unit
     from app.services.work_rate_selection_service import WorkRateSelectionService
     from app.services.work_taxonomy_service import detect_operation_detailed
 
     catalog = _load_work_rate_catalog_cached(str(catalog_path))
-    if not catalog.items or not catalog.mappings:
-        for row in rows:
-            _clear_rate_projection(row, "catalog_labor_not_available")
-        return
 
     session = await db.get(KtpEstimateSession, session_id)
     batch = await db.get(EstimateBatch, session.estimate_batch_id) if session else None
+    from app.services.user_work_rate_service import UserWorkRateRepository
+
+    rate_owner_user_id = str(batch.rate_owner_user_id or "") if batch else ""
+    user_rate_records = (
+        await UserWorkRateRepository().list_records(
+            db,
+            user_id=rate_owner_user_id,
+        )
+        if rate_owner_user_id
+        else []
+    )
     hours_per_day = float(batch.hours_per_day) if batch and batch.hours_per_day else 8.0
     batch_crew = int(batch.workers_count) if batch and batch.workers_count else None
     project_variant_id = None
+
+    subtype_codes = {
+        base_subtype_code(str(row.work_subtype_code or row.subtype_code))
+        for row in rows
+        if row.work_subtype_code or row.subtype_code
+    }
+    subtype_defaults: dict[str, WorkSubtype] = {}
+    if subtype_codes:
+        subtype_defaults = {
+            subtype.code: subtype
+            for subtype in await db.scalars(
+                select(WorkSubtype).where(WorkSubtype.code.in_(subtype_codes))
+            )
+        }
 
     item_ids = [row.item_id for row in rows if row.item_id]
     items_by_id: dict[str, KtpWbsItem] = {}
@@ -5649,20 +5630,19 @@ async def _attach_session_subtype_rate_projection(
                     "selection_sub_reason": sub_reason,
                 },
             )
+            _sync_automatic_output_per_day(
+                row,
+                catalog_output_per_day=None,
+                default_output_per_day=_subtype_default_output_per_day(
+                    row, subtype_defaults
+                ),
+            )
             continue
 
         quantity = _float_or_none(item.quantity if item else None) or _float_or_none(row.volume)
-        confirmed_conversion = _confirmed_rate_unit_conversion(
-            getattr(row, "rate_unit_conversion", None),
-            source_unit=unit_code,
-        )
-        unit_conversion_overrides = (
-            {
-                (unit_code, confirmed_conversion["target_unit"]): confirmed_conversion["conversion_factor"],
-            }
-            if confirmed_conversion
-            else None
-        )
+        # Rate matching is exact by unit. Geometry conversions are not part of
+        # the personal-catalog flow and therefore cannot silently change the
+        # selected norm.
         rate_applicability = {
             "project_variant_id": row_project_variant_id,
             "template_stage_number": raw.get("template_stage_number") or raw.get("work_stage_number"),
@@ -5670,11 +5650,13 @@ async def _attach_session_subtype_rate_projection(
             "floor_number": raw.get("floor_number"),
             "floor_kind": raw.get("floor_kind"),
             "rate_context_code": raw.get("rate_context_code"),
+            "object_scope_required": bool(raw.get("object_scope_required")),
         }
         selection = selector.select_rate(
             taxonomy_code=str(taxonomy_code),
             operation_code=str(operation_code),
             object_scope_code=raw.get("selected_object_scope_code") or raw.get("object_scope_code"),
+            rate_context_code=raw.get("rate_context_code"),
             quantity=quantity,
             unit_code=unit_code,
             work_name=(item.name if item else None) or row.subtype_name,
@@ -5686,28 +5668,29 @@ async def _attach_session_subtype_rate_projection(
             items=catalog.items,
             mappings=catalog.mappings,
             sources=catalog.sources,
+            user_id=rate_owner_user_id or None,
+            user_rates=user_rate_records,
             applicability=rate_applicability,
-            unit_conversion_overrides=unit_conversion_overrides,
         )
         rate_item = item_by_rate_id.get(selection.rate_item_id) if selection.rate_item_id else None
-        conversion_factor = (
-            WorkRateSelectionService.unit_conversion_factor(unit_code, selection.unit_code)
-            if selection.unit_code
-            else None
-        )
-        if conversion_factor is None and confirmed_conversion and selection.unit_code == confirmed_conversion["target_unit"]:
-            conversion_factor = confirmed_conversion["conversion_factor"]
-        suggested_conversion = (
-            _suggest_rate_unit_conversion(
-                text=" ".join(str(part or "") for part in (item.name if item else None, raw.get("item_text"), raw.get("spec"))),
-                source_quantity=quantity,
-                source_unit=unit_code,
-                target_unit=selection.unit_code,
-                operation_code=selection.operation_code or operation_code,
+        if selection.user_rate_id and selection.unit_code:
+            from app.services.work_rate_models import WorkRateItem
+
+            rate_item = WorkRateItem(
+                id=f"user-rate:{selection.user_rate_id}",
+                unit_code=selection.unit_code,
+                norm_base_quantity=1.0,
+                labor_min=selection.labor_min,
+                labor_avg=selection.labor_avg,
+                labor_max=selection.labor_max,
+                labor_basis="user_catalog",
             )
-            if selection.review_reason == "unit_incompatible"
+        conversion_factor = (
+            1.0
+            if selection.unit_code and unit_code and selection.unit_code == unit_code
             else None
         )
+        suggested_conversion = None
         calculation = (
             WorkRateSelectionService.calculate_labor(
                 quantity=quantity,
@@ -5751,7 +5734,6 @@ async def _attach_session_subtype_rate_projection(
                 section_parent_context=raw.get("section_parent_context"),
                 catalog=catalog,
                 applicability=rate_applicability,
-                unit_conversion_overrides=unit_conversion_overrides,
             )
             candidate_rows.extend(package_component_candidates)
         if rate_item is not None and not any(c.get("rate_item_id") == rate_item.id for c in candidate_rows if isinstance(c, dict)):
@@ -5851,8 +5833,11 @@ async def _attach_session_subtype_rate_projection(
             "rate_candidates": trace_candidates,
             "selection_result": selection.review_reason or ("auto_applicable" if selection.rate_auto_applicable else None),
             "selection_sub_reason": selection.review_sub_reason,
-            "rate_unit_conversion": confirmed_conversion or getattr(row, "rate_unit_conversion", None) or suggested_conversion,
-            "conversion_required": selection.review_reason == "unit_incompatible",
+            "rate_source": selection.rate_source,
+            "rate_variant_code": selection.rate_variant_code,
+            "selected_user_rate_id": selection.user_rate_id,
+            "user_rate_owner_id": selection.user_rate_owner_id,
+            "conversion_required": False,
         }
         if operator_selected_rate_item_id or operator_selected_rate_mapping_id:
             trace["operator_selection"] = {
@@ -5862,19 +5847,20 @@ async def _attach_session_subtype_rate_projection(
             }
         _set_rate_trace(row, trace)
 
-        if (
-            selection.rate_auto_applicable
-            and row.output_source != "manual"
-            and effective_avg is not None
-        ):
-            output_per_day = WorkRateSelectionService.output_per_day(
+        catalog_output_per_day = None
+        if selection.rate_auto_applicable and effective_avg is not None:
+            catalog_output_per_day = WorkRateSelectionService.output_per_day(
                 crew_size=row.crew_size,
                 hours_per_day=hours_per_day,
                 labor_hours_per_unit=effective_avg,
             )
-            if output_per_day is not None:
-                row.output_per_day = output_per_day
-                row.output_source = "catalog"
+        _sync_automatic_output_per_day(
+            row,
+            catalog_output_per_day=catalog_output_per_day,
+            default_output_per_day=_subtype_default_output_per_day(
+                row, subtype_defaults
+            ),
+        )
 
 
 async def build_session_subtypes(
@@ -6046,7 +6032,6 @@ async def update_session_subtype(
     if "unit" in patch:
         unit = (str(patch["unit"]).strip() or None) if patch["unit"] else None
         row.unit = unit
-        row.rate_unit_conversion = None
         row.output_source = "default"
         for attr in (
             "rate_unit_code",
@@ -6100,19 +6085,14 @@ async def update_session_subtype(
         _set_row_projection_attr(row, "selected_rate_item_id", selected_rate_item_id)
         _set_row_projection_attr(row, "selected_rate_mapping_id", selected_rate_mapping_id)
         if selected_rate_item_id or selected_rate_mapping_id:
-            stored_conversion = row.rate_unit_conversion if isinstance(row.rate_unit_conversion, dict) else {}
-            stored_conversion = dict(stored_conversion)
-            stored_conversion["operator_selection"] = {
+            trace = _rate_trace(row)
+            trace["operator_selection"] = {
                 "selected_rate_item_id": selected_rate_item_id,
                 "selected_rate_mapping_id": selected_rate_mapping_id,
                 "output_per_day": row.output_per_day,
                 "confirmed_by_user_id": user_id,
                 "confirmed_at": _now().isoformat(),
             }
-            row.rate_unit_conversion = stored_conversion
-            flag_modified(row, "rate_unit_conversion")
-            trace = _rate_trace(row)
-            trace["operator_selection"] = stored_conversion["operator_selection"]
             _set_rate_trace(row, trace)
         if row.output_per_day is not None and row.item_id:
             item = await db.get(KtpWbsItem, row.item_id)
@@ -6130,38 +6110,6 @@ async def update_session_subtype(
             raise ValueError("Лаг не может быть отрицательным")
         row.lag_after_days = int(v)
         row.lag_source = "manual"
-    if "rate_unit_conversion" in patch:
-        payload = patch["rate_unit_conversion"]
-        if payload is None:
-            row.rate_unit_conversion = None
-        elif not isinstance(payload, dict):
-            raise ValueError("Параметры конвертации должны быть объектом")
-        else:
-            status = payload.get("conversion_status")
-            if status != "user_confirmed":
-                raise ValueError("Конвертация должна быть подтверждена пользователем")
-            factor = _float_or_none(payload.get("conversion_factor"))
-            derived_quantity = _float_or_none(payload.get("derived_quantity"))
-            target_unit = str(payload.get("target_unit") or "").strip()
-            input_unit = str(payload.get("input_unit") or payload.get("source_unit") or "").strip()
-            if factor is None:
-                raise ValueError("Коэффициент конвертации должен быть больше нуля")
-            if derived_quantity is None:
-                raise ValueError("Расчётное количество должно быть больше нуля")
-            if not input_unit or not target_unit:
-                raise ValueError("Укажите исходную и целевую единицу конвертации")
-            clean_payload = dict(payload)
-            clean_payload["conversion_status"] = "user_confirmed"
-            clean_payload["input_unit"] = input_unit
-            clean_payload["source_unit"] = input_unit
-            clean_payload["target_unit"] = target_unit
-            clean_payload["conversion_factor"] = factor
-            clean_payload["derived_quantity"] = derived_quantity
-            clean_payload["confirmed_by_user_id"] = user_id
-            clean_payload["confirmed_at"] = _now().isoformat()
-            row.rate_unit_conversion = clean_payload
-        row.output_per_day = None
-        row.output_source = "default"
 
     row.updated_at = _now()
     await db.commit()

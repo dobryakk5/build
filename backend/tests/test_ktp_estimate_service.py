@@ -1339,7 +1339,6 @@ async def test_update_session_subtype_does_not_require_rate_trace_attribute():
         output_per_day=None,
         output_source="default",
         item_id=None,
-        rate_unit_conversion=None,
     )
     db = AsyncMock()
     db.scalar = AsyncMock(return_value=row)
@@ -1378,7 +1377,6 @@ async def test_update_session_subtype_unit_updates_linked_item():
         unit=None,
         volume=100.0,
         output_source="catalog",
-        rate_unit_conversion={"conversion_status": "suggested"},
     )
     item = SimpleNamespace(unit=None, quantity=None, quantity_source=None)
     db = AsyncMock()
@@ -1402,5 +1400,4 @@ async def test_update_session_subtype_unit_updates_linked_item():
     assert item.quantity == 100.0
     assert item.quantity_source == "user"
     assert row.output_source == "default"
-    assert row.rate_unit_conversion is None
     db.commit.assert_awaited()

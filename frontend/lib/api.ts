@@ -18,6 +18,7 @@ import type {
   EstimateBatch,
   EstimateRow,
   EstimateSummary,
+  SaveUserWorkRateResponse,
   PreviewResult,
   PreviewEdits,
   KtpCard,
@@ -632,6 +633,22 @@ export const estimates = {
     }),
 };
 
+export const userWorkRates = {
+  saveFromEstimateRow: (
+    projectId: string,
+    estimateBatchId: string,
+    estimateRowId: string,
+    laborHoursPerUnit: number,
+  ) =>
+    request<SaveUserWorkRateResponse>(
+      `/v1/projects/${projectId}/estimate-batches/${estimateBatchId}/rows/${estimateRowId}/user-rate`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ labor_hours_per_unit: laborHoursPerUnit }),
+      },
+    ),
+};
+
 export const jobs = {
   get: (jobId: string) => request<any>(`/jobs/${jobId}`),
 };
@@ -987,7 +1004,6 @@ export const ktpEstimate = {
       output_per_day: number | null;
       crew_size: number | null;
       lag_after_days: number;
-      rate_unit_conversion: KtpSessionSubtype["rate_unit_conversion"] | null;
       selected_rate_item_id: string | null;
       selected_rate_mapping_id: string | null;
     }>,

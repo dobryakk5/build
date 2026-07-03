@@ -25,7 +25,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import os
@@ -990,8 +989,6 @@ def _enrich_work_rates_sync(
     service. Missing or ambiguous rates are stored as review diagnostics.
     """
     catalog_path = _work_rate_catalog_path()
-    if not catalog_path.exists():
-        return
 
     from app.services.work_rate_catalog_service import WorkRateCatalog
     from app.services.work_rate_import_service import normalize_unit
@@ -1001,12 +998,10 @@ def _enrich_work_rates_sync(
     )
     from app.services.work_rate_models import WorkRateCalculationRow
     from app.services.work_rate_selection_service import WorkRateSelectionService
-    from app.services.user_work_rate_override_service import UserWorkRateOverrideRepository
+    from app.services.user_work_rate_service import coerce_user_rate_records
     from app.services.work_taxonomy_service import _load_dictionary
 
-    catalog = WorkRateCatalog.load(catalog_path)
-    if not catalog.items or not catalog.mappings:
-        return
+    catalog = WorkRateCatalog.load(catalog_path) if catalog_path.exists() else WorkRateCatalog()
 
     policy = (_load_dictionary().get("operation_object_resolution_policy") or {})
     selector = WorkRateSelectionService(policy.get("operation_packages") or {})
@@ -1018,7 +1013,9 @@ def _enrich_work_rates_sync(
     )
     project_key = str(project_id or (hierarchy_selection or {}).get("project_id") or "preview")
     user_key = str((hierarchy_selection or {}).get("user_id") or "").strip() or None
-    user_overrides = UserWorkRateOverrideRepository().list(user_id=user_key) if user_key else []
+    user_rates = coerce_user_rate_records(
+        (hierarchy_selection or {}).get("user_work_rates") or []
+    )
 
     calculation_rows: list[WorkRateCalculationRow] = []
     raw_by_group: dict[str, list[dict]] = {}
@@ -1030,20 +1027,28 @@ def _enrich_work_rates_sync(
             continue
 
         taxonomy_code = str(raw.get("work_subtype_code") or "").strip()
-        operation_code = str(raw.get("operation_code") or "").strip()
+        operation_code = str(
+            raw.get("operation_package_code")
+            or raw.get("operation_code")
+            or ""
+        ).strip()
         if not taxonomy_code or taxonomy_code == "unknown/needs_review" or not operation_code:
+            raw.setdefault("rate_status", "needs_clarification")
+            raw.setdefault("rate_resolution_status", "needs_clarification")
+            raw.setdefault("rate_requires_user_input", False)
             raw.setdefault("rate_needs_review", True)
             raw.setdefault("rate_review_reason", "taxonomy_or_operation_missing")
             continue
 
         unit_code, _dimension, _factor = normalize_unit(getattr(row, "unit", None))
         quantity = getattr(row, "quantity", None)
-        object_scope_code = raw.get("selected_object_scope_code")
+        object_scope_code = raw.get("selected_object_scope_code") or raw.get("object_scope_code")
 
         selection = selector.select_rate(
             taxonomy_code=taxonomy_code,
             operation_code=operation_code,
             object_scope_code=object_scope_code,
+            rate_context_code=raw.get("rate_context_code"),
             quantity=quantity,
             unit_code=unit_code,
             work_name=getattr(row, "work_name", None),
@@ -1056,7 +1061,7 @@ def _enrich_work_rates_sync(
             mappings=catalog.mappings,
             sources=catalog.sources,
             user_id=user_key,
-            user_overrides=user_overrides,
+            user_rates=user_rates,
             applicability={
                 "project_variant_id": (hierarchy_selection or {}).get("project_variant_id"),
                 "template_stage_number": raw.get("template_stage_number") or raw.get("work_stage_number"),
@@ -1064,6 +1069,7 @@ def _enrich_work_rates_sync(
                 "floor_number": raw.get("floor_number"),
                 "floor_kind": raw.get("floor_kind"),
                 "rate_context_code": raw.get("rate_context_code"),
+                "object_scope_required": bool(raw.get("object_scope_required")),
             },
         )
         rate_item = item_by_id.get(selection.rate_item_id) if selection.rate_item_id else None
@@ -1083,6 +1089,12 @@ def _enrich_work_rates_sync(
         manual_labor = raw.get("manual_labor_hours")
         if manual_labor is None and raw.get("labor_value_source") == "manual":
             manual_labor = raw.get("resolved_labor_hours") or raw.get("labor_hours")
+        # Estimate.labor_hours is a manual norm per unit. Convert it to the
+        # row total only for source resolution; never overwrite the column with
+        # a calculated total.
+        row_manual_norm = getattr(row, "labor_hours", None)
+        if manual_labor is None and row_manual_norm is not None and quantity:
+            manual_labor = float(row_manual_norm) * float(quantity)
 
         row.raw_data = apply_rate_to_raw_data(
             raw,
@@ -1098,6 +1110,7 @@ def _enrich_work_rates_sync(
             crew_size=raw.get("crew_size"),
             hours_per_day=float(raw.get("hours_per_day") or DEFAULT_HOURS_PER_DAY),
             calculation_group_key=group_key,
+            work_name=getattr(row, "work_name", None),
         )
         raw = row.raw_data
         raw["rate_catalog_version"] = str(
@@ -2191,6 +2204,9 @@ async def _process_upload(job_id: str) -> None:
         await _set_job_progress(job, db, "Создаём задачу импорта…")
 
         try:
+            rate_owner_user_id = str(job.created_by or "").strip()
+            if not rate_owner_user_id:
+                raise RuntimeError("rate_owner_user_id_required")
             start_date  = date.fromisoformat(job.input["start_date"])
             workers     = int(job.input["workers"])
             estimate_kind = int(job.input["estimate_kind"])
@@ -2203,7 +2219,7 @@ async def _process_upload(job_id: str) -> None:
             )
             hierarchy_selection = {
                 **hierarchy_selection,
-                "user_id": str(job.created_by or ""),
+                "user_id": rate_owner_user_id,
                 "project_id": str(job.project_id or ""),
             }
             building_params = (
@@ -2216,6 +2232,16 @@ async def _process_upload(job_id: str) -> None:
             parser_profile = job.input.get("parser_profile", "auto")
             build_gantt = bool(job.input.get("build_gantt", True))
             edits = job.input.get("edits")
+
+            from app.services.user_work_rate_service import UserWorkRateRepository
+
+            user_rate_records = await UserWorkRateRepository().list_records(
+                db,
+                user_id=rate_owner_user_id,
+            )
+            hierarchy_selection["user_work_rates"] = [
+                record.as_dict() for record in user_rate_records
+            ]
 
             # ── 1. Парсим и классифицируем файл (ДО любого удаления старой сметы)
             # CPU-bound Excel parsing and taxonomy matching must not block the
@@ -2244,6 +2270,7 @@ async def _process_upload(job_id: str) -> None:
             batch = EstimateBatch(
                 id=str(uuid4()),
                 project_id=job.project_id,
+                rate_owner_user_id=rate_owner_user_id,
                 name=_make_batch_name(job.input.get("filename")),
                 estimate_kind=estimate_kind,
                 start_date=start_date,
