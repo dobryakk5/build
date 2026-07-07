@@ -2034,11 +2034,40 @@ const RATE_REVIEW_REASON_LABELS: Record<string, string> = {
   brick_pillar_rate_not_available: "нет расценки для кладки столбов",
   vent_shaft_masonry_rate_not_available: "нет расценки для кладки вентканалов",
   facade_cladding_rate_not_available: "нет расценки для облицовки фасада",
+  membrane_context_not_resolved: "не удалось определить тип мембраны и место её монтажа",
+  rate_variant_required: "не хватает обязательных параметров работы для выбора нормы",
 };
 
 function rateReviewLabel(reason: string | null | undefined): string {
   if (!reason) return "нет применимой каталожной нормы";
-  return RATE_REVIEW_REASON_LABELS[reason] || reason;
+  return RATE_REVIEW_REASON_LABELS[reason] || "требуется уточнить параметры работы для выбора нормы";
+}
+
+const RATE_VARIANT_FIELD_LABELS: Record<string, string> = {
+  insulation_location: "место утепления (фундамент, фасад, кровля или внутренние стены)",
+  insulation_material: "материал утеплителя",
+  membrane_type: "тип мембраны",
+  installation_position: "место монтажа мембраны",
+  roof_structure_material: "материал несущей конструкции кровли",
+  roof_covering_material: "материал кровельного покрытия",
+  base_type: "тип основания",
+};
+
+function rateSelectionSubReasonLabel(value: unknown): string | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const fields = value
+    .split(",")
+    .map((field) => RATE_VARIANT_FIELD_LABELS[field.trim()])
+    .filter((field): field is string => Boolean(field));
+  return fields.length ? fields.join(", ") : null;
+}
+
+function catalogWarningLabel(row: KtpSessionSubtype): string {
+  const missingFields = rateSelectionSubReasonLabel(row.rate_trace?.selection_sub_reason);
+  if (row.rate_review_reason === "rate_variant_required" && missingFields) {
+    return `не определено: ${missingFields}`;
+  }
+  return row.rate_review_label || rateReviewLabel(row.rate_review_reason);
 }
 
 function acceptedCatalogOutput(row: KtpSessionSubtype): number | null {
@@ -2052,9 +2081,10 @@ function rateTraceTitle(row: KtpSessionSubtype): string {
   const trace = row.rate_trace;
   const first = trace?.rate_candidates?.[0];
   const candidateCount = trace?.rate_candidates?.length || 0;
+  const subReason = rateSelectionSubReasonLabel(trace?.selection_sub_reason);
   const lines = [
-    `Результат: ${rateReviewLabel(row.rate_review_reason)}`,
-    typeof trace?.selection_sub_reason === "string" ? `Подпричина: ${trace.selection_sub_reason}` : null,
+    `Результат: ${catalogWarningLabel(row)}`,
+    subReason ? `Не хватает данных: ${subReason}` : null,
     rateIssueDifficulty(row),
     trace?.source_row_text ? `Строка: ${trace.source_row_text}` : null,
     trace?.detected_operations?.length ? `Операции: ${trace.detected_operations.join(", ")}` : null,
@@ -2538,7 +2568,7 @@ function StageProductivity({
                   s.session_calculated_labor_hours_avg,
                   s.session_calculated_labor_hours_max,
                 );
-                const catalogWarning = s.rate_auto_applicable === false ? rateReviewLabel(s.rate_review_reason) : null;
+                const catalogWarning = s.rate_auto_applicable === false ? catalogWarningLabel(s) : null;
                 const isProvisionalRate = s.rate_review_reason === "provisional_rate_requires_approval";
                 const operatorRateConfirmed = s.output_source === "manual" && Boolean(s.selected_rate_item_id) && s.output_per_day != null;
                 const provisionalConfirmed = isProvisionalRate && operatorRateConfirmed;
