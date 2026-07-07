@@ -9,6 +9,7 @@ from app.services.user_work_rate_service import (
 )
 from app.services.gantt_builder import GanttBuilder
 from app.services.gantt_calculations import calculate_working_days
+from app.services.work_rate_import_service import normalize_unit
 from app.services.work_rate_models import (
     MAPPING_DIRECT,
     SOURCE_NORMATIVE,
@@ -81,6 +82,14 @@ def test_inactive_user_rate_remains_in_key_space_but_is_not_selected():
     assert result.rate_source is None
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("m2", "m2"), ("m3", "m3"), ("m", "m"), ("pcs", "pcs"), ("set", "set")],
+)
+def test_canonical_catalog_units_are_accepted_by_runtime_normalizer(raw, expected):
+    assert normalize_unit(raw)[0] == expected
+
+
 def test_global_rate_has_priority_over_user_rate():
     source = WorkRateSource(id="source-1", source_kind=SOURCE_NORMATIVE)
     item = WorkRateItem(
@@ -144,7 +153,7 @@ def test_user_rate_does_not_cross_scope():
     assert result.requires_user_input is True
 
 
-def test_package_requests_decomposition_instead_of_personal_rate():
+def test_package_with_concrete_taxonomy_can_request_personal_rate():
     selector = WorkRateSelectionService({"wall_package": {"included_operations": ["wall_plastering"]}})
     result = selector.select_rate(
         taxonomy_code="finishing/wall_plastering",
@@ -161,8 +170,8 @@ def test_package_requests_decomposition_instead_of_personal_rate():
         user_rates=[],
     )
 
-    assert result.status == "needs_decomposition"
-    assert result.review_reason == "atomic_work_required"
+    assert result.status == "needs_user_rate"
+    assert result.review_reason == "user_rate_input_required"
 
 
 def test_apply_user_rate_calculates_labor_and_snapshot():

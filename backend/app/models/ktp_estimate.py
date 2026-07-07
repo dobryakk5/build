@@ -154,7 +154,7 @@ class KtpWbsItem(Base, TimestampMixin):
     sort_order: Mapped[float] = mapped_column(
         Numeric(20, 10), nullable=False, server_default="1000"
     )
-    # from_estimate | ai_added | manual
+    # from_estimate | from_catalog | ai_added | manual
     origin: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default="from_estimate"
     )

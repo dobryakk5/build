@@ -209,6 +209,44 @@ def test_materialize_wbs_ai_added_is_pending():
     assert not any("не распределены" in w for w in warnings)
 
 
+def test_materialize_wbs_catalog_item_keeps_rate_identity_and_unit():
+    from app.services.ktp_estimate_service import _materialize_wbs
+
+    raw_groups = [
+        {
+            "title": "Подготовительные работы",
+            "items": [
+                {
+                    "name": "Устройство временных подъездных путей",
+                    "origin": "from_catalog",
+                    "review_status": "accepted",
+                    "operation_code": "temporary_access_road_installation",
+                    "unit": "м²",
+                    "unit_code": "m2",
+                    "rate_item_id": "rate-1",
+                    "rate_mapping_id": "mapping-1",
+                    "labor_hours_per_unit": 2.5,
+                    "work_scope_key": "rate_item:rate-1:mapping:mapping-1",
+                }
+            ],
+        }
+    ]
+
+    _groups, items, warnings = _materialize_wbs(make_session(), raw_groups, {})
+
+    assert len(items) == 1
+    item = items[0]
+    assert item.origin == "from_catalog"
+    assert item.review_status == "accepted"
+    assert item.unit == "м²"
+    assert item.norm_source == "rate_catalog"
+    assert item.norm_value == 2.5
+    assert item.norm_unit == "m2"
+    assert item.norm_ref == "rate-1"
+    assert item.work_scope_key == "rate_item:rate-1:mapping:mapping-1"
+    assert warnings == []
+
+
 def test_not_applicable_stage_suppresses_estimate_without_fallback():
     from app.services.ktp_estimate_service import (
         FALLBACK_GROUP_TITLE,
@@ -331,6 +369,9 @@ def test_stage_aware_groups_add_catalog_recommendations_by_template_stage(monkey
                 is_active=True,
                 row_role="work",
                 source_rate_id="labor:8:66",
+                unit_code="set",
+                labor_avg=2.5,
+                norm_base_quantity=1.0,
                 source_payload={"stage_number": "2.7.8", "selected_target_code": "brick_material_lifting"},
                 applicability_json={"template_stage_numbers": ["2.7.8"]},
             )
@@ -344,6 +385,9 @@ def test_stage_aware_groups_add_catalog_recommendations_by_template_stage(monkey
                 priority=100,
                 confidence=0.99,
                 operation_code="brick_material_lifting",
+                taxonomy_code="load_bearing_walls/brick_material_lifting",
+                object_scope_code=None,
+                rate_context_code=None,
                 diagnostics={"preferred_stage_number": "2.7.8"},
             )
         ],
@@ -368,23 +412,31 @@ def test_stage_aware_groups_add_catalog_recommendations_by_template_stage(monkey
     groups = _build_stage_aware_groups([e1], {"e1": "R001"}, batch, diagnostics)
 
     target = next(g for g in groups if g.get("template_stage_number") == "2.7.8")
-    added = [it for it in target["items"] if it["origin"] == "ai_added"]
-    assert added == [
-        {
-            "name": "Подача кирпича и раствора",
-            "origin": "ai_added",
-            "row_key": None,
-            "review_status": "pending",
-            "ai_reason": "Рекомендовано из загруженного справочника работ",
-            "recommendation_source": "work_rate_catalog",
-            "source_rate_id": "labor:8:66",
-            "rate_item_id": "rate-1",
-            "rate_mapping_id": "map-1",
-            "operation_code": "brick_material_lifting",
-            "semantic_stage_option_id": None,
-            "stage_option_source": "work_rate_catalog",
-        }
-    ]
+    added = [it for it in target["items"] if it["origin"] == "from_catalog"]
+    assert len(added) == 1
+    assert added[0] == {
+        "name": "Подача кирпича и раствора",
+        "origin": "from_catalog",
+        "row_key": None,
+        "review_status": "accepted",
+        "ai_reason": "Рекомендовано из загруженного справочника работ",
+        "recommendation_source": "work_rate_catalog",
+        "source_rate_id": "labor:8:66",
+        "rate_item_id": "rate-1",
+        "rate_mapping_id": "map-1",
+        "operation_code": "brick_material_lifting",
+        "taxonomy_code": "load_bearing_walls/brick_material_lifting",
+        "work_subtype_code": "load_bearing_walls/brick_material_lifting",
+        "object_scope_code": None,
+        "rate_context_code": None,
+        "unit": "компл.",
+        "unit_code": "set",
+        "labor_hours_per_unit": 2.5,
+        "norm_base_quantity": 1.0,
+        "semantic_stage_option_id": None,
+        "stage_option_source": "work_rate_catalog",
+        "work_scope_key": "rate_item:rate-1:mapping:map-1",
+    }
     assert diagnostics["catalog_recommendations"][0]["preferred_stage_number"] == "2.7.8"
 
 

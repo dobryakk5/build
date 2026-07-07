@@ -12,6 +12,7 @@ from app.models import KtpEstimateSession, KtpWbsGroup, KtpWbsItem
 from app.models.project import ProjectMember
 from app.services import ktp_estimate_service as svc
 from app.services import work_taxonomy_service
+from app.services.work_rate_review_labels import rate_review_label
 from app.services.ktp_errors import KtpDomainError
 from app.services.estimate_batch_revalidation_service import BlockedBatchGuard, RevalidationDomainError
 
@@ -273,6 +274,7 @@ class SessionSubtypeOut(BaseModel):
     rate_auto_applicable: bool = False
     rate_needs_review: bool = False
     rate_review_reason: str | None = None
+    rate_review_label: str | None = None
     resolved_labor_source: str | None = None
     resolved_labor_hours: float | None = None
     rate_catalog_version: str | None = None
@@ -323,6 +325,7 @@ class SessionSubtypeOut(BaseModel):
             rate_auto_applicable=bool(getattr(s, "rate_auto_applicable", False)),
             rate_needs_review=bool(getattr(s, "rate_needs_review", False)),
             rate_review_reason=getattr(s, "rate_review_reason", None),
+            rate_review_label=rate_review_label(getattr(s, "rate_review_reason", None)),
             resolved_labor_source=getattr(s, "resolved_labor_source", None),
             resolved_labor_hours=_float_attr("resolved_labor_hours"),
             rate_catalog_version=getattr(s, "rate_catalog_version", None),

@@ -286,23 +286,11 @@ class WorkRateSelectionService:
         original_reason: str | None = None,
         original_sub_reason: str | None = None,
     ) -> RateSelectionResult:
-        if operation_code in self.operation_packages:
-            return RateSelectionResult(
-                status="needs_decomposition",
-                rate_source=None,
-                operation_code=operation_code,
-                suggested_operation_code=suggested_operation_code,
-                taxonomy_code=taxonomy_code,
-                object_scope_code=object_scope_code,
-                rate_context_code=rate_context_code,
-                rate_variant_code=rate_variant_code,
-                unit_code=unit_code,
-                needs_review=True,
-                review_reason="atomic_work_required",
-                review_sub_reason="package_expansion_required",
-                rate_auto_applicable=False,
-                candidates=list(candidates or []),
-            )
+        # At this point the KTP flow has already resolved a concrete work type
+        # (taxonomy_code).  A package-like operation code is therefore allowed
+        # to behave as one complex but atomic work for rate selection.  Do not
+        # return atomic_work_required here; that clarification belongs to the
+        # earlier work-type selection stage when no single taxonomy_code exists.
         if unit_code:
             key = build_work_rate_key(
                 taxonomy_code=taxonomy_code,

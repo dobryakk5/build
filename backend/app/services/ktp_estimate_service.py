@@ -119,6 +119,55 @@ LEGACY_KTP_STAGE3_CLARIFICATION_KEY = "__ktp_stage3"
 MAX_PROMPT_CLARIFICATION_LINES = 80
 CATALOG_RECOMMENDATION_SOURCE = "work_rate_catalog"
 
+CATALOG_RATE_SCOPE_PREFIX = "rate_item:"
+
+_CANONICAL_UNIT_DISPLAY: dict[str, str] = {
+    "m2": "м²",
+    "m3": "м³",
+    "m": "м",
+    "pcs": "шт.",
+    "kg": "кг",
+    "t": "т",
+    "set": "компл.",
+}
+
+
+def _display_unit_for_rate_unit(unit_code: Any) -> str | None:
+    unit_code = str(unit_code or "").strip()
+    if not unit_code:
+        return None
+    return _CANONICAL_UNIT_DISPLAY.get(unit_code, unit_code)
+
+
+def _catalog_work_scope_key(rate_item_id: Any, rate_mapping_id: Any | None = None) -> str | None:
+    rate_item_id = str(rate_item_id or "").strip()
+    if not rate_item_id:
+        return None
+    rate_mapping_id = str(rate_mapping_id or "").strip()
+    if rate_mapping_id:
+        return f"{CATALOG_RATE_SCOPE_PREFIX}{rate_item_id}:mapping:{rate_mapping_id}"
+    return f"{CATALOG_RATE_SCOPE_PREFIX}{rate_item_id}"
+
+
+def _rate_item_id_from_work_scope_key(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.startswith(CATALOG_RATE_SCOPE_PREFIX):
+        tail = text[len(CATALOG_RATE_SCOPE_PREFIX):]
+        return tail.split(":mapping:", 1)[0].strip() or None
+    return None
+
+
+def _rate_mapping_id_from_work_scope_key(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text or not text.startswith(CATALOG_RATE_SCOPE_PREFIX):
+        return None
+    marker = ":mapping:"
+    if marker not in text:
+        return None
+    return text.split(marker, 1)[1].strip() or None
+
 
 def _normalize_section_title(raw: Any) -> str:
     if raw is None:
@@ -1997,6 +2046,9 @@ def _append_catalog_recommendations(
 
     for item in catalog_items:
         mapping = _primary_catalog_mapping(str(item.id), mappings_by_item)
+        if mapping is None:
+            skipped.append({"name": getattr(item, "name", ""), "reason": "catalog_mapping_missing"})
+            continue
         preferred_stage_number = _preferred_catalog_stage_number(item, mapping)
         if not preferred_stage_number:
             continue
@@ -2031,19 +2083,38 @@ def _append_catalog_recommendations(
         if stage_option_id and selected_group_option and stage_option_id != selected_group_option:
             skipped.append({"name": item.name, "reason": "stage_option_not_selected"})
             continue
+        payload = item.source_payload if isinstance(getattr(item, "source_payload", None), dict) else {}
+        operation_code = (
+            str(getattr(mapping, "operation_code", None) or "").strip()
+            or str(payload.get("selected_target_code") or "").strip()
+            or None
+        )
         raw_item = {
             "name": item.name,
-            "origin": "ai_added",
+            # A catalogue recommendation is not an AI gap-fill.  It already has
+            # a stable catalogue row, unit and labour norm and must therefore be
+            # resolved through the global catalogue without asking the user for
+            # a personal rate.
+            "origin": "from_catalog",
             "row_key": None,
-            "review_status": "pending",
+            "review_status": "accepted",
             "ai_reason": "Рекомендовано из загруженного справочника работ",
             "recommendation_source": CATALOG_RECOMMENDATION_SOURCE,
             "source_rate_id": getattr(item, "source_rate_id", None),
             "rate_item_id": item.id,
             "rate_mapping_id": getattr(mapping, "id", None) if mapping else None,
-            "operation_code": sorted(operation_codes)[0] if operation_codes else None,
+            "operation_code": operation_code,
+            "taxonomy_code": getattr(mapping, "taxonomy_code", None) if mapping else None,
+            "work_subtype_code": getattr(mapping, "taxonomy_code", None) if mapping else None,
+            "object_scope_code": getattr(mapping, "object_scope_code", None) if mapping else None,
+            "rate_context_code": getattr(mapping, "rate_context_code", None) if mapping else None,
+            "unit": _display_unit_for_rate_unit(getattr(item, "unit_code", None)),
+            "unit_code": getattr(item, "unit_code", None),
+            "labor_hours_per_unit": getattr(item, "labor_avg", None),
+            "norm_base_quantity": getattr(item, "norm_base_quantity", 1.0) or 1.0,
             "semantic_stage_option_id": stage_option_id,
             "stage_option_source": CATALOG_RECOMMENDATION_SOURCE,
+            "work_scope_key": _catalog_work_scope_key(item.id, getattr(mapping, "id", None)),
         }
         target_group.setdefault("items", []).append(raw_item)
         existing_names.add(norm)
@@ -3704,7 +3775,25 @@ def _materialize_wbs(
                 return
         projected_name = str(projection.get("name") or fallback_name).strip() or fallback_name
         work_type_fields = _work_type_fields(projected_name, estimate)
-        if origin == "ai_added" and raw_item.get("recommendation_source") == CATALOG_RECOMMENDATION_SOURCE:
+        if origin == "from_catalog" or (
+            origin == "ai_added"
+            and raw_item.get("recommendation_source") == CATALOG_RECOMMENDATION_SOURCE
+        ):
+            taxonomy_code = (
+                raw_item.get("work_subtype_code")
+                or raw_item.get("taxonomy_code")
+                or projection.get("work_subtype_code")
+                or projection.get("taxonomy_code")
+            )
+            if taxonomy_code:
+                work_type_fields["work_subtype_code"] = taxonomy_code
+                work_type_fields["work_subtype_name"] = (
+                    raw_item.get("work_subtype_name")
+                    or projection.get("work_subtype_name")
+                    or work_type_fields.get("work_subtype_name")
+                )
+                work_type_fields["work_type_confidence"] = "catalog"
+                work_type_fields["work_type_source"] = "work_rate_catalog"
             work_type_fields["work_type_needs_review"] = False
             work_type_fields["operator_review_required"] = False
         labor = (
@@ -3724,15 +3813,18 @@ def _materialize_wbs(
             sort_order=float(item_index) * 1000.0 + projection_index / 1000.0,
             origin=origin,
             estimate_id=estimate.id if estimate else None,
-            unit=projection.get("unit") if estimate else None,
-            quantity=projection.get("quantity") if estimate else None,
-            quantity_source=(projection.get("quantity_source") if estimate else None),
+            unit=projection.get("unit"),
+            quantity=projection.get("quantity"),
+            quantity_source=projection.get("quantity_source"),
             review_status=(
-                "pending"
-                if origin == "ai_added"
-                or projection.get("needs_review")
-                or labor.get("needs_review")
-                else "accepted"
+                str(raw_item.get("review_status") or "").strip()
+                or (
+                    "pending"
+                    if origin == "ai_added"
+                    or projection.get("needs_review")
+                    or labor.get("needs_review")
+                    else "accepted"
+                )
             ),
             ai_reason=(
                 str(raw_item.get("ai_reason")).strip()
@@ -3742,6 +3834,18 @@ def _materialize_wbs(
             **work_type_fields,
         )
         _set_metadata(item, projection_metadata(projection))
+        if origin == "from_catalog":
+            _set_metadata(
+                item,
+                {
+                    "norm_source": "rate_catalog",
+                    "norm_kind": "norm_time",
+                    "norm_value": projection.get("labor_hours_per_unit"),
+                    "norm_unit": projection.get("unit_code") or projection.get("unit"),
+                    "norm_ref": projection.get("rate_item_id")
+                    or _rate_item_id_from_work_scope_key(projection.get("work_scope_key")),
+                },
+            )
         if labor:
             _set_metadata(
                 item,
@@ -3848,10 +3952,10 @@ def _materialize_wbs(
                 ai_item_counter += 1
                 projection_payloads = [{
                     "name": name,
-                    "quantity": None,
-                    "unit": None,
-                    "quantity_source": None,
-                    "needs_review": False,
+                    "quantity": raw_it.get("quantity"),
+                    "unit": raw_it.get("unit") or raw_it.get("unit_code"),
+                    "quantity_source": raw_it.get("quantity_source"),
+                    "needs_review": bool(raw_it.get("needs_review", False)),
                     "target_stage_instance_id": raw_g.get("stage_instance_id"),
                     "target_template_stage_number": raw_g.get("template_stage_number")
                     or raw_g.get("work_stage_number"),
@@ -3867,9 +3971,24 @@ def _materialize_wbs(
                     "floor_component": raw_g.get("floor_component"),
                     "component_role": raw_g.get("component_role"),
                     "operation_code": raw_it.get("operation_code"),
+                    "operation_package_code": raw_it.get("operation_package_code"),
+                    "object_scope_code": raw_it.get("object_scope_code"),
+                    "rate_context_code": raw_it.get("rate_context_code"),
+                    "taxonomy_code": raw_it.get("taxonomy_code"),
+                    "work_subtype_code": raw_it.get("work_subtype_code"),
+                    "unit_code": raw_it.get("unit_code"),
+                    "rate_item_id": raw_it.get("rate_item_id"),
+                    "rate_mapping_id": raw_it.get("rate_mapping_id"),
+                    "source_rate_id": raw_it.get("source_rate_id"),
+                    "labor_hours_per_unit": raw_it.get("labor_hours_per_unit"),
+                    "norm_base_quantity": raw_it.get("norm_base_quantity"),
                     "semantic_stage_option_id": raw_it.get("semantic_stage_option_id"),
                     "stage_option_source": raw_it.get("stage_option_source"),
-                    "work_scope_key": raw_it.get("source_rate_id") or raw_it.get("rate_item_id"),
+                    "work_scope_key": raw_it.get("work_scope_key")
+                    or _catalog_work_scope_key(
+                        raw_it.get("rate_item_id"), raw_it.get("rate_mapping_id")
+                    )
+                    or raw_it.get("source_rate_id"),
                 }]
 
             for projection_index, projection in enumerate(projection_payloads, start=1):
@@ -4178,6 +4297,8 @@ async def accept_stage1_items(
         .where(KtpWbsItem.session_id == session_id)
         .where(KtpWbsItem.origin == "ai_added")
         .where(KtpWbsItem.review_status == "pending")
+        .where(KtpWbsItem.unit.is_not(None))
+        .where(KtpWbsItem.quantity.is_not(None))
         .values(
             review_status="accepted",
             work_type_needs_review=False,
@@ -5504,7 +5625,7 @@ async def _attach_session_subtype_rate_projection(
     )
     hours_per_day = float(batch.hours_per_day) if batch and batch.hours_per_day else 8.0
     batch_crew = int(batch.workers_count) if batch and batch.workers_count else None
-    project_variant_id = None
+    project_variant_id = (str(batch.project_variant_id or "").strip() or None) if batch else None
 
     subtype_codes = {
         base_subtype_code(str(row.work_subtype_code or row.subtype_code))
@@ -5535,6 +5656,12 @@ async def _attach_session_subtype_rate_projection(
     selector = WorkRateSelectionService(_work_rate_operation_packages())
     item_by_rate_id = {item.id: item for item in catalog.items if item.is_active}
     source_by_id = {source.id: source for source in catalog.sources if source.is_active}
+    mappings_by_item: dict[str, list[Any]] = {}
+    mapping_by_id: dict[str, Any] = {}
+    for mapping in catalog.mappings:
+        if getattr(mapping, "is_active", True):
+            mappings_by_item.setdefault(str(mapping.rate_item_id), []).append(mapping)
+            mapping_by_id[str(getattr(mapping, "id", ""))] = mapping
 
     for row in rows:
         stored_operator_selection = _stored_operator_rate_selection(row) if row.output_source == "manual" else {}
@@ -5546,15 +5673,41 @@ async def _attach_session_subtype_rate_projection(
         item = items_by_id.get(str(row.item_id)) if row.item_id else None
         estimate = estimates_by_id.get(str(item.estimate_id)) if item and item.estimate_id else None
         raw = estimate.raw_data if estimate and isinstance(estimate.raw_data, dict) else {}
+        from_catalog_rate_item = None
+        from_catalog_mapping = None
+        if item and item.origin == "from_catalog":
+            from_catalog_rate_item_id = (
+                getattr(item, "norm_ref", None)
+                or _rate_item_id_from_work_scope_key(getattr(item, "work_scope_key", None))
+            )
+            from_catalog_rate_item = item_by_rate_id.get(str(from_catalog_rate_item_id)) if from_catalog_rate_item_id else None
+            if from_catalog_rate_item is not None:
+                selected_mapping_id = (
+                    _rate_mapping_id_from_work_scope_key(getattr(item, "work_scope_key", None))
+                    or str(getattr(item, "selected_rate_mapping_id", "") or "").strip()
+                )
+                from_catalog_mapping = (
+                    mapping_by_id.get(selected_mapping_id)
+                    if selected_mapping_id
+                    else None
+                ) or _primary_catalog_mapping(
+                    str(from_catalog_rate_item.id), mappings_by_item
+                )
+                if not row.unit and getattr(from_catalog_rate_item, "unit_code", None):
+                    row.unit = _display_unit_for_rate_unit(from_catalog_rate_item.unit_code)
+                if not item.unit and getattr(from_catalog_rate_item, "unit_code", None):
+                    item.unit = _display_unit_for_rate_unit(from_catalog_rate_item.unit_code)
 
         taxonomy_code = (
-            row.work_subtype_code
+            (getattr(from_catalog_mapping, "taxonomy_code", None) if from_catalog_mapping else None)
+            or row.work_subtype_code
             or (item.work_subtype_code if item else None)
             or (estimate.work_subtype_code if estimate else None)
             or base_subtype_code(row.subtype_code)
         )
         operation_code = (
-            getattr(item, "operation_code", None)
+            (getattr(from_catalog_mapping, "operation_code", None) if from_catalog_mapping else None)
+            or getattr(item, "operation_code", None)
             or raw.get("operation_code")
             or raw.get("selected_operation_code")
         )
@@ -5566,11 +5719,16 @@ async def _attach_session_subtype_rate_projection(
         )
         section_title = raw.get("section_title") or (estimate.section if estimate else None)
         section_description = raw.get("section_description")
-        unit_code, _dimension, _factor = normalize_work_rate_unit(
-            (item.unit if item and item.unit else None)
-            or (estimate.unit if estimate else None)
-            or row.unit
-        )
+        if from_catalog_rate_item is not None and getattr(from_catalog_rate_item, "unit_code", None):
+            unit_code = str(from_catalog_rate_item.unit_code or "").strip() or None
+            _dimension = None
+            _factor = 1.0 if unit_code else None
+        else:
+            unit_code, _dimension, _factor = normalize_work_rate_unit(
+                (item.unit if item and item.unit else None)
+                or (estimate.unit if estimate else None)
+                or row.unit
+            )
         detected_operations: list[str] = []
         if not operation_code and taxonomy_code:
             operation_code = _TAXONOMY_OPERATION_FALLBACKS.get(
@@ -5643,20 +5801,29 @@ async def _attach_session_subtype_rate_projection(
         # Rate matching is exact by unit. Geometry conversions are not part of
         # the personal-catalog flow and therefore cannot silently change the
         # selected norm.
+        selected_object_scope_code = (
+            (getattr(from_catalog_mapping, "object_scope_code", None) if from_catalog_mapping else None)
+            or raw.get("selected_object_scope_code")
+            or raw.get("object_scope_code")
+        )
+        selected_rate_context_code = (
+            (getattr(from_catalog_mapping, "rate_context_code", None) if from_catalog_mapping else None)
+            or raw.get("rate_context_code")
+        )
         rate_applicability = {
             "project_variant_id": row_project_variant_id,
             "template_stage_number": raw.get("template_stage_number") or raw.get("work_stage_number"),
             "semantic_stage_option_id": raw.get("semantic_stage_option_id") or raw.get("preferred_stage_option_id"),
             "floor_number": raw.get("floor_number"),
             "floor_kind": raw.get("floor_kind"),
-            "rate_context_code": raw.get("rate_context_code"),
+            "rate_context_code": selected_rate_context_code,
             "object_scope_required": bool(raw.get("object_scope_required")),
         }
         selection = selector.select_rate(
             taxonomy_code=str(taxonomy_code),
             operation_code=str(operation_code),
-            object_scope_code=raw.get("selected_object_scope_code") or raw.get("object_scope_code"),
-            rate_context_code=raw.get("rate_context_code"),
+            object_scope_code=selected_object_scope_code,
+            rate_context_code=selected_rate_context_code,
             quantity=quantity,
             unit_code=unit_code,
             work_name=(item.name if item else None) or row.subtype_name,
@@ -5888,7 +6055,7 @@ async def build_session_subtypes(
         it
         for g in groups
         for it in g.items
-        if it.review_status != "rejected"
+        if it.review_status == "accepted"
     ]
 
     estimate_ids = [it.estimate_id for it in items if it.estimate_id]
@@ -5937,11 +6104,12 @@ async def build_session_subtypes(
         ref = subtypes_by_code.get(base_code)  # None для работ без подтипа
         stored_code = session_subtype_code(it, base_code)
         display_name = sub_name or (it.name or "").strip() or base_code
-        volume = (
-            float(it.quantity)
-            if it.quantity is not None and float(it.quantity) > 0
-            else _DEFAULT_VOLUME
-        )
+        if it.quantity is not None and float(it.quantity) > 0:
+            volume = float(it.quantity)
+        elif it.origin in {"from_catalog", "ai_added"}:
+            volume = None
+        else:
+            volume = _DEFAULT_VOLUME
         crew_value, crew_src = _crew_default(ref)
         key = (stored_code, unit)
         kept_keys.add(key)

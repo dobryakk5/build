@@ -49,6 +49,16 @@ SUM_RE = re.compile(r"SUM\(([^()]+)\)", re.IGNORECASE)
 
 
 UNIT_ALIASES: dict[str, tuple[str, str, float]] = {
+    # Canonical unit codes are accepted here as well because internal KTP
+    # catalogue recommendations store normalized units before they are rendered
+    # for users.
+    "m2": ("m2", "area", 1.0),
+    "m3": ("m3", "volume", 1.0),
+    "m": ("m", "length", 1.0),
+    "pcs": ("pcs", "count", 1.0),
+    "kg": ("kg", "weight", 1.0),
+    "t": ("t", "weight", 1.0),
+    "set": ("set", "scope", 1.0),
     "м2": ("m2", "area", 1.0),
     "м²": ("m2", "area", 1.0),
     "кв м": ("m2", "area", 1.0),

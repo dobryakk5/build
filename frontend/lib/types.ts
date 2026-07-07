@@ -900,7 +900,7 @@ export interface KtpWbsItem {
   group_id: string;
   name: string;
   sort_order: number;
-  origin: "from_estimate" | "ai_added" | "manual";
+  origin: "from_estimate" | "from_catalog" | "ai_added" | "manual";
   estimate_id?: string | null;
   unit?: string | null;
   quantity?: number | null;
@@ -1013,6 +1013,7 @@ export interface KtpSessionSubtype {
   rate_auto_applicable?: boolean;
   rate_needs_review?: boolean;
   rate_review_reason?: string | null;
+  rate_review_label?: string | null;
   resolved_labor_source?: string | null;
   resolved_labor_hours?: number | null;
   rate_catalog_version?: string | null;

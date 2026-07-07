@@ -19,6 +19,7 @@ import type {
 } from "@/lib/types";
 
 const ORIGIN_BADGE: Partial<Record<KtpWbsItem["origin"], { label: string; color: string }>> = {
+  from_catalog: { label: "из каталога", color: "#15803d" },
   manual: { label: "вручную", color: "#2563eb" },
 };
 
