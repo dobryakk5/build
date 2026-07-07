@@ -1012,6 +1012,19 @@ export const ktpEstimate = {
       `/projects/${projectId}/ktp-estimate/session-subtypes/${subtypeId}`,
       { method: "PATCH", body: JSON.stringify(patch) },
     ),
+  saveUserRate: (
+    projectId: string,
+    sessionId: string,
+    subtypeId: string,
+    laborHoursPerUnit: number,
+  ) =>
+    request<KtpWbs>(
+      `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/session-subtypes/${subtypeId}/user-rate`,
+      {
+        method: "PUT",
+        body: JSON.stringify({ labor_hours_per_unit: laborHoursPerUnit }),
+      },
+    ),
   approveProd: (projectId: string, sessionId: string) =>
     request<KtpEstimateSession>(
       `/projects/${projectId}/ktp-estimate/sessions/${sessionId}/approve-prod`,

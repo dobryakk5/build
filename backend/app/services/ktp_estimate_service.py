@@ -18,6 +18,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from functools import lru_cache
 from typing import Any
 
@@ -85,6 +86,11 @@ from app.services.ktp_errors import (
 from app.services.ktp_sequence_policy_service import (
     load_sequence_policy_for_session,
     sequence_policy_from_batch,
+)
+from app.services.user_work_rate_service import (
+    UserWorkRateRepository,
+    build_work_rate_key,
+    validate_labor_hours,
 )
 
 logger = logging.getLogger(__name__)
@@ -5303,6 +5309,15 @@ def _rate_projection_attrs() -> tuple[str, ...]:
         "rate_catalog_version",
         "rate_catalog_file",
         "rate_trace",
+        "rate_status",
+        "rate_source",
+        "rate_taxonomy_code",
+        "rate_operation_code",
+        "rate_object_scope_code",
+        "rate_context_code",
+        "rate_variant_code",
+        "selected_user_rate_id",
+        "user_rate_owner_id",
     )
 
 
@@ -5777,6 +5792,8 @@ async def _attach_session_subtype_rate_projection(
                     else "ambiguous_atomic_operations"
                 )
             _clear_rate_projection(row, reason)
+            _set_row_projection_attr(row, "rate_status", "needs_clarification")
+            _set_row_projection_attr(row, "rate_source", None)
             row.item_unit_code = unit_code
             _set_rate_trace(
                 row,
@@ -5967,6 +5984,15 @@ async def _attach_session_subtype_rate_projection(
         resolved_labor_hours = catalog_total if selection.rate_auto_applicable else None
         resolved_labor_source = "catalog_independent" if resolved_labor_hours else None
 
+        _set_row_projection_attr(row, "rate_status", selection.status)
+        _set_row_projection_attr(row, "rate_source", selection.rate_source)
+        _set_row_projection_attr(row, "rate_taxonomy_code", selection.taxonomy_code or taxonomy_code)
+        _set_row_projection_attr(row, "rate_operation_code", selection.operation_code or operation_code)
+        _set_row_projection_attr(row, "rate_object_scope_code", selection.object_scope_code)
+        _set_row_projection_attr(row, "rate_context_code", selection.rate_context_code)
+        _set_row_projection_attr(row, "rate_variant_code", selection.rate_variant_code)
+        _set_row_projection_attr(row, "selected_user_rate_id", selection.user_rate_id)
+        _set_row_projection_attr(row, "user_rate_owner_id", selection.user_rate_owner_id)
         _set_row_projection_attr(row, "selected_rate_item_id", operator_selected_rate_item_id or selection.rate_item_id)
         _set_row_projection_attr(row, "selected_rate_mapping_id", operator_selected_rate_mapping_id or selection.rate_mapping_id)
         row.rate_unit_code = selection.unit_code
@@ -6282,6 +6308,122 @@ async def update_session_subtype(
     row.updated_at = _now()
     await db.commit()
     return await get_wbs(db, project_id, row.session_id)
+
+
+async def save_user_rate_from_session_subtype(
+    db: AsyncSession,
+    project_id: str,
+    session_id: str,
+    subtype_id: str,
+    *,
+    labor_hours_per_unit: Decimal,
+    user_id: str,
+) -> dict[str, Any]:
+    """Create/update a personal rate directly from a KTP productivity row."""
+    session = await db.scalar(
+        select(KtpEstimateSession)
+        .where(KtpEstimateSession.id == session_id)
+        .where(KtpEstimateSession.project_id == project_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not session:
+        raise KtpNotFoundError(f"Сеанс КТП {session_id} не найден в проекте {project_id}")
+
+    batch = await db.scalar(
+        select(EstimateBatch)
+        .where(EstimateBatch.id == session.estimate_batch_id)
+        .where(EstimateBatch.project_id == project_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not batch:
+        raise KtpNotFoundError("Пакет сметы не найден")
+
+    rate_owner_user_id = str(batch.rate_owner_user_id or "")
+    if not rate_owner_user_id:
+        raise ValueError("rate_owner_user_id_required")
+    if rate_owner_user_id != str(user_id):
+        raise PermissionError("rate_catalog_owner_required")
+
+    row = await db.scalar(
+        select(KtpSessionSubtype)
+        .where(KtpSessionSubtype.id == subtype_id)
+        .where(KtpSessionSubtype.session_id == session_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if not row:
+        raise KtpNotFoundError("Строка производительности не найдена")
+
+    value = validate_labor_hours(labor_hours_per_unit)
+    await _attach_session_subtype_rate_projection(db, session_id, [row])
+    if (
+        getattr(row, "rate_status", None) == "resolved"
+        and getattr(row, "rate_source", None) == "global_catalog"
+    ):
+        raise ValueError("global_rate_already_available")
+    if (
+        getattr(row, "rate_status", None) != "needs_user_rate"
+        or getattr(row, "rate_source", None) is not None
+    ):
+        raise ValueError(
+            getattr(row, "rate_review_reason", None)
+            or "session_subtype_not_awaiting_user_rate"
+        )
+
+    key = build_work_rate_key(
+        taxonomy_code=(
+            getattr(row, "rate_taxonomy_code", None)
+            or row.work_subtype_code
+            or base_subtype_code(row.subtype_code)
+        ),
+        operation_code=getattr(row, "rate_operation_code", None),
+        object_scope_code=getattr(row, "rate_object_scope_code", None),
+        rate_context_code=getattr(row, "rate_context_code", None),
+        rate_variant_code=getattr(row, "rate_variant_code", None),
+        unit_code=(
+            getattr(row, "rate_unit_code", None)
+            or getattr(row, "item_unit_code", None)
+        ),
+    )
+
+    repository = UserWorkRateRepository()
+    record = await repository.upsert(
+        db,
+        user_id=rate_owner_user_id,
+        key=key,
+        labor_hours_per_unit=value,
+        work_name_snapshot=str(row.subtype_name or key.taxonomy_code),
+        source_estimate_batch_id=str(session.estimate_batch_id),
+        source_estimate_row_id=None,
+        taxonomy_version_at_creation=getattr(batch, "taxonomy_dictionary_version", None),
+    )
+
+    rows = list(
+        await db.scalars(
+            select(KtpSessionSubtype)
+            .where(KtpSessionSubtype.session_id == session_id)
+            .order_by(KtpSessionSubtype.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    )
+    await _attach_session_subtype_rate_projection(db, session_id, rows)
+    current = next(
+        (candidate for candidate in rows if str(candidate.id) == str(subtype_id)),
+        row,
+    )
+    if (
+        getattr(current, "rate_status", None) != "resolved"
+        or getattr(current, "rate_source", None) != "user_catalog"
+        or str(getattr(current, "selected_user_rate_id", "") or "") != str(record.id)
+    ):
+        await db.rollback()
+        raise ValueError("saved_user_rate_not_applied")
+
+    await db.commit()
+    return await get_wbs(db, project_id, session_id)
 
 
 async def approve_prod(

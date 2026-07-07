@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -273,8 +274,15 @@ class SessionSubtypeOut(BaseModel):
     session_calculated_labor_hours_max: float | None = None
     rate_auto_applicable: bool = False
     rate_needs_review: bool = False
+    rate_status: str | None = None
+    rate_source: str | None = None
     rate_review_reason: str | None = None
     rate_review_label: str | None = None
+    required_action: str = "none"
+    can_create_user_rate: bool = False
+    can_create_user_rate_reason: str | None = None
+    can_update_quantity: bool = False
+    display_unit: str | None = None
     resolved_labor_source: str | None = None
     resolved_labor_hours: float | None = None
     rate_catalog_version: str | None = None
@@ -287,6 +295,9 @@ class SessionSubtypeOut(BaseModel):
             value = getattr(s, name, None)
             return float(value) if value is not None else None
 
+        rate_status = _subtype_rate_status(s)
+        required_action = _subtype_required_action(s)
+        can_create_user_rate = required_action == "enter_labor_rate"
         return cls(
             id=s.id,
             # на фронт отдаём чистый код подтипа (без per-item суффикса)
@@ -324,8 +335,19 @@ class SessionSubtypeOut(BaseModel):
             session_calculated_labor_hours_max=_float_attr("session_calculated_labor_hours_max"),
             rate_auto_applicable=bool(getattr(s, "rate_auto_applicable", False)),
             rate_needs_review=bool(getattr(s, "rate_needs_review", False)),
+            rate_status=rate_status,
+            rate_source=getattr(s, "rate_source", None),
             rate_review_reason=getattr(s, "rate_review_reason", None),
             rate_review_label=rate_review_label(getattr(s, "rate_review_reason", None)),
+            required_action=required_action,
+            can_create_user_rate=can_create_user_rate,
+            can_create_user_rate_reason=(
+                None
+                if can_create_user_rate
+                else rate_review_label(getattr(s, "rate_review_reason", None))
+            ),
+            can_update_quantity=required_action == "enter_quantity",
+            display_unit=_display_unit(s.unit, getattr(s, "item_unit_code", None)),
             resolved_labor_source=getattr(s, "resolved_labor_source", None),
             resolved_labor_hours=_float_attr("resolved_labor_hours"),
             rate_catalog_version=getattr(s, "rate_catalog_version", None),
@@ -451,6 +473,71 @@ class SessionSubtypePatch(BaseModel):
     lag_after_days: int | None = None
     selected_rate_item_id: str | None = None
     selected_rate_mapping_id: str | None = None
+
+
+class SessionSubtypeUserRateRequest(BaseModel):
+    labor_hours_per_unit: Decimal = Field(gt=0, max_digits=18, decimal_places=6)
+
+
+def _display_unit(unit: str | None, unit_code: str | None = None) -> str | None:
+    mapping = {
+        "m2": "м²",
+        "m3": "м³",
+        "m": "м",
+        "pcs": "шт.",
+        "kg": "кг",
+        "t": "т",
+        "set": "компл.",
+        "object": "объект",
+        "building": "здание",
+        "floor": "этаж",
+        "block": "блок",
+        "pile_head": "оголовок сваи",
+        "slab": "плита",
+        "unit": "ед.",
+    }
+    text = str(unit or unit_code or "").strip()
+    return mapping.get(text, text or None)
+
+
+def _subtype_rate_status(s) -> str:
+    reason = getattr(s, "rate_review_reason", None)
+    source = getattr(s, "rate_source", None)
+    status = getattr(s, "rate_status", None)
+    if status:
+        return str(status)
+    if bool(getattr(s, "rate_auto_applicable", False)) and reason == "quantity_missing":
+        return "quantity_missing"
+    if bool(getattr(s, "rate_auto_applicable", False)):
+        return "resolved"
+    if reason == "user_rate_input_required":
+        return "needs_user_rate"
+    if reason:
+        return "needs_clarification"
+    if source:
+        return "resolved"
+    return "unknown"
+
+
+def _subtype_required_action(s) -> str:
+    reason = getattr(s, "rate_review_reason", None)
+    status = _subtype_rate_status(s)
+    if status == "needs_user_rate" or reason == "user_rate_input_required":
+        return "enter_labor_rate"
+    if reason == "quantity_missing" or status == "quantity_missing":
+        return "enter_quantity"
+    if reason == "work_unit_required":
+        return "clarify_unit"
+    if reason in {
+        "operation_resolution_failed",
+        "work_classification_required",
+    }:
+        return "clarify_work_type"
+    if reason == "atomic_work_required":
+        return "decompose_or_choose_type"
+    if reason in {"object_scope_required", "rate_context_required", "rate_variant_required"}:
+        return "clarify_work_type"
+    return "none" if status == "resolved" else "read_only"
 
 
 def _value_error(exc: ValueError) -> HTTPException:
@@ -837,6 +924,44 @@ async def patch_session_subtype(
         _raise_ktp_domain(exc)
     except ValueError as exc:
         raise _value_error(exc)
+    return WbsOut.of(payload)
+
+
+@router.put(
+    "/sessions/{session_id}/session-subtypes/{subtype_id}/user-rate",
+    response_model=WbsOut,
+)
+async def save_user_rate_from_session_subtype(
+    project_id: UUID,
+    session_id: UUID,
+    subtype_id: UUID,
+    body: SessionSubtypeUserRateRequest,
+    db: AsyncSession = Depends(get_db),
+    member: ProjectMember = Depends(require_action(Action.EDIT)),
+):
+    try:
+        payload = await svc.save_user_rate_from_session_subtype(
+            db,
+            str(project_id),
+            str(session_id),
+            str(subtype_id),
+            labor_hours_per_unit=body.labor_hours_per_unit,
+            user_id=member.user_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except KtpDomainError as exc:
+        _raise_ktp_domain(exc)
+    except ValueError as exc:
+        code = str(exc)
+        status_code = 409 if code in {
+            "global_rate_already_available",
+            "session_subtype_not_awaiting_user_rate",
+            "saved_user_rate_not_applied",
+            "rate_catalog_owner_required",
+            "rate_owner_user_id_required",
+        } else 422
+        raise HTTPException(status_code, code) from exc
     return WbsOut.of(payload)
 
 

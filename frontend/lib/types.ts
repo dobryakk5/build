@@ -1012,8 +1012,22 @@ export interface KtpSessionSubtype {
   session_calculated_labor_hours_max?: number | null;
   rate_auto_applicable?: boolean;
   rate_needs_review?: boolean;
+  rate_status?: "resolved" | "needs_user_rate" | "needs_clarification" | "quantity_missing" | "unknown" | string | null;
+  rate_source?: "global_catalog" | "user_catalog" | string | null;
   rate_review_reason?: string | null;
   rate_review_label?: string | null;
+  required_action?:
+    | "none"
+    | "enter_labor_rate"
+    | "enter_quantity"
+    | "clarify_unit"
+    | "clarify_work_type"
+    | "decompose_or_choose_type"
+    | "read_only";
+  can_create_user_rate?: boolean;
+  can_create_user_rate_reason?: string | null;
+  can_update_quantity?: boolean;
+  display_unit?: string | null;
   resolved_labor_source?: string | null;
   resolved_labor_hours?: number | null;
   rate_catalog_version?: string | null;

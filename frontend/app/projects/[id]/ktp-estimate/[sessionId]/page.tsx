@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowUp, Check, Download, Trash2 } from "lucide-react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 
-import { ktpEstimate, userWorkRates, workTaxonomy } from "@/lib/api";
+import { ktpEstimate, workTaxonomy } from "@/lib/api";
 import { trackActivity } from "@/lib/activity";
 import { useJobPoller } from "@/lib/useJobPoller";
 import type {
@@ -2070,6 +2070,24 @@ function catalogWarningLabel(row: KtpSessionSubtype): string {
   return row.rate_review_label || rateReviewLabel(row.rate_review_reason);
 }
 
+function rateRequiredAction(row: KtpSessionSubtype): NonNullable<KtpSessionSubtype["required_action"]> {
+  if (row.required_action && row.required_action !== "none") return row.required_action;
+  if (row.rate_review_reason === "user_rate_input_required") return "enter_labor_rate";
+  if (row.rate_review_reason === "quantity_missing") return "enter_quantity";
+  if (row.rate_review_reason === "work_unit_required") return "clarify_unit";
+  if (row.rate_review_reason === "atomic_work_required") return "decompose_or_choose_type";
+  if (
+    row.rate_review_reason === "operation_resolution_failed" ||
+    row.rate_review_reason === "work_classification_required" ||
+    row.rate_review_reason === "object_scope_required" ||
+    row.rate_review_reason === "rate_context_required" ||
+    row.rate_review_reason === "rate_variant_required"
+  ) {
+    return "clarify_work_type";
+  }
+  return row.required_action || "none";
+}
+
 function acceptedCatalogOutput(row: KtpSessionSubtype): number | null {
   const labor = row.effective_labor_hours_per_unit_avg ?? row.labor_hours_per_unit_avg;
   const crew = row.crew_size;
@@ -2133,8 +2151,14 @@ function unitLabel(code: string | null | undefined): string {
     t: "т",
     kg: "кг",
     pcs: "шт.",
+    object: "объект",
+    building: "здание",
+    floor: "этаж",
+    block: "блок",
+    pile_head: "оголовок сваи",
     slab: "плита",
     set: "компл.",
+    unit: "ед.",
   };
   return code ? map[code] || code : "ед.";
 }
@@ -2286,6 +2310,7 @@ function StageProductivity({
   const [selectingSubtypeId, setSelectingSubtypeId] = useState<string | null>(null);
   const [selectedTaxonomySection, setSelectedTaxonomySection] = useState<string>("");
   const [userRateDrafts, setUserRateDrafts] = useState<Record<string, string>>({});
+  const [quantityDrafts, setQuantityDrafts] = useState<Record<string, string>>({});
   const [hoveredRateCandidateKey, setHoveredRateCandidateKey] = useState<string | null>(null);
   const filled = subtypes.filter(
     (s) => s.output_per_day != null && s.output_per_day > 0 && s.volume != null && s.volume > 0 && Boolean(s.unit?.trim()),
@@ -2346,12 +2371,10 @@ function StageProductivity({
     return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
   }
 
-  async function saveUserRate(row: KtpSessionSubtype, item: KtpWbsItem | undefined) {
-    const batchId = wbs.session.estimate_batch_id;
-    const estimateRowId = item?.estimate_id;
+  async function saveUserRate(row: KtpSessionSubtype) {
     const laborHoursPerUnit = parsePositiveNumber(userRateDrafts[row.id]);
-    if (!batchId || !estimateRowId) {
-      setError("Для строки не найдена исходная позиция сметы");
+    if (!row.can_create_user_rate) {
+      setError(row.can_create_user_rate_reason || "Для этой строки пока нельзя сохранить личную норму");
       return;
     }
     if (laborHoursPerUnit == null) {
@@ -2362,24 +2385,32 @@ function StageProductivity({
     setBusy(true);
     setError(null);
     try {
-      await userWorkRates.saveFromEstimateRow(
-        projectId,
-        batchId,
-        estimateRowId,
-        laborHoursPerUnit,
-      );
+      await ktpEstimate.saveUserRate(projectId, sessionId, row.id, laborHoursPerUnit);
       setUserRateDrafts((current) => {
         const next = { ...current };
         delete next[row.id];
         return next;
       });
-      await ktpEstimate.buildSubtypes(projectId, sessionId);
       await reload();
     } catch (e: any) {
       setError(e.message);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function saveRequiredQuantity(row: KtpSessionSubtype) {
+    const quantity = parsePositiveNumber(quantityDrafts[row.id]);
+    if (quantity == null) {
+      setError("Укажите положительный объём работы");
+      return;
+    }
+    await saveField(row.id, { volume: quantity });
+    setQuantityDrafts((current) => {
+      const next = { ...current };
+      delete next[row.id];
+      return next;
+    });
   }
 
   async function rebuild() {
@@ -2557,7 +2588,10 @@ function StageProductivity({
                   Boolean(sourceItem?.manual_override) &&
                   sourceItem?.work_type_source === "manual";
                 const selectorOpen = selectingSubtypeId === s.id;
-                const rowUnitLabel = s.item_unit_code || s.unit || "ед.";
+                const rowUnitLabel = s.display_unit || unitLabel(s.item_unit_code || s.unit);
+                const requiredAction = rateRequiredAction(s);
+                const needsUserRate = requiredAction === "enter_labor_rate";
+                const needsQuantity = requiredAction === "enter_quantity";
                 const laborPerUnit = fmtMetricRange(
                   s.effective_labor_hours_per_unit_min ?? s.labor_hours_per_unit_min,
                   s.effective_labor_hours_per_unit_avg ?? s.labor_hours_per_unit_avg,
@@ -2568,7 +2602,10 @@ function StageProductivity({
                   s.session_calculated_labor_hours_avg,
                   s.session_calculated_labor_hours_max,
                 );
-                const catalogWarning = s.rate_auto_applicable === false ? catalogWarningLabel(s) : null;
+                const catalogWarning =
+                  s.rate_auto_applicable === false && !needsUserRate
+                    ? catalogWarningLabel(s)
+                    : null;
                 const isProvisionalRate = s.rate_review_reason === "provisional_rate_requires_approval";
                 const operatorRateConfirmed = s.output_source === "manual" && Boolean(s.selected_rate_item_id) && s.output_per_day != null;
                 const provisionalConfirmed = isProvisionalRate && operatorRateConfirmed;
@@ -2579,8 +2616,8 @@ function StageProductivity({
                 const numericCandidate = s.rate_trace?.rate_candidates?.find(
                   (candidate) => typeof candidate.normalized_value === "number",
                 );
-                const needsUserRate = s.rate_review_reason === "user_rate_input_required";
                 const userRateValue = parsePositiveNumber(userRateDrafts[s.id]);
+                const quantityValue = parsePositiveNumber(quantityDrafts[s.id]);
                 const daysInfo = workDaysInfo(s);
                 return (
                   <div
@@ -2667,7 +2704,7 @@ function StageProductivity({
                           Работа: {sourceItem.name}
                         </div>
                       )}
-                      {(laborPerUnit || sessionLabor || catalogWarning) && (
+                      {(laborPerUnit || sessionLabor || catalogWarning || needsUserRate || needsQuantity) && (
                         <div style={{ marginTop: 5, color: "var(--muted)", fontSize: 11, lineHeight: 1.35 }}>
                           {laborPerUnit ? (
                             <div>
@@ -2727,7 +2764,7 @@ function StageProductivity({
                                     selected_rate_item_id: numericCandidate?.rate_item_id || s.selected_rate_item_id || null,
                                     selected_rate_mapping_id: numericCandidate?.rate_mapping_id || s.selected_rate_mapping_id || null,
                                   })}
-                                  title={`${traceTitle ?? catalogWarning}\n\nПринять: ${fmtMetric(provisionalOutput) ?? provisionalOutput} ${s.unit || "ед."}/см`}
+                                  title={`${traceTitle ?? catalogWarning}\n\nПринять: ${fmtMetric(provisionalOutput) ?? provisionalOutput} ${rowUnitLabel}/см`}
                                   style={{
                                     display: "inline-flex",
                                     alignItems: "center",
@@ -2771,7 +2808,7 @@ function StageProductivity({
                                   candidate.source_file ? `Источник: ${candidate.source_file}` : null,
                                   candidate.source_rate_id ? `ID: ${candidate.source_rate_id}` : null,
                                   candidate.normalized_value != null ? `Ставка: ${fmtNumber(candidate.normalized_value)} чел-ч/${unitLabel(candidateUnit)}` : null,
-                                  candidateOutput != null ? `Производительность: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : null,
+                                  candidateOutput != null ? `Производительность: ${fmtNumber(candidateOutput)} ${rowUnitLabel}/см` : null,
                                 ].filter(Boolean).join("\n");
                                 const disabled = busy || candidateOutput == null;
                                 const candidateKey = [
@@ -2814,7 +2851,7 @@ function StageProductivity({
                                     </div>
                                     <div style={{ color: "#92400e" }}>
                                       {fmtNumber(candidate.normalized_value)} чел-ч/{unitLabel(candidateUnit)}
-                                      {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : ""}
+                                      {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${rowUnitLabel}/см` : ""}
                                       {candidate.source_file ? ` · ${candidate.source_file}` : ""}
                                     </div>
                                   </button>
@@ -2853,7 +2890,7 @@ function StageProductivity({
                                   candidate.source_rate_id ? `ID: ${candidate.source_rate_id}` : null,
                                   limitation || null,
                                   candidate.normalized_value != null ? `Ставка: ${fmtNumber(candidate.normalized_value)} чел-ч/${unitLabel(candidateUnit)}` : null,
-                                  candidateOutput != null ? `Производительность: ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : null,
+                                  candidateOutput != null ? `Производительность: ${fmtNumber(candidateOutput)} ${rowUnitLabel}/см` : null,
                                 ].filter(Boolean).join("\n");
                                 const disabled = busy || candidateOutput == null;
                                 const candidateKey = [
@@ -2897,7 +2934,7 @@ function StageProductivity({
                                     </div>
                                     <div style={{ color: "#92400e" }}>
                                       {componentCode}: {fmtNumber(candidate.normalized_value)} чел-ч/{unitLabel(candidateUnit)}
-                                      {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${s.unit || "ед."}/см` : ""}
+                                      {candidateOutput != null ? ` · ${fmtNumber(candidateOutput)} ${rowUnitLabel}/см` : ""}
                                       {candidate.source_file ? ` · ${candidate.source_file}` : ""}
                                     </div>
                                   </button>
@@ -2909,9 +2946,7 @@ function StageProductivity({
                             <div
                               style={{
                                 marginTop: 6,
-                                display: "flex",
-                                alignItems: "center",
-                                flexWrap: "wrap",
+                                display: "grid",
                                 gap: 8,
                                 padding: "8px 9px",
                                 border: "1px solid #2563eb55",
@@ -2920,43 +2955,98 @@ function StageProductivity({
                                 color: "#1e3a8a",
                               }}
                             >
-                              <span style={{ fontWeight: 700 }}>Укажите трудозатраты:</span>
-                              <input
-                                value={userRateDrafts[s.id] || ""}
-                                disabled={busy || !sourceItem?.estimate_id}
-                                onChange={(e) =>
-                                  setUserRateDrafts((current) => ({
-                                    ...current,
-                                    [s.id]: e.target.value,
-                                  }))
-                                }
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter" && userRateValue != null) {
-                                    void saveUserRate(s, sourceItem);
+                              <div style={{ fontWeight: 750 }}>Нет нормы трудозатрат для этой работы</div>
+                              <div>
+                                Укажите, сколько человеко-часов требуется на 1 {rowUnitLabel}. Норма сохранится в ваш личный справочник.
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                                <span style={{ fontWeight: 650 }}>Трудозатраты на 1 {rowUnitLabel}:</span>
+                                <input
+                                  value={userRateDrafts[s.id] || ""}
+                                  disabled={busy || !s.can_create_user_rate}
+                                  onChange={(e) =>
+                                    setUserRateDrafts((current) => ({
+                                      ...current,
+                                      [s.id]: e.target.value,
+                                    }))
                                   }
-                                }}
-                                placeholder="0,85"
-                                inputMode="decimal"
-                                aria-label={`Трудозатраты на 1 ${unitLabel(rowUnitLabel)}`}
-                                style={{ ...inputLike, width: 90, height: 30, padding: "4px 7px" }}
-                              />
-                              <span>чел.-ч на 1 {unitLabel(rowUnitLabel)}</span>
-                              <button
-                                type="button"
-                                disabled={busy || !sourceItem?.estimate_id || userRateValue == null}
-                                onClick={() => void saveUserRate(s, sourceItem)}
-                                style={buttonStyle(
-                                  "primary",
-                                  busy || !sourceItem?.estimate_id || userRateValue == null,
-                                )}
-                              >
-                                Сохранить норму
-                              </button>
-                              {!sourceItem?.estimate_id ? (
-                                <span style={{ color: "var(--red)" }}>
-                                  Нет связи с исходной строкой сметы
-                                </span>
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" && userRateValue != null && s.can_create_user_rate) {
+                                      void saveUserRate(s);
+                                    }
+                                  }}
+                                  placeholder="0,85"
+                                  inputMode="decimal"
+                                  aria-label={`Трудозатраты на 1 ${rowUnitLabel}`}
+                                  style={{ ...inputLike, width: 90, height: 30, padding: "4px 7px" }}
+                                />
+                                <span>чел.-ч</span>
+                                <button
+                                  type="button"
+                                  disabled={busy || !s.can_create_user_rate || userRateValue == null}
+                                  onClick={() => void saveUserRate(s)}
+                                  style={buttonStyle(
+                                    "primary",
+                                    busy || !s.can_create_user_rate || userRateValue == null,
+                                  )}
+                                >
+                                  Сохранить в мой справочник
+                                </button>
+                              </div>
+                              {!s.can_create_user_rate && s.can_create_user_rate_reason ? (
+                                <div style={{ color: "#92400e" }}>{s.can_create_user_rate_reason}</div>
                               ) : null}
+                            </div>
+                          ) : null}
+                          {needsQuantity ? (
+                            <div
+                              style={{
+                                marginTop: 6,
+                                display: "grid",
+                                gap: 7,
+                                padding: "8px 9px",
+                                border: "1px solid #f59e0b66",
+                                borderRadius: 6,
+                                background: "#fffbeb",
+                                color: "#78350f",
+                              }}
+                            >
+                              <div style={{ fontWeight: 750 }}>Норма найдена</div>
+                              <div>Укажите объём работы, чтобы рассчитать общие трудозатраты.</div>
+                              <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+                                <span style={{ fontWeight: 650 }}>Объём работы:</span>
+                                <input
+                                  value={quantityDrafts[s.id] || ""}
+                                  disabled={busy || s.can_update_quantity === false}
+                                  onChange={(e) =>
+                                    setQuantityDrafts((current) => ({
+                                      ...current,
+                                      [s.id]: e.target.value,
+                                    }))
+                                  }
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" && quantityValue != null) {
+                                      void saveRequiredQuantity(s);
+                                    }
+                                  }}
+                                  placeholder="0"
+                                  inputMode="decimal"
+                                  aria-label={`Объём работы в ${rowUnitLabel}`}
+                                  style={{ ...inputLike, width: 90, height: 30, padding: "4px 7px" }}
+                                />
+                                <span>{rowUnitLabel}</span>
+                                <button
+                                  type="button"
+                                  disabled={busy || s.can_update_quantity === false || quantityValue == null}
+                                  onClick={() => void saveRequiredQuantity(s)}
+                                  style={buttonStyle(
+                                    "primary",
+                                    busy || s.can_update_quantity === false || quantityValue == null,
+                                  )}
+                                >
+                                  Сохранить объём
+                                </button>
+                              </div>
                             </div>
                           ) : null}
                         </div>
@@ -3024,13 +3114,14 @@ function StageProductivity({
                       />
                       <UnitCell
                         value={s.unit}
+                        displayValue={s.display_unit || unitLabel(s.unit)}
                         disabled={busy}
                         onSave={(unit) => void saveField(s.id, { unit })}
                       />
                     </div>
                     <NumCell
                       value={s.output_per_day}
-                      suffix={s.unit ? `${s.unit}/см` : "/см"}
+                      suffix={s.unit ? `${rowUnitLabel}/см` : "/см"}
                       disabled={busy}
                       source={s.output_source}
                       onSave={(v) => void saveField(s.id, { output_per_day: v })}
@@ -3184,22 +3275,24 @@ function NumCell({
 
 function UnitCell({
   value,
+  displayValue,
   disabled,
   onSave,
 }: {
   value: string | null | undefined;
+  displayValue?: string | null;
   disabled?: boolean;
   onSave: (v: string | null) => void;
 }) {
-  const initial = value ?? "";
+  const initial = displayValue ?? value ?? "";
   const [text, setText] = useState(initial);
   const lastSaved = useRef(initial);
 
   useEffect(() => {
-    const next = value ?? "";
+    const next = displayValue ?? value ?? "";
     setText(next);
     lastSaved.current = next;
-  }, [value]);
+  }, [displayValue, value]);
 
   function commit() {
     const next = text.trim();
